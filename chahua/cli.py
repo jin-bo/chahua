@@ -1,46 +1,58 @@
-"""茶话室 P0 CLI —— 端到端验证 agentao 接线、人格注入、多 provider、流式输出。
+"""茶话室 CLI —— P0 端到端验证 + P1 调度（意愿打分、@ 路由、增量喂养）。
 
-P0 范围：
+P0 范围（已落）：
+- agentao 接线、人格注入、多 provider、流式输出、read-only 拦截
 
-- 单茶客（宝总），写死人格 ``personas/宝总.md``。
-- 单房间（``rooms/p0-test``），内存 transcript。
-- 用户身份从仓库顶层 ``USER.md`` 解析（``## 显示名`` 驱动 prompt 提示符）。
-- LLM 配置从 ``.env`` / 环境变量读取（``LLM_PROVIDER`` 选哪家，按前缀 ``<PROVIDER>_*``）。
-- 流式输出：每个 ``LLM_TEXT`` chunk 实时打到 stdout。
+P1 新增：
+- 三位茶客（宝总 / 玲子 / 爷叔），同一 :class:`LLMClient`（P2 才接 room.toml 分流不同模型）
+- :class:`Orchestrator` 驱动意愿打分主循环、@ 路由、增量喂养
+- 摘要每 N 条 transcript 增量产出，注入 onboarding
+- USER.md 偏好注入到打分 prompt
 
-不在 P0 范围：意愿打分、cursor / onboarding 阈值、持久化、WebSocket、Electron。
+不在 P1 范围：WebSocket、Electron、room.toml、持久化（transcript.jsonl / cursor.json / summary.jsonl）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from agentao.llm import LLMClient
 from dotenv import load_dotenv
 
+from .cursor import GuestCursor
 from .guest import TeaGuest
+from .orchestrator import Orchestrator, OrchestratorConfig
 from .room import Room
+from .scoring import IntentScorer, ScoreKind, ScoreResult
+from .summarizer import Summarizer
 from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
+
+_log = logging.getLogger(__name__)
+
+
+# 房间 ID —— P0 时叫 p0-test，P1 起改 p1-test 以避免和 P0 数据混（虽然 P1 也还没真落盘）。
+ROOM_ID = "p1-test"
+ROOM_NAME = "深夜茶话室"
+ROOM_TOPIC = "随便聊"
+ROOM_RULES = "保持中文、单条不超过 200 字、不复述别人的话。"
+
+# P1 默认三位茶客；persona 放 chahua/personas/<name>.md。
+# 顺序也是 onboarding 里显示在场列表的顺序。
+GUEST_NAMES: tuple[str, ...] = ("宝总", "玲子", "爷叔")
 
 
 # ── 路径与配置 ─────────────────────────────────────────────────────────────
 
 
 def _repo_root() -> Path:
-    """仓库根目录 = 包目录的父目录。
-
-    用 ``__file__`` 而不是 cwd —— 用户从任何地方 ``chahua`` 都能找到 USER.md 和 personas。
-    """
+    """仓库根目录 = 包目录的父目录。"""
     return Path(__file__).resolve().parent.parent
 
 
-# 已知 provider 的默认 base_url —— 用户没显式配 *_BASE_URL 时兜底。
-# 只列**真正 OpenAI-兼容**的端点；Anthropic 原生 API 不兼容 OpenAI chat-completions，
-# 用户要接 Anthropic 自己经 proxy/litellm 时显式给 *_BASE_URL。
 DEFAULT_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "deepseek": "https://api.deepseek.com/v1",
@@ -54,7 +66,7 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 def _make_llm_client() -> tuple[LLMClient, str]:
     """从环境变量构造 LLMClient，返回 ``(client, provider_name)``。
 
-    选哪家 provider 由 ``LLM_PROVIDER`` 决定（未设置或空字符串时默认 ``openai``）。
+    选哪家由 ``LLM_PROVIDER`` 决定（未设或空字符串时默认 ``openai``）。
     然后按前缀读 ``<PROVIDER>_API_KEY/_BASE_URL/_MODEL``。
     """
     provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
@@ -64,8 +76,8 @@ def _make_llm_client() -> tuple[LLMClient, str]:
     base_url = os.environ.get(f"{prefix}_BASE_URL") or DEFAULT_BASE_URLS.get(provider)
     model = os.environ.get(f"{prefix}_MODEL")
 
-    # ollama 本地跑通常不需要 API_KEY；LLMClient 不接受空字符串，给个占位。
     if provider == "ollama" and not api_key:
+        # ollama 本地不强制 API_KEY，给个占位让 LLMClient 校验过。
         api_key = "ollama"
 
     required: list[tuple[str, str | None]] = [
@@ -87,164 +99,163 @@ def _make_llm_client() -> tuple[LLMClient, str]:
     return LLMClient(api_key=api_key, base_url=base_url, model=model), provider
 
 
-# ── 喂养 prompt 拼装 ───────────────────────────────────────────────────────
+# ── 茶客装配 ───────────────────────────────────────────────────────────────
 
 
-def _strip_top_h1(md: str) -> str:
-    """去掉 USER.md 的首行 ``# xxx``（一级标题）；其余原样保留。"""
-    lines = md.splitlines()
-    if lines and lines[0].lstrip().startswith("# "):
-        lines = lines[1:]
-        # 一级标题后紧跟的空行也吃掉，避免拼出来视觉上有大空隙。
-        while lines and not lines[0].strip():
-            lines = lines[1:]
-    return "\n".join(lines)
+def _build_guests(
+    *, repo_root: Path, room_id: str, llm_client: LLMClient
+) -> list[tuple[TeaGuest, str]]:
+    """按 :data:`GUEST_NAMES` 顺序构造茶客，返回 ``[(guest, persona_md), ...]``。"""
+    out: list[tuple[TeaGuest, str]] = []
+    for name in GUEST_NAMES:
+        persona_path = repo_root / "chahua" / "personas" / f"{name}.md"
+        persona_md = persona_path.read_text(encoding="utf-8")
+        guest = TeaGuest(
+            name=name,
+            persona_md=persona_md,
+            llm_client=llm_client,
+            working_directory=repo_root / "rooms" / room_id / "guests" / name,
+            permission="read-only",
+        )
+        out.append((guest, persona_md))
+    return out
 
 
-def _render_onboarding(
-    *, user_config: UserConfig, room: Room
-) -> str:
-    """房间 onboarding 块：房间名 + 在场者 + 可选用户介绍。无内容时返回空串。
+# ── REPL 渲染 ──────────────────────────────────────────────────────────────
 
-    P1 接 cursor + 阈值触发 onboarding（§3.2.2 / §3.2.3）后，这函数继续被复用。
-    """
-    display = user_config.display_name
-    parts: list[str] = [f"[群聊·{room.name}]"]
-    if room.topic:
-        parts.append(f"当前话题：{room.topic}")
 
-    participants_rendered = ", ".join(
-        display if p == USER_SPEAKER_ID else p for p in room.participants
+def _print_banner(
+    *, user_config: UserConfig, guests: list[TeaGuest], room: Room, provider: str
+) -> None:
+    src = user_config.source
+    print("─" * 60)
+    print(f"茶话室 P1 · 房间：{room.name}")
+    print(
+        f"你的身份：{user_config.display_name}"
+        + (f"  ({src})" if src else "  (USER.md 未找到，回退 '用户')")
     )
-    parts.append(f"当前在场：{participants_rendered}（含人类参与者）。")
+    names = "、".join(g.name for g in guests)
+    # 三位茶客同一 LLMClient → 共一个 model 字段；P2 接 room.toml 后这里改成各自的。
+    model = guests[0].agent.llm.model
+    print(f"在场茶客：{names}   provider：{provider}   模型：{model}")
+    print("输入回车发送；空行 / /quit 退出；/info 看权限状态；@<名字> 直接点茶客。")
+    print("─" * 60)
 
-    if user_config.has_persona and user_config.full_md:
-        body = _strip_top_h1(user_config.full_md).strip()
-        parts.append(f"关于「{display}」（房间里的人类参与者）：\n{body}")
 
-    return "\n".join(parts) + "\n"
+def _print_permission_info(guests: list[TeaGuest]) -> None:
+    for g in guests:
+        eng = g.agent.permission_engine
+        runner = g.agent.tool_runner
+        print(
+            f"  {g.name}.permission = {g.permission}  "
+            f"(engine.mode={eng.active_mode.value}, "
+            f"tool_runner.readonly={runner.readonly_mode})"
+        )
 
 
-def _render_user_turn(
-    *, display_name: str, new_user_text: str, guest_name: str
-) -> str:
-    """单轮喂养块：``<显示名> 说：<text>`` + 发言指令。"""
-    return (
-        f"{display_name} 说：{new_user_text}\n"
-        f"\n（请以「{guest_name}」的身份发言。只说你要说的内容，不要复述别人的话，"
-        f"不要加引号或前缀。）"
-    )
+_KIND_BADGE: dict[ScoreKind, str] = {
+    ScoreKind.MENTION: "@",
+    ScoreKind.COOLDOWN: "冷却",
+    ScoreKind.ERROR: "失败",
+}
+
+
+def _format_scores(scores: list[ScoreResult]) -> str:
+    """把一轮打分明细排成 ``宝总=0.72, 玲子=@, 爷叔=冷却`` 这样。"""
+    parts: list[str] = []
+    for r in scores:
+        badge = _KIND_BADGE.get(r.kind)
+        parts.append(
+            f"{r.guest_name}={badge}" if badge else f"{r.guest_name}={r.score:.2f}"
+        )
+    return ", ".join(parts)
+
+
+def _on_turn_start(name: str, scores: list[ScoreResult]) -> None:
+    """打"\n[选中 X 打分：...]\nX: "，流式回调写到 ":" 后面。"""
+    print(f"\n[选中 {name}  打分：{_format_scores(scores)}]")
+    print(f"{name}: ", end="", flush=True)
+
+
+def _on_chunk(c: str) -> None:
+    sys.stdout.write(c)
+    sys.stdout.flush()
 
 
 # ── REPL ───────────────────────────────────────────────────────────────────
 
 
-async def _one_turn(guest: TeaGuest, ctx_message: str) -> str:
-    """跑一轮：调 guest.speak，流式打到 stdout，返回完整文本。"""
-
-    def _on_chunk(c: str) -> None:
-        sys.stdout.write(c)
-        sys.stdout.flush()
-
-    print(f"{guest.name}: ", end="", flush=True)
-    text = await guest.speak(ctx_message, on_chunk=_on_chunk)
-    print()
-    return text
-
-
-def _print_banner(
-    *, user_config: UserConfig, guest: TeaGuest, room: Room, provider: str
-) -> None:
-    src = user_config.source
-    print("─" * 60)
-    print(f"茶话室 P0 · 房间：{room.name}")
-    print(
-        f"你的身份：{user_config.display_name}"
-        + (f"  ({src})" if src else "  (USER.md 未找到，回退 '用户')")
-    )
-    print(
-        f"在场茶客：{guest.name}   provider：{provider}   模型：{guest.agent.llm.model}"
-    )
-    print("输入消息回车发送；空行或 /quit 退出；/info 看权限状态。")
-    print("─" * 60)
-
-
-def _print_permission_info(guest: TeaGuest) -> None:
-    eng = guest.agent.permission_engine
-    runner = guest.agent.tool_runner
-    print(
-        f"  {guest.name}.permission = {guest.permission}  "
-        f"(engine.mode={eng.active_mode.value}, "
-        f"tool_runner.readonly={runner.readonly_mode})"
-    )
-
-
 async def _repl() -> int:
     repo_root = _repo_root()
-    # 凭据查找顺序（高 → 低）：
-    #   1. shell export 的环境变量（永远最高，load_dotenv 默认 override=False）
-    #   2. 项目根 .env —— 本仓库专用
-    #   3. ~/.env —— 用户全局共享（多个 agentao 宿主项目复用同一份）
+    # 凭据查找顺序（高 → 低）：shell export > 项目 .env > ~/.env
+    # load_dotenv 默认 override=False，shell 的值不会被覆盖。
     load_dotenv(repo_root / ".env")
     load_dotenv(Path.home() / ".env")
 
     user_config = load_user_md(repo_root=repo_root)
     llm_client, provider = _make_llm_client()
 
-    room = Room(name="深夜茶话室", topic="随便聊")
+    room = Room(name=ROOM_NAME, topic=ROOM_TOPIC, rules=ROOM_RULES)
     room.add_participant(USER_SPEAKER_ID)
 
-    guest_name = "宝总"
-    persona_path = repo_root / "chahua" / "personas" / f"{guest_name}.md"
-    persona_md = persona_path.read_text(encoding="utf-8")
-
-    guest = TeaGuest(
-        name=guest_name,
-        persona_md=persona_md,
-        llm_client=llm_client,
-        working_directory=repo_root / "rooms" / "p0-test" / "guests" / guest_name,
-        permission="read-only",
+    guest_entries = _build_guests(
+        repo_root=repo_root, room_id=ROOM_ID, llm_client=llm_client
     )
-    room.add_participant(guest_name)
+    guests = [g for g, _ in guest_entries]
 
-    _print_banner(user_config=user_config, guest=guest, room=room, provider=provider)
+    orchestrator = Orchestrator(
+        room=room,
+        user_config=user_config,
+        scorer=IntentScorer(llm_client),
+        summarizer=Summarizer(llm_client),
+        cursor=GuestCursor(),
+        config=OrchestratorConfig(),
+    )
+    for guest, persona_md in guest_entries:
+        orchestrator.register(guest, persona_md)
 
-    is_first_turn = True
+    _print_banner(
+        user_config=user_config, guests=guests, room=room, provider=provider
+    )
+
     try:
         while True:
             try:
-                raw = input(f"{user_config.display_name}> ")
+                raw = input(f"\n{user_config.display_name}> ")
             except EOFError:
                 break
             text = raw.strip()
             if not text or text in ("/quit", "/exit", ":q"):
                 break
             if text == "/info":
-                _print_permission_info(guest)
+                _print_permission_info(guests)
                 continue
 
-            room.append(USER_SPEAKER_ID, text)
-
-            onboarding = _render_onboarding(user_config=user_config, room=room) if is_first_turn else ""
-            ctx = onboarding + _render_user_turn(
-                display_name=user_config.display_name,
-                new_user_text=text,
-                guest_name=guest_name,
-            )
-
+            before_seq = room.latest_seq
             try:
-                reply = await _one_turn(guest, ctx)
+                await orchestrator.submit_user_message(
+                    text, on_chunk=_on_chunk, on_turn_start=_on_turn_start
+                )
             except KeyboardInterrupt:
-                print("\n[中断本轮发言]")
+                print("\n[中断本回合]")
                 continue
             except Exception as e:
-                print(f"\n[{guest_name} 沉默了一下，发言失败：{e}]")
+                print(f"\n[本回合失败：{e}]")
                 continue
-
-            room.append(guest_name, reply)
-            is_first_turn = False
+            # 一回合 0 ~ max_consecutive_ai_turns 条茶客发言。
+            # 用户消息也算进 latest_seq，所以 -1 还要 > 0 才是真有茶客接话。
+            ai_replies = room.latest_seq - before_seq - 1
+            if ai_replies == 0:
+                print("[（暂无人接话，可继续说或 @ 某位茶客）]")
+            else:
+                print()  # 流式输出不主动换行，由这里收尾
     finally:
-        guest.close()
+        for guest in guests:
+            try:
+                guest.close()
+            except Exception:
+                # 关 agent 失败不应阻止其他茶客清理 —— 但要留痕，免得调试时一无所知。
+                _log.exception("guest %s close failed", guest.name)
 
     print("茶话室关张，回头见。")
     return 0

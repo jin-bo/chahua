@@ -16,7 +16,7 @@ from __future__ import annotations
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Mapping, Optional
 
 
 def _new_message_id() -> str:
@@ -96,6 +96,10 @@ class Room:
         offset = max(last_seq, 0)
         return list(self._messages[offset:])
 
+    def last_message(self) -> Optional[Message]:
+        """最后一条消息；空房间返回 None。"""
+        return self._messages[-1] if self._messages else None
+
     @property
     def latest_seq(self) -> int:
         """最后一条消息的 seq；空房间返回 0。"""
@@ -103,3 +107,18 @@ class Room:
 
     def __len__(self) -> int:
         return len(self._messages)
+
+
+def format_messages(
+    messages: Iterable[Message], display_for: Mapping[str, str]
+) -> str:
+    """渲染 ``<display_name> 说：<text>`` 多行块。
+
+    所有喂养 prompt（onboarding 末段原文 / 增量 / 打分 / 摘要）走同一格式 —— 茶客
+    人格卡（``personas/*.md``）里也明示这格式，所以**任何变更要同步改 personas**。
+    单点定义在这里，避免 4+ 处复制。
+    """
+    return "\n".join(
+        f"{display_for.get(m.speaker_id, m.speaker_id)} 说：{m.text}"
+        for m in messages
+    )

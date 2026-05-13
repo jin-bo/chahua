@@ -35,6 +35,10 @@ _DISPLAY_NAME_RE = re.compile(
     re.MULTILINE,
 )
 
+# 打分 prompt 注入的"用户偏好"段排除哪些 H2（## 显示名 已经体现在显示名字段里，
+# 反复出现在 prompt 浪费 token）。可在未来扩展更多过滤项。
+_PREFERENCE_OMIT_H2: frozenset[str] = frozenset({"显示名"})
+
 
 @dataclass(frozen=True)
 class UserConfig:
@@ -49,10 +53,31 @@ class UserConfig:
     source: Optional[Path]
     """实际命中的文件路径；都没命中则 None。供 UI / 日志显示用。"""
 
+    preferences_block: str = ""
+    """``full_md`` 中除 :data:`_PREFERENCE_OMIT_H2` 外的 ## 段，预拼好的字符串。
+
+    打分 prompt 每次都要这个；预算一次，省每轮 N 次正则。``load_user_md`` 写入。
+    无 USER.md → 空串。
+    """
+
     @property
     def has_persona(self) -> bool:
         """是否有可注入的用户角色信息（决定 onboarding 要不要附"关于「X」"块）。"""
         return self.full_md is not None
+
+
+def strip_top_h1(md: str) -> str:
+    """去掉 USER.md 的首行 ``# xxx``（一级标题）；其余原样保留。
+
+    Onboarding 与打分注入都不希望反复出现"# USER.md"这种装饰性标题 —— 这里集中处理。
+    一级标题后紧跟的空行也吃掉，避免拼出来视觉上有大空隙。
+    """
+    lines = md.splitlines()
+    if lines and lines[0].lstrip().startswith("# "):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+    return "\n".join(lines)
 
 
 def _resolve_path(
@@ -87,6 +112,27 @@ def _extract_display_name(md: str) -> Optional[str]:
         return None
     name = m.group(1).strip()
     return name or None
+
+
+def _extract_preferences_block(md: str) -> str:
+    """把 USER.md 里**用户偏好相关**的 ## 段拼成一段字符串。
+
+    切分按 H2（``## XXX``）走；跳过 :data:`_PREFERENCE_OMIT_H2` 内的标题。
+    用于打分 prompt 注入（§3.8.3）—— 让"想不想接话"考虑用户偏好（语气 / 忌讳……）。
+    """
+    body = strip_top_h1(md)
+    chunks = re.split(r"(?m)^##\s+", body)
+    kept: list[str] = []
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        title_line, _, rest = c.partition("\n")
+        title = title_line.strip()
+        if title in _PREFERENCE_OMIT_H2:
+            continue
+        kept.append(f"## {title}\n{rest.strip()}")
+    return "\n\n".join(kept).strip()
 
 
 def load_user_md(
@@ -126,4 +172,5 @@ def load_user_md(
         display_name=display or DEFAULT_DISPLAY_NAME,
         full_md=md,
         source=path,
+        preferences_block=_extract_preferences_block(md),
     )
