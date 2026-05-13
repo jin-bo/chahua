@@ -60,11 +60,16 @@ TurnStartHook = Callable[[str, list[ScoreResult]], None]
 class OrchestratorConfig:
     """房间编排参数。字段对应 ``room.toml`` ``[room]`` 段（P2 才会真读 toml）。"""
 
-    want_threshold: float = 0.55
-    """打分 ≥ 此值才允许发言。"""
+    want_threshold: float = 0.45
+    """打分 ≥ 此值才允许发言。0.55 起步时招呼/中性话题全员低于阈值导致冷场（实测），
+    降到 0.45 让常见话题至少有一人接住；同时配合 ``threshold_decay_per_turn`` 防 AI 跑飞。"""
 
     max_consecutive_ai_turns: int = 4
-    """连续 AI 发言数上限；达到后强制让麦给用户。"""
+    """连续 AI 发言数上限；达到后强制让麦给用户。一次"同回合 1~2 人抢话"算 1~2 轮。"""
+
+    max_speakers_per_pick: int = 2
+    """同一回合最多几位茶客同时抢话。设计文档 §3.3 「取分数 ≥ 阈值的前 1~2 名」。
+    设 1 退回 P1 初版"一回合一人"行为。"""
 
     speaker_cooldown_turns: int = 1
     """刚发言的茶客在多少"AI 轮"内打分自动归零（防止自己接自己）。"""
@@ -194,22 +199,32 @@ class Orchestrator:
             )
             if pick is None:
                 return
-            guest_name, scores = pick
-            if on_turn_start is not None:
-                try:
-                    on_turn_start(guest_name, scores)
-                except Exception:
-                    _log.exception("on_turn_start hook raised")
-            await self._let_speak(guest_name, on_chunk=on_chunk)
-            self._consecutive_ai_turns += 1
-            self._rounds_without_user_or_mention += 1
+            winners, scores = pick
+            # 同回合"抢话"的多位茶客串行发言；第 2 位发言时，第 1 位的回复已经在
+            # transcript 里，靠 cursor 增量自然喂入。每位都计 1 轮（max 卡死整体上限）。
+            for guest_name in winners:
+                if self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
+                    break
+                if on_turn_start is not None:
+                    try:
+                        on_turn_start(guest_name, scores)
+                    except Exception:
+                        _log.exception("on_turn_start hook raised")
+                await self._let_speak(guest_name, on_chunk=on_chunk)
+                self._consecutive_ai_turns += 1
+                self._rounds_without_user_or_mention += 1
+            # 摘要 / 冷却递减每"pick 周期"一次（不是每个发言者一次）—— 否则同回合 2 位
+            # 同时说后第一位的冷却被立刻 tick 掉，下个 pick 就能再次入选，违背"刚发言不接自己"。
             self._kick_summarize()
             self._tick_cooldown()
 
     async def _pick_next_speaker(
         self, *, respect_at_mention: bool
-    ) -> Optional[tuple[str, list[ScoreResult]]]:
-        """选下一位发言者；返回 ``(name, all_scores)``，选不出 → ``None``。
+    ) -> Optional[tuple[list[str], list[ScoreResult]]]:
+        """选下一回合发言者；返回 ``(winners, all_scores)``，选不出 → ``None``。
+
+        ``winners`` 是按分数倒序的茶客名列表，长度 1 ~ ``max_speakers_per_pick``
+        （设计文档 §3.3「取分数 ≥ 阈值的前 1~2 名」）。@ 提及命中时只返回 1 位。
 
         ``respect_at_mention=True``：检查 transcript 最后一条（用户消息）里的 ``@``。
         AI 间接力时（``_consecutive_ai_turns > 0``）不再认 @ —— 否则一个茶客在自己发言里
@@ -220,7 +235,7 @@ class Orchestrator:
             mention = self._find_user_mention()
             if mention is not None and self._cooldown.get(mention, 0) == 0:
                 self._rounds_without_user_or_mention = 0
-                return mention, [
+                return [mention], [
                     ScoreResult(
                         guest_name=mention, score=1.0, kind=ScoreKind.MENTION
                     )
@@ -258,8 +273,9 @@ class Orchestrator:
         passed = [r for r in results if r.score >= threshold]
         if not passed:
             return None
-        winner = max(passed, key=lambda r: r.score)
-        return winner.guest_name, results
+        passed.sort(key=lambda r: r.score, reverse=True)
+        winners = [r.guest_name for r in passed[: self.config.max_speakers_per_pick]]
+        return winners, results
 
     async def _score_one(
         self, guest_name: str, transcript_text: str
