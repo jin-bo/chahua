@@ -29,6 +29,15 @@ _MODE_MAP: dict[str, PermissionMode] = {
 VALID_MODES: tuple[str, ...] = tuple(_MODE_MAP)
 
 
+def is_valid_mode(mode: str) -> bool:
+    """字符串是否是茶话室暴露的合法权限模式。
+
+    供 config 等模块做 toml-time 前置校验用；``apply_permission_mode`` 内部还会
+    再校验一次，所以这里只是"早报错"而不是兜底。
+    """
+    return mode in _MODE_MAP
+
+
 def apply_permission_mode(agent: "Agentao", mode: Union[str, PermissionMode]) -> None:
     """同步设置 PermissionEngine 和 ToolRunner 的两层只读拦截。
 

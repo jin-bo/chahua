@@ -1,0 +1,26 @@
+# P1.5 默认房间配置。chahua 不带 --room 参数时就用这份。
+#
+# 严格只支持下面这些字段。其它字段（provider / model / isolation / [scoring] /
+# [summary] / transport / extra_mcp_servers / 调度参数）一律会报错 —— 见 docs/
+# DESIGN.md §6 P1.5 行的"显式后压到 P4 的字段"列表。
+
+[room]
+name  = "深夜茶话室"
+topic = "随便聊"
+rules = "保持中文、单条不超过 200 字、不复述别人的话。"
+# user_md = "USER.md"   # 可选；默认走 user_md.py 的三级回退（rooms/<id>/USER.md → 顶层 USER.md）
+
+[[guest]]
+name       = "宝总"
+persona    = "chahua/personas/宝总.md"
+permission = "read-only"
+
+[[guest]]
+name       = "玲子"
+persona    = "chahua/personas/玲子.md"
+permission = "read-only"
+
+[[guest]]
+name       = "爷叔"
+persona    = "chahua/personas/爷叔.md"
+permission = "read-only"

@@ -14,9 +14,13 @@ wheels/
 .env.*
 !.env.example
 
-# Runtime data (per docs/DESIGN.md §3.7)
-rooms/
+# Runtime data (per docs/DESIGN.md §3.7) —— workspaces / transcripts / cursors。
+# room.toml 是 shipped config，跟代码走；房间运行时数据全部忽略。
+# 裸 `guests/` 同时盖住顶层 isolation=global 茶客 workspace 和 rooms/*/guests/ 嵌套目录。
 guests/
+rooms/**/transcript.jsonl
+rooms/**/summary.jsonl
+rooms/**/cursor.json
 
 # Local agentao residue (from previous experiments in this dir, if any)
 .agentao/

@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ._paths import resolve_under
+
 # 稳定 ID —— transcript.jsonl 的 speaker 字段存这个，渲染时再查 display_name。
 # 改 USER.md 改名不会污染历史 jsonl（§3.8.3）。
 USER_SPEAKER_ID = "user"
@@ -91,8 +93,7 @@ def _resolve_path(
     if explicit:
         # explicit 可以是绝对路径，也可以是相对于 repo_root 的相对路径
         # （room.toml 在 rooms/<id>/ 下，但 user_md 路径以 repo 根为基准更直观）。
-        p = Path(explicit)
-        candidates.append(p if p.is_absolute() else (repo_root / p))
+        candidates.append(resolve_under(repo_root, explicit))
 
     if room_dir is not None:
         candidates.append(room_dir / "USER.md")
