@@ -3,10 +3,10 @@
 多 Agent 群聊「茶话室」桌面 App —— 用户和多个由 [agentao](../agentao) 驱动的 AI「茶客」
 在同一个聊天室里对话。完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
-当前进度：**P3.1 桌面壳骨架**。
+当前进度：**P3.2.1 打字机 + 打分徽章**。
 底层（P0–P2.3）已稳：三茶客 + 意愿打分调度 + 事件 envelope + transcript/summary/cursor 续聊 + USER.md 角色。
-桌面壳 P3.1 能做的：拉 sidecar / 建窗 / 一条 message_end 一行 / 回车发言。
-打字机流式 / @ 补全 / 茶客侧栏 / 停止按钮 / 打包 .dmg 都在 P3.2–P3.3。
+桌面壳能做的（P3.1+P3.2.1）：拉 sidecar / 建窗 / 流式打字机 / turn_start 顶部打分横条 / speaker 后挂 score 徽章 / cancelled & error 红字封口 / 回车发言。
+@ 补全、茶客侧栏、停止按钮、ws 重连、打包 .dmg 在 P3.2.2 / P3.2.3 / P3.3。
 
 ## 跑起来
 

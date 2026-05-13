@@ -29,3 +29,13 @@ export const Inbound = Object.freeze({
   // CANCEL: "cancel" —— P3.3 加停止按钮时启用，与 chahua/server.py 的
   // _handle_inbound 同步加路由。
 });
+
+// 镜像 chahua/scoring.py::ScoreKind —— turn_start.data.scores[i].kind 取值。
+// 与 EventType / Status 同性质：wire 协议常量，不是 presentation。
+// label / 颜色 / 是否显示数字这些渲染决定留给 renderer，不污染本文件。
+export const ScoreKind = Object.freeze({
+  SCORED: "scored",
+  MENTION: "mention",
+  COOLDOWN: "cooldown",
+  ERROR: "error",
+});

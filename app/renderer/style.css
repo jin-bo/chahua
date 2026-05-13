@@ -13,8 +13,59 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #messages li.error .speaker { color: #c00; }
 #messages li.error .text { color: #c00; }
 
+/* P3.2.1：turn_start 横条 —— 本轮打分明细。
+   颜色与 body 背景拉开（之前 #f3eee2 太接近 #fbf8f1 看不见），加左竖条 + 字号
+   提一格，让用户扫一眼就找到"为啥这位说话"。 */
+#messages li.turn-banner {
+  font-size: 12px;
+  color: #5a6478;
+  padding: 6px 10px;
+  margin: 8px 0;
+  background: #e8edf5;
+  border-left: 3px solid #7a9bc7;
+  border-radius: 2px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+#messages li.turn-banner::before {
+  content: "打分 · ";
+  color: #7a9bc7;
+  font-weight: 600;
+}
+
+/* P3.2.1：speaker 后面紧跟的得分小标签。 */
+.score-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 5px;
+  margin-right: 6px;
+  border-radius: 8px;
+  background: #ece5d2;
+  color: #888;
+  vertical-align: 1px;
+}
+/* kind=mention/cooldown/error 三档语义色，与正常打分（数字）拉开。 */
+.score-badge[data-kind="mention"] { background: #d8ecd8; color: #265; }
+.score-badge[data-kind="cooldown"] { background: #e5e5e5; color: #777; }
+.score-badge[data-kind="error"] { background: #f5dada; color: #844; }
+
+/* P3.2.1：streaming 中的消息末尾闪烁光标，message_end 来时移除 .streaming。 */
+.text.streaming::after {
+  content: "▌";
+  margin-left: 1px;
+  color: #888;
+  animation: chahua-cursor-blink 1s steps(2, start) infinite;
+}
+@keyframes chahua-cursor-blink {
+  to { visibility: hidden; }
+}
+/* 用户系统打开"减少动态"时光标静态显示 —— content 保留，给视觉上"还在打字"的位置感。 */
+@media (prefers-reduced-motion: reduce) {
+  .text.streaming::after { animation: none; }
+}
+
 #composer { display: flex; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
 #text { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
 #text:focus { outline: none; border-color: #888; }
-button { margin-left: 8px; padding: 8px 16px; border: none; border-radius: 4px; background: #444; color: #fff; cursor: pointer; }
-button:disabled { background: #aaa; cursor: not-allowed; }
+/* button 选择器加 #composer scope，避免 P3.2.2 加 sidebar 时按钮被这套深色样式污染。 */
+#composer button { margin-left: 8px; padding: 8px 16px; border: none; border-radius: 4px; background: #444; color: #fff; cursor: pointer; }
+#composer button:disabled { background: #aaa; cursor: not-allowed; }
