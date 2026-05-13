@@ -37,7 +37,7 @@ from websockets.exceptions import ConnectionClosed
 
 from ._paths import resolve_under
 from .config import RoomConfigError
-from .events import ChahuaEnvelope, EnvelopeSink
+from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink
 from .session import (
     DEFAULT_ROOM_REL,
     RoomSession,
@@ -131,6 +131,7 @@ class ChahuaServer:
 
         writer = asyncio.create_task(self._writer(ws, outbound), name="ws-writer")
         try:
+            self._emit_room_info(sink)
             async for raw in ws:
                 if not isinstance(raw, str):
                     # 二进制帧不在协议里（envelope 是 JSON 文本）。
@@ -163,6 +164,42 @@ class ChahuaServer:
         except ConnectionClosed:
             # 客户端先断 —— 静默退出；reader 端也会感知到。
             return
+
+    def _emit_room_info(self, sink: EnvelopeSink) -> None:
+        """ws 连上即下发一次 ``room_info`` —— 前端拿来装 sidebar / @ 补全候选。
+
+        茶客信息从 ``room_config.guests``（``GuestConfig``）取而非运行时
+        ``session.guests``（``TeaGuest``）—— 与 ``rc.name`` / ``rc.topic`` 同走声明源；
+        P4 加 ``[[guest]].isolation`` 字段后这里读真值，前端按 ``data-isolation`` 渲染
+        无需改。P3.2.2 内 ``isolation="room"`` hardcode 占位。
+
+        副作用：runtime 期 ``permission`` 切换（P4 才支持）不会反映到 sidebar —— 届时加
+        ``room_info_delta`` wire 帧增量下发。
+        """
+        rc = self._session.room_config
+        guests = [
+            {
+                "name": gc.name,
+                "permission": gc.permission,
+                "isolation": "room",
+            }
+            for gc in rc.guests
+        ]
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=ChahuaEventType.ROOM_INFO,
+                data={
+                    "room_name": rc.name,
+                    "topic": rc.topic,
+                    "guests": guests,
+                    "user_display_name": self._session.user_config.display_name,
+                },
+            )
+        )
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息。本期只处理 ``user_message``。"""

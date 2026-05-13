@@ -6,6 +6,47 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .status.error { color: #c00; }
 .status.ok { color: #690; }
 
+/* P3.2.2：sidebar | messages 横向布局；composer 横跨底。 */
+#main { flex: 1; display: flex; min-height: 0; }
+
+#sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  padding: 12px;
+  border-right: 1px solid #eee;
+  background: #f5f1e6;
+  overflow-y: auto;
+}
+.sidebar-section { margin-bottom: 16px; }
+.sidebar-title { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.sidebar-room-name { font-weight: 600; color: #555; }
+.sidebar-room-topic { font-size: 12px; color: #888; margin-top: 2px; }
+#guests { list-style: none; margin: 0; padding: 0; }
+#guests li { padding: 4px 0; font-size: 13px; }
+#guests li .guest-name { color: #444; }
+#guests li .permission-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: #ddd;
+  color: #555;
+}
+#guests li .permission-badge[data-permission="read-only"] { background: #e0e0e0; color: #666; }
+#guests li .permission-badge[data-permission="workspace-write"] { background: #fde9c8; color: #864; }
+#guests li .permission-badge[data-permission="full-access"] { background: #f5d0d0; color: #844; }
+/* isolation 占位徽章 —— P4 接真值时这里读 data-isolation 区分 room / global。 */
+#guests li .isolation-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: #dfe7ec;
+  color: #467;
+}
+
 #messages { flex: 1; list-style: none; margin: 0; padding: 8px 12px; overflow-y: auto; }
 #messages li { padding: 4px 0; line-height: 1.5; word-wrap: break-word; }
 #messages li .speaker { font-weight: 600; margin-right: 8px; color: #555; }
@@ -13,9 +54,7 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #messages li.error .speaker { color: #c00; }
 #messages li.error .text { color: #c00; }
 
-/* P3.2.1：turn_start 横条 —— 本轮打分明细。
-   颜色与 body 背景拉开（之前 #f3eee2 太接近 #fbf8f1 看不见），加左竖条 + 字号
-   提一格，让用户扫一眼就找到"为啥这位说话"。 */
+/* P3.2.1：turn_start 横条 —— 本轮打分明细。 */
 #messages li.turn-banner {
   font-size: 12px;
   color: #5a6478;
@@ -43,7 +82,6 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   color: #888;
   vertical-align: 1px;
 }
-/* kind=mention/cooldown/error 三档语义色，与正常打分（数字）拉开。 */
 .score-badge[data-kind="mention"] { background: #d8ecd8; color: #265; }
 .score-badge[data-kind="cooldown"] { background: #e5e5e5; color: #777; }
 .score-badge[data-kind="error"] { background: #f5dada; color: #844; }
@@ -58,14 +96,44 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 @keyframes chahua-cursor-blink {
   to { visibility: hidden; }
 }
-/* 用户系统打开"减少动态"时光标静态显示 —— content 保留，给视觉上"还在打字"的位置感。 */
 @media (prefers-reduced-motion: reduce) {
   .text.streaming::after { animation: none; }
 }
 
 #composer { display: flex; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
-#text { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+#composer-wrap { position: relative; flex: 1; }
+#text { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
 #text:focus { outline: none; border-color: #888; }
-/* button 选择器加 #composer scope，避免 P3.2.2 加 sidebar 时按钮被这套深色样式污染。 */
 #composer button { margin-left: 8px; padding: 8px 16px; border: none; border-radius: 4px; background: #444; color: #fff; cursor: pointer; }
 #composer button:disabled { background: #aaa; cursor: not-allowed; }
+
+/* P3.2.2：@ 补全 dropdown —— 浮在输入框上方，键盘 ↑↓ Enter 选中。 */
+.mention-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 10;
+}
+.mention-dropdown li {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.mention-dropdown li.active,
+.mention-dropdown li:hover { background: #f0e8d4; }
+.mention-dropdown li .mention-name { color: #333; }
+.mention-dropdown li .mention-permission {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #999;
+}

@@ -8,6 +8,7 @@
 // presentation 层概念，跟 envelope status 形似而语义无关。
 
 export const EventType = Object.freeze({
+  ROOM_INFO: "room_info",
   TURN_START: "turn_start",
   MESSAGE_START: "message_start",
   MESSAGE_DELTA: "message_delta",

@@ -11,11 +11,16 @@ agentao 的原生 :class:`agentao.transport.AgentEvent` **不带** 这些字段�
 
 **type 与发生位置**：
 
+- ``room_info``：``server.py`` 在 ws 连上时一次性下发，给前端装 sidebar / @ 补全；
+  不属于任何 turn（``turn_id`` 为 ``None``）。
 - ``turn_start`` / ``turn_end``：orchestrator 合成；turn 对应一次 pick（top-1~2 抢话）。
 - ``message_start`` / ``message_end``：``TeaGuest.speak()`` 的 ``try / except / finally``
   外层合成 —— 保证 start 必有 end（status 三选一）。
 - ``message_delta`` / ``guest_thinking`` / ``tool_start`` / ``tool_complete``：
   ``ChahuaTransport`` 从对应 agentao 事件转译。
+
+**turn_id 可空**：从 P3.2.2 起，连接级事件（``room_info`` 等）``turn_id=None``；
+其余事件路径不变，仍由 orchestrator/transport 在 bind 时塞具体值。
 
 **room_id**：P2.2 没有稳定 room id（room.toml 没字段），envelope 里塞 ``room.name``。
 P4 加 ``[room].id`` 后换稳定 ID（display name 可变；envelope 路由不该依赖）。
@@ -43,6 +48,7 @@ SCHEMA_VERSION = 1
 class ChahuaEventType(str, Enum):
     """前端事件类型。值是 JSON-friendly 字符串，envelope 落盘 / 上线时直接用 ``.value``。"""
 
+    ROOM_INFO = "room_info"
     TURN_START = "turn_start"
     MESSAGE_START = "message_start"
     MESSAGE_DELTA = "message_delta"
@@ -88,7 +94,7 @@ class ChahuaEnvelope:
     """
 
     room_id: str
-    turn_id: str
+    turn_id: Optional[str]
     guest_name: Optional[str]
     message_id: Optional[str]
     type: ChahuaEventType

@@ -10,9 +10,25 @@
 </head>
 <body>
   <div id="status" class="status">连接中…</div>
-  <ul id="messages" aria-live="polite"></ul>
+  <div id="main">
+    <aside id="sidebar" aria-label="房间成员">
+      <div class="sidebar-section">
+        <div class="sidebar-title">房间</div>
+        <div id="room-name" class="sidebar-room-name">—</div>
+        <div id="room-topic" class="sidebar-room-topic"></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">茶客</div>
+        <ul id="guests"></ul>
+      </div>
+    </aside>
+    <ul id="messages" aria-live="polite"></ul>
+  </div>
   <form id="composer">
-    <input id="text" type="text" placeholder="说点什么…  (@ 茶客名 直接点)" autocomplete="off" autofocus>
+    <div id="composer-wrap">
+      <input id="text" type="text" placeholder="说点什么…  (@ 茶客名 直接点)" autocomplete="off" autofocus>
+      <ul id="mention-dropdown" class="mention-dropdown" hidden></ul>
+    </div>
     <button type="submit">发送</button>
   </form>
   <script type="module" src="renderer.js"></script>
