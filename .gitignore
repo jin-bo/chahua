@@ -25,6 +25,7 @@ rooms/**/cursor.json
 # Local agentao residue (from previous experiments in this dir, if any)
 .agentao/
 agentao.log
+agentao.log.*
 
 # Macs being Macs
 .DS_Store
