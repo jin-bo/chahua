@@ -13,14 +13,14 @@ rules = "保持中文、单条不超过 200 字、不复述别人的话。"
 [[guest]]
 name       = "宝总"
 persona    = "chahua/personas/宝总.md"
-permission = "read-only"
+permission = "workspace-write"
 
 [[guest]]
 name       = "玲子"
 persona    = "chahua/personas/玲子.md"
-permission = "read-only"
+permission = "workspace-write"
 
 [[guest]]
 name       = "爷叔"
 persona    = "chahua/personas/爷叔.md"
-permission = "read-only"
+permission = "workspace-write"
