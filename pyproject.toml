@@ -1,0 +1,23 @@
+[project]
+name = "chahua"
+version = "0.1.0"
+description = "茶话室 —— 多 Agent 群聊桌面 App（P0 骨架）"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agentao",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+chahua = "chahua.cli:main"
+
+[tool.uv.sources]
+agentao = { path = "../agentao", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["chahua"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

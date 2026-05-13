@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data (per docs/DESIGN.md §3.7)
+rooms/
+guests/
+
+# Local agentao residue (from previous experiments in this dir, if any)
+.agentao/
+agentao.log
+
+# Macs being Macs
+.DS_Store
