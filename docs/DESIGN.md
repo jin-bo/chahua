@@ -546,7 +546,7 @@ chahua/
 | **P1.5 房间配置文件（最小版）** | `config.py` 用 `tomllib` 读 `rooms/<id>/room.toml`，支持 `[room]`（name/topic/rules）与 `[[guest]]`（name/persona/permission）；CLI 改 `chahua --room <dir>`，未知 permission 走现有 `permissions.VALID_MODES` 报错，缺/坏 toml 回退当前硬编码默认。**显式后压到 P4 的字段**：`[[guest]].provider/base_url/model`（每茶客一份 LLMClient，触及打分/摘要共用 client 的假设）、`isolation = "room"\|"global"`、`[scoring]` / `[summary]` 模型分流、`transport = "embed"\|"acp"`、运行时增删茶客、`extra_mcp_servers` | room.toml 编辑后茶客权限即时生效；非法 permission 报错清晰；缺/坏文件回退到当前 P1 行为 |
 | **P2.1 持久化** | `Room` / `Summarizer` / `GuestCursor` 接 `rooms/<id>/{transcript,summary}.jsonl` + `cursor.json`；jsonl append-only + 加载时跳过坏行，cursor.json 原子重写。茶客自己的 `.agentao/` 由 agentao runtime 走 `working_directory` 自管，无需茶话室主动写 | quit → 重启 chahua --room <dir> 续聊；transcript 文件可手编后续；崩溃只伤最后一行 |
 | **P2.2 事件 envelope** | `chahua.events`（envelope dataclass + 事件枚举）；`ChahuaTransport`（`SdkTransport` 子类）转译 LLM_TEXT / THINKING / TOOL_* → 茶话室事件并维护 partial_text；`TeaGuest` 持 `Room` 引用，`speak()` 用 nested try / except / finally 合成 `message_start` / `message_end`（status: ok / cancelled / error，CancelledError 与 KeyboardInterrupt 都按 cancelled 走）；orchestrator 合成 `turn_start({scores})` / `turn_end({next})`，turn 对应一次 pick（top-1~2 抢话）；`agentao.CancellationToken` 走 `speak(..., cancellation_token=)` 透传给 `arun`；CLI `_CliRenderer` 单 sink 渲染回打字流，GUEST_THINKING / TOOL_* 默认静默 | message_start 必有对应 message_end；ctrl-C 中断单条发言后 envelope 仍配对；partial_text 落 `message_end.data` 不入 transcript |
-| **P2.3 WebSocket server** | 本地 WebSocket 端口、envelope 下行、用户消息上行；`server.py` 桥接 Room ↔ 前端。**消费者要等 P3**，本期只能 wscat 手测 | 前后端可分离 |
+| **P2.3 WebSocket server** | `chahua/session.py`（`build_room_session` 把房间装配从 CLI 抽出，CLI 与 server 共用）；`chahua/server.py` 用 `websockets` 起本地 ws（默认 127.0.0.1:7860，`--port` / `CHAHUA_WS_PORT` 覆盖）；服务端 → 客户端每帧一条 `envelope.to_dict()` JSON（含 `schema_version`）；客户端 → 服务端 `{"type": "user_message", "text": "..."}`；session 跨多次客户端连接复用；单客户端语义（第二个连接 1008 拒）；SIGINT/SIGTERM 优雅关停；`chahua-server` 入口加进 `pyproject [project.scripts]`。**显式后压到 P3**：多客户端广播、reconnect-replay、mid-stream 取消；**后压到 P4**：TLS、auth、多房间路由 | wscat 连上能看到 envelope JSON 流；单客户端策略生效；服务端断电后 transcript.jsonl 保留 |
 | **P3 Electron** | main 进程拉起 python、renderer 聊天 UI（打字机、茶客侧栏、@提及、isolation 标志） | 桌面 App 可用、用户能看到哪个茶客跨房间记忆 |
 | **P4 打磨 + ACP 异构茶客** | 房间配置文件完善、人格画廊、运行时增删茶客、可选「主持人」agent、工具权限预设、删除房间/清茶客记忆 UI；**抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip** | 成品；并接入第一个非 agentao 的 ACP 茶客作为验收 |
 
@@ -559,6 +559,14 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-05-13（P2.2 完工后）** —— P2.3 落地决策：
+  - **`chahua/session.py` 抽出** —— 房间装配（room.toml → Room + Orchestrator + 三茶客）从 `cli._repl` 内联段提到 `build_room_session`。CLI 与 server 走同一口径，加 SDK-style 调用口（未来嵌入第三方宿主）。
+  - **单客户端语义** —— 服务端有人在线时第二连接 `close(1008)` 拒掉。设计是"先把 envelope JSON wire shape 跑通"，多端广播是 P3 Electron 进场后的功能（届时改成 broadcast queue + per-client filter）。
+  - **session 跨连接复用** —— 客户端断开后 `RoomSession` 不销毁，下次连上是续聊（与 `chahua --quit → 重启` 同语义）。
+  - **wire 协议**：服务端 → 客户端是纯 envelope JSON（一帧一条，含 `schema_version`）；客户端 → 服务端目前只识 `{"type": "user_message", "text": "..."}`，未来 type（cancel / set-permission / etc.）来时旧版本服务端 WARN + 忽略，不踢连接。非 JSON / 二进制帧 → `close(1003)`。
+  - **绑定 127.0.0.1** —— 茶话室定位单机桌面 App；`--host 0.0.0.0` 暴露给局域网是用户显式选择的事（也基本只在 P4 多用户场景才会想用）。
+  - **mid-stream 取消后压到 P3** —— 客户端断线只影响新输入；当前 turn 跑完才结束。Electron 进场后需要前端一个 "stop" 按钮，那时再加 `{"type":"cancel","turn_id":"..."}` + `CancellationToken` 路由。
 
 - **2026-05-13（P2.1 完工后）** —— P2.2 落地决策：
   - **TeaGuest 持 Room 引用** —— `speak()` 内部直接 `self.room.append(text)`，让"消息生命周期边界"完全收在 `speak()` 一个函数的 try/except/finally 里（§3.5.2 示例的精神）。orchestrator 收 `Optional[Message]` 返回值决定 cursor / cooldown 更新。

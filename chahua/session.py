@@ -1,0 +1,200 @@
+"""房间会话装配（P2.3 抽出）。
+
+P0~P2.2 期把 room.toml + USER.md + 凭据 → :class:`Room` + :class:`Orchestrator`
++ 三茶客 的装配段写在 ``cli._repl`` 里。P2.3 收成 :func:`build_room_session`，
+CLI 与 :mod:`chahua.server` 共用同一口径；同时给 SDK-style 调用（未来 P4 / 第三方
+嵌入）留了不经 argparse / 不经 ``input`` 的入口。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from agentao.llm import LLMClient
+from dotenv import load_dotenv
+
+from .config import RoomConfig, load_room_config
+from .cursor import GuestCursor
+from .guest import TeaGuest
+from .orchestrator import Orchestrator, OrchestratorConfig
+from .room import Room
+from .scoring import IntentScorer
+from .summarizer import Summarizer
+from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
+
+_log = logging.getLogger(__name__)
+
+
+# 默认房间目录（相对 :func:`find_repo_root`）。CLI 与 server 共用，避免两边各自硬编。
+DEFAULT_ROOM_REL: Path = Path("rooms/p1-test")
+
+
+# LLMClient provider 选择。``LLM_PROVIDER`` 未设或空串默认 openai。
+_DEFAULT_BASE_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "ollama": "http://localhost:11434/v1",
+}
+
+
+def find_repo_root() -> Path:
+    """仓库根目录 = 包目录的父目录。函数名避开 ``build_room_session(repo_root=...)``
+    参数名的局部 shadow。
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def load_env_files(root: Path) -> None:
+    """凭据查找顺序（高 → 低）：shell export > 项目 .env > ~/.env。
+
+    ``load_dotenv`` 默认 ``override=False``，shell 的值不会被覆盖。
+    """
+    load_dotenv(root / ".env")
+    load_dotenv(Path.home() / ".env")
+
+
+def _make_llm_client() -> tuple[LLMClient, str]:
+    """从环境变量构造 LLMClient，返回 ``(client, provider_name)``。
+
+    选哪家由 ``LLM_PROVIDER`` 决定（未设或空字符串时默认 ``openai``）。
+    然后按前缀读 ``<PROVIDER>_API_KEY/_BASE_URL/_MODEL``。
+    """
+    provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
+    prefix = provider.upper().replace("-", "_")
+
+    api_key = os.environ.get(f"{prefix}_API_KEY")
+    base_url = os.environ.get(f"{prefix}_BASE_URL") or _DEFAULT_BASE_URLS.get(provider)
+    model = os.environ.get(f"{prefix}_MODEL")
+
+    if provider == "ollama" and not api_key:
+        # ollama 本地不强制 API_KEY，给个占位让 LLMClient 校验过。
+        api_key = "ollama"
+
+    required: list[tuple[str, str | None]] = [
+        (f"{prefix}_API_KEY", api_key),
+        (f"{prefix}_MODEL", model),
+    ]
+    if not base_url:
+        required.append((f"{prefix}_BASE_URL", base_url))
+    missing = [n for n, v in required if not v]
+    if missing:
+        known = ", ".join(sorted(_DEFAULT_BASE_URLS.keys()))
+        raise SystemExit(
+            f"LLM_PROVIDER={provider!r}：缺少环境变量 {', '.join(missing)}。\n"
+            f"先复制 .env.example → .env 并填入真实值，或写到 ~/.env，或 shell export。\n"
+            f"已知 provider（自带默认 base_url）：{known}。\n"
+            f"其它 provider 可用，但 BASE_URL 必须显式给。"
+        )
+
+    return LLMClient(api_key=api_key, base_url=base_url, model=model), provider
+
+
+def _build_guests(
+    room_config: RoomConfig, llm_client: LLMClient, room: Room
+) -> list[tuple[TeaGuest, str]]:
+    """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
+
+    每位茶客的 ``working_directory`` 走 :meth:`GuestConfig.workspace_in`（约定
+    ``<room_dir>/guests/<name>/``）。
+    """
+    out: list[tuple[TeaGuest, str]] = []
+    for gc in room_config.guests:
+        persona_md = gc.read_persona()
+        guest = TeaGuest(
+            name=gc.name,
+            persona_md=persona_md,
+            llm_client=llm_client,
+            working_directory=gc.workspace_in(room_config.room_dir),
+            room=room,
+            permission=gc.permission,
+        )
+        out.append((guest, persona_md))
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class RoomSession:
+    """一次房间装配的全部句柄。
+
+    ``frozen=True`` 防止调用方重绑 ``orchestrator`` / ``room`` 等核心句柄（茶客生命周期
+    都挂在它们上面，重绑会让 LLM client / transcript 文件指针错位）。装配后调 :meth:`close`
+    释放每位茶客；CLI 走 ``try / finally``，server 在服务退出前调一次即可。
+    """
+
+    room: Room
+    orchestrator: Orchestrator
+    guests: list[TeaGuest]
+    user_config: UserConfig
+    room_config: RoomConfig
+    provider: str
+
+    def close(self) -> None:
+        for guest in self.guests:
+            try:
+                guest.close()
+            except Exception:
+                # 一位关失败不该阻止其他茶客清理 —— 但要留痕。
+                _log.exception("guest %s close failed", guest.name)
+
+
+def build_room_session(
+    room_dir: Path,
+    repo_root: Path,
+    *,
+    orchestrator_config: Optional[OrchestratorConfig] = None,
+) -> RoomSession:
+    """读 ``room_dir/room.toml`` 装配整套房间会话。LLM 凭据走环境变量。
+
+    抛 :class:`chahua.config.RoomConfigError` 当 toml 缺/错；抛 SystemExit 当 LLM
+    凭据缺失（与 P0~P2.2 行为一致 —— 缺凭据没法跑，早炸早好）。
+    """
+    room_config = load_room_config(room_dir, repo_root=repo_root)
+    user_config = load_user_md(
+        repo_root=repo_root,
+        room_dir=room_config.room_dir,
+        explicit=room_config.user_md_override,
+    )
+    llm_client, provider = _make_llm_client()
+
+    # 持久化文件全部塞在 room_dir 下 —— 删房间一并清掉（设计文档 §3.7）。
+    transcript_path = room_config.room_dir / "transcript.jsonl"
+    summary_path = room_config.room_dir / "summary.jsonl"
+    cursor_path = room_config.room_dir / "cursor.json"
+
+    room = Room(
+        name=room_config.name,
+        topic=room_config.topic,
+        rules=room_config.rules,
+        transcript_path=transcript_path,
+    )
+    room.add_participant(USER_SPEAKER_ID)
+
+    guest_entries = _build_guests(room_config, llm_client, room)
+    guests = [g for g, _ in guest_entries]
+
+    orchestrator = Orchestrator(
+        room=room,
+        user_config=user_config,
+        scorer=IntentScorer(llm_client),
+        summarizer=Summarizer(llm_client, summary_path=summary_path),
+        cursor=GuestCursor(cursor_path=cursor_path),
+        config=orchestrator_config or OrchestratorConfig(),
+    )
+    for guest, persona_md in guest_entries:
+        orchestrator.register(guest, persona_md)
+
+    return RoomSession(
+        room=room,
+        orchestrator=orchestrator,
+        guests=guests,
+        user_config=user_config,
+        room_config=room_config,
+        provider=provider,
+    )
