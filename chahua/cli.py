@@ -1,4 +1,4 @@
-"""茶话室 CLI（P0 → P2.1）。
+"""茶话室 CLI（P0 → P2.2）。
 
 P0 范围（已落）：agentao 接线、人格注入、多 provider、流式输出、read-only 拦截
 P1 新增：意愿打分、@ 路由、增量喂养、摘要、USER.md 偏好注入
@@ -6,9 +6,12 @@ P1 调优：top-1~2 抢话、want_threshold 0.45
 P1.5 新增：``chahua --room <dir>``，房间配置走 ``room.toml``（``chahua.config``）；
 逐茶客可独立配 ``permission``（默认 read-only，可选 workspace-write / full-access）。
 P2.1 新增：transcript.jsonl / summary.jsonl / cursor.json 三件落盘 + 启动续聊。
+P2.2 新增：事件走 :class:`chahua.events.ChahuaEnvelope` —— CLI 由
+:class:`_CliRenderer` 消费 envelope，把 message_start/delta/end / turn_start/end
+渲染成与 P1 视觉一致的打字流。
 
-不在 P2.1 范围：事件 envelope 合成（P2.2）、WebSocket server（P2.3）、Electron（P3）、
-逐茶客 provider/model / isolation / [scoring]/[summary] / transport（P4）。
+不在 P2.2 范围：WebSocket server（P2.3）、Electron（P3）、逐茶客 provider/model /
+isolation / [scoring]/[summary] / transport（P4）。
 """
 
 from __future__ import annotations
@@ -26,10 +29,17 @@ from dotenv import load_dotenv
 from ._paths import resolve_under
 from .config import RoomConfig, RoomConfigError, load_room_config
 from .cursor import GuestCursor
+from .events import (
+    STATUS_CANCELLED,
+    STATUS_ERROR,
+    STATUS_OK,
+    ChahuaEnvelope,
+    ChahuaEventType,
+)
 from .guest import TeaGuest
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .room import Room
-from .scoring import IntentScorer, ScoreKind, ScoreResult
+from .scoring import IntentScorer, ScoreKind
 from .summarizer import Summarizer
 from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
 
@@ -97,7 +107,7 @@ def _make_llm_client() -> tuple[LLMClient, str]:
 
 
 def _build_guests(
-    room_config: RoomConfig, llm_client: LLMClient
+    room_config: RoomConfig, llm_client: LLMClient, room: Room
 ) -> list[tuple[TeaGuest, str]]:
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
@@ -114,6 +124,7 @@ def _build_guests(
             persona_md=persona_md,
             llm_client=llm_client,
             working_directory=gc.workspace_in(room_config.room_dir),
+            room=room,
             permission=gc.permission,
         )
         out.append((guest, persona_md))
@@ -170,33 +181,65 @@ def _print_permission_info(guests: list[TeaGuest]) -> None:
         )
 
 
-_KIND_BADGE: dict[ScoreKind, str] = {
-    ScoreKind.MENTION: "@",
-    ScoreKind.COOLDOWN: "冷却",
-    ScoreKind.ERROR: "失败",
+_KIND_BADGE: dict[str, str] = {
+    ScoreKind.MENTION.value: "@",
+    ScoreKind.COOLDOWN.value: "冷却",
+    ScoreKind.ERROR.value: "失败",
 }
 
 
-def _format_scores(scores: list[ScoreResult]) -> str:
-    """把一轮打分明细排成 ``宝总=0.72, 玲子=@, 爷叔=冷却`` 这样。"""
+def _format_scores(scores: list[dict]) -> str:
+    """把一轮打分明细排成 ``宝总=0.72, 玲子=@, 爷叔=冷却`` 这样。
+    输入是 ``turn_start.data.scores``（已经走过 :func:`_score_to_dict` 序列化）。
+    """
     parts: list[str] = []
     for r in scores:
-        badge = _KIND_BADGE.get(r.kind)
-        parts.append(
-            f"{r.guest_name}={badge}" if badge else f"{r.guest_name}={r.score:.2f}"
-        )
+        kind = r.get("kind", "")
+        badge = _KIND_BADGE.get(kind)
+        name = r.get("guest_name", "")
+        score = r.get("score", 0.0)
+        parts.append(f"{name}={badge}" if badge else f"{name}={score:.2f}")
     return ", ".join(parts)
 
 
-def _on_turn_start(name: str, scores: list[ScoreResult]) -> None:
-    """打"\n[选中 X 打分：...]\nX: "，流式回调写到 ":" 后面。"""
-    print(f"\n[选中 {name}  打分：{_format_scores(scores)}]")
-    print(f"{name}: ", end="", flush=True)
+class _CliRenderer:
+    """把 envelope 流渲染成与 P1 视觉一致的打字流。
 
+    每次 ``submit_user_message`` 复用一个实例 —— 实例只在 turn 边界保留少量状态
+    （本轮打分明细，供 message_start 时回放）。本身不持任何 I/O 资源。
+    """
 
-def _on_chunk(c: str) -> None:
-    sys.stdout.write(c)
-    sys.stdout.flush()
+    def __init__(self) -> None:
+        self._current_scores: list[dict] = []
+
+    def __call__(self, env: ChahuaEnvelope) -> None:
+        t = env.type
+        if t is ChahuaEventType.TURN_START:
+            self._current_scores = env.data.get("scores", [])
+            return
+        if t is ChahuaEventType.MESSAGE_START:
+            scores = _format_scores(self._current_scores)
+            print(f"\n[选中 {env.guest_name}  打分：{scores}]")
+            print(f"{env.guest_name}: ", end="", flush=True)
+            return
+        if t is ChahuaEventType.MESSAGE_DELTA:
+            chunk = env.data.get("chunk", "")
+            if chunk:
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            return
+        if t is ChahuaEventType.MESSAGE_END:
+            if env.status == STATUS_OK:
+                print()  # 流式没主动换行，由这里收尾
+            elif env.status == STATUS_CANCELLED:
+                print("  [中断]")
+            elif env.status == STATUS_ERROR:
+                err = env.data.get("error") or "未知错误"
+                print(f"  [出错：{err}]")
+            return
+        # TURN_END / GUEST_THINKING / TOOL_START / TOOL_COMPLETE：CLI 默认静默。
+        # turn_end.next 字段（"ai"/"user"/"idle"）留给 UI 用；CLI 改在
+        # submit_user_message 返回后按 transcript 增量判断"暂无人接话"。
 
 
 # ── 命令行解析 ─────────────────────────────────────────────────────────────
@@ -205,7 +248,7 @@ def _on_chunk(c: str) -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="chahua",
-        description="多 Agent 群聊「茶话室」CLI（P2.1）",
+        description="多 Agent 群聊「茶话室」CLI（P2.2）",
     )
     parser.add_argument(
         "--room",
@@ -256,7 +299,7 @@ async def _repl(args: argparse.Namespace) -> int:
     )
     room.add_participant(USER_SPEAKER_ID)
 
-    guest_entries = _build_guests(room_config, llm_client)
+    guest_entries = _build_guests(room_config, llm_client, room)
     guests = [g for g, _ in guest_entries]
 
     orchestrator = Orchestrator(
@@ -279,6 +322,7 @@ async def _repl(args: argparse.Namespace) -> int:
         repo_root=repo_root,
     )
 
+    renderer = _CliRenderer()
     try:
         while True:
             try:
@@ -294,9 +338,7 @@ async def _repl(args: argparse.Namespace) -> int:
 
             before_seq = room.latest_seq
             try:
-                await orchestrator.submit_user_message(
-                    text, on_chunk=_on_chunk, on_turn_start=_on_turn_start
-                )
+                await orchestrator.submit_user_message(text, sink=renderer)
             except KeyboardInterrupt:
                 print("\n[中断本回合]")
                 continue
@@ -305,13 +347,10 @@ async def _repl(args: argparse.Namespace) -> int:
                 _log.exception("submit_user_message failed")
                 print(f"\n[本回合失败：{e}]")
                 continue
-            # 一回合 0 ~ max_consecutive_ai_turns 条茶客发言。
-            # 用户消息也算进 latest_seq，所以 -1 还要 > 0 才是真有茶客接话。
-            ai_replies = room.latest_seq - before_seq - 1
-            if ai_replies == 0:
+            # 一回合 0 ~ max_consecutive_ai_turns 条茶客发言。用户消息算 1，所以
+            # ``latest_seq - before_seq - 1`` 是 AI 接话条数（成功落 transcript 的）。
+            if room.latest_seq - before_seq - 1 == 0:
                 print("[（暂无人接话，可继续说或 @ 某位茶客）]")
-            else:
-                print()  # 流式输出不主动换行，由这里收尾
     finally:
         for guest in guests:
             try:

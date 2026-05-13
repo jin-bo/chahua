@@ -13,20 +13,15 @@ P0 是纯内存 transcript。P2.1 加 ``transcript.jsonl`` 落盘 / 启动加载
 from __future__ import annotations
 
 import logging
-import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
 from ._persist import append_jsonl, read_jsonl_skip_bad
+from .events import new_message_id
 
 _log = logging.getLogger(__name__)
-
-
-def _new_message_id() -> str:
-    """msg_<10字节 hex> —— 比 UUID 短，比 uuid4 更易扫读。"""
-    return "msg_" + secrets.token_hex(10)
 
 
 @dataclass(frozen=True)
@@ -133,11 +128,21 @@ class Room:
 
     # ── transcript 读写 ─────────────────────────────────────────────────────
 
-    def append(self, speaker_id: str, text: str) -> Message:
+    def append(
+        self,
+        speaker_id: str,
+        text: str,
+        *,
+        message_id: Optional[str] = None,
+    ) -> Message:
         """追加一条发言，返回带 seq / message_id 的 :class:`Message`。
 
         ``speaker_id`` 必须在 :attr:`participants` 里 —— 不允许凭空冒出一个名字，
         这是防 "茶客 A 在 transcript 里假冒茶客 B" 的最便宜兜底（注入打分以外的另一类风险）。
+
+        ``message_id`` 可由调用方传入 —— :meth:`TeaGuest.speak` 在 envelope
+        message_start 时就分配 ID，要求与最终落 transcript 的 ID 一致以便前端把
+        流式 chunk 与持久化 record 串起来。``None`` 时本函数兜底分配。
 
         ``transcript_path`` 非空时同步追加一行 jsonl；写失败抛 OSError 让上层看见 ——
         持久化掉队会让重启后游标错位，比"假装写成功"诚实。
@@ -153,7 +158,7 @@ class Room:
             speaker_id=speaker_id,
             text=text,
             ts_ms=int(time.time() * 1000),
-            message_id=_new_message_id(),
+            message_id=message_id or new_message_id(),
         )
         self._messages.append(msg)
         if self.transcript_path is not None:

@@ -1,41 +1,48 @@
 """TeaGuest —— 一个茶客（设计文档 §3.1 / §3.5）。
 
-P0 只做 ``embed`` backend：包一个 :class:`agentao.Agentao` 实例 + 人格 + 流式输出回调。
-``acp`` backend 是 P4 的事（§3.9）。
+P2.2 起 :meth:`speak` 不再吃 ``on_chunk`` 回调，改吃 envelope ``sink``。茶客自己持
+:class:`chahua.transport_bridge.ChahuaTransport`：
 
-流式实现：构造一个 :class:`agentao.transport.SdkTransport`，``on_event`` 派发到 TeaGuest
-内部的当前 chunk 回调（每次 :meth:`speak` 调用前临时设上、调用后清掉）。这样
-:class:`agentao.Agentao` 不需要知道前端 envelope 的存在 —— 它只管 emit ``LLM_TEXT``，
-我们在外面合成 message 边界（§3.5.2 的雏形，P2 才完整实现到 WebSocket）。
+- :meth:`speak` 用 :meth:`ChahuaTransport.bind` 包住整段 ``arun`` 调用，``with``
+  退出时清 envelope —— set/clear 配对再也不会在某个 except 分支里漏掉。
+- 内层 try 走 ``message_end`` 的三态分支（ok / cancelled / error）。message_id 在
+  :meth:`speak` 开头分配一次，前端 envelope 和 transcript 落盘 record 共用同一 ID
+  —— 前端能把流式 chunk 与持久化 record 串起来。
+- :class:`agentao.cancellation.CancellationToken` 通过参数透传给
+  ``agent.arun(cancellation_token=…)``；CancelledError 与 KeyboardInterrupt 都按
+  cancelled 路径走（Python 3.11+ asyncio 把 SIGINT 翻成 CancelledError；同步 REPL
+  input 拿到的是 KeyboardInterrupt——两条都得保 message_start/end 配对）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from agentao import Agentao
+from agentao.cancellation import CancellationToken
 from agentao.llm import LLMClient
 from agentao.permissions import PermissionEngine
-from agentao.transport import AgentEvent, EventType, SdkTransport
 
+from .events import (
+    STATUS_CANCELLED,
+    STATUS_ERROR,
+    STATUS_OK,
+    ChahuaEventType,
+    EnvelopeSink,
+    new_message_id,
+)
 from .permissions import apply_permission_mode
-
-ChunkCallback = Callable[[str], None]
+from .room import Message, Room
+from .transport_bridge import ChahuaTransport
 
 _log = logging.getLogger(__name__)
 
 
 class TeaGuest:
-    """一个茶客。
-
-    构造时：
-
-    - ``working_directory`` 自动 ``mkdir(parents=True, exist_ok=True)``。
-    - 人格 (``persona_md``) 通过 ``project_instructions=`` 注入到 agentao 的系统提示。
-    - 权限模式走 :func:`apply_permission_mode` 双 API 同步（§3.4.1）。
-    """
+    """一个茶客。持 :class:`Room` 引用 —— 写入 transcript / 合成 message_end 都从这里。"""
 
     def __init__(
         self,
@@ -44,20 +51,19 @@ class TeaGuest:
         persona_md: str,
         llm_client: LLMClient,
         working_directory: Path,
+        room: Room,
         permission: str = "read-only",
     ) -> None:
         self.name = name
+        self.room = room
         self.working_directory = Path(working_directory)
         self.working_directory.mkdir(parents=True, exist_ok=True)
 
-        # SdkTransport 的 on_event 在构造时就绑死了，没法每次 speak() 替换 transport；
-        # 用可变属性透传当前 chunk 回调。
-        self._current_on_chunk: Optional[ChunkCallback] = None
+        # transport 终身绑定 (room_id, guest_name)；per-speak 的 (sink, turn_id,
+        # message_id) 通过 bind() 临时设。room_id 暂用 room.name —— P4 加 [room].id
+        # 后由 cli 显式传，这里换个 helper 即可。
+        self._transport = ChahuaTransport(room_id=room.name, guest_name=name)
 
-        transport = SdkTransport(on_event=self._on_event)
-
-        # 显式喂空白 PermissionEngine —— 不传则 Agentao 默认 None，apply_permission_mode
-        # 没东西可调。rules=[] 表示"不读盘配置，靠预设模式"。
         permission_engine = PermissionEngine(
             project_root=self.working_directory,
             rules=[],
@@ -68,7 +74,7 @@ class TeaGuest:
             working_directory=self.working_directory,
             llm_client=llm_client,
             project_instructions=persona_md,
-            transport=transport,
+            transport=self._transport,
             permission_engine=permission_engine,
         )
 
@@ -80,43 +86,63 @@ class TeaGuest:
         """当前权限模式（每次从 agent.permission_engine 拉，避免与运行时切换脱节）。"""
         return self.agent.permission_engine.active_mode.value
 
-    # ── 流式事件路由 ───────────────────────────────────────────────────────
-
-    def _on_event(self, event: AgentEvent) -> None:
-        """SdkTransport 回调入口。P0 只关心 LLM_TEXT；其他事件先丢弃。
-
-        P2 这里会扩成"合成 message_start / message_end / 推到 WebSocket"。
-        """
-        if event.type is not EventType.LLM_TEXT:
-            return
-        cb = self._current_on_chunk
-        if cb is None:
-            return
-        chunk = event.data.get("chunk", "")
-        if not chunk:
-            return
-        try:
-            cb(chunk)
-        except Exception:
-            # 守住 transport 不能抛异常（agentao 契约）。但要留痕 —— 沉默吞掉异常
-            # 会让"流式没字"这种用户可见症状失去诊断线索。
-            _log.exception("chunk callback raised for %s", self.name)
+    # ── 主入口 ────────────────────────────────────────────────────────────
 
     async def speak(
         self,
         context_message: str,
-        on_chunk: Optional[ChunkCallback] = None,
-    ) -> str:
-        """让茶客说一句话，返回完整文本。
+        *,
+        turn_id: str,
+        sink: EnvelopeSink,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> Optional[Message]:
+        """让茶客说一句话。
 
-        ``on_chunk`` 是流式回调，每个 ``LLM_TEXT`` chunk 调一次。``None`` = 不流式。
+        返回追加到 transcript 的 :class:`Message`（成功）或 ``None``（异常 / 取消）。
+        ``message_start`` / ``message_end`` 由本函数合成 —— 保证一对一：
+
+        - 成功：``message_end(status=ok, data={text}, seq=msg.seq)`` —— transcript
+          里的 ``Message.message_id`` 与 envelope ``message_id`` 一致。
+        - 取消：``message_end(status=cancelled, data={partial_text})``；不写 transcript；
+          重抛让 orchestrator 决定是否中止后续。
+        - 失败：``message_end(status=error, data={partial_text, error})``；不写 transcript；
+          异常被吞，函数返回 ``None`` —— orchestrator 让链跑下去（与 P1 一致）。
         """
-        self._current_on_chunk = on_chunk
-        try:
-            return await self.agent.arun(context_message)
-        finally:
-            # 必须清，否则下次 speak() 还在用上次的回调写到错误的地方。
-            self._current_on_chunk = None
+        message_id = new_message_id()
+        with self._transport.bind(
+            sink=sink, turn_id=turn_id, message_id=message_id
+        ):
+            self._transport.emit_chahua(ChahuaEventType.MESSAGE_START, {})
+            try:
+                text = await self.agent.arun(
+                    context_message,
+                    cancellation_token=cancellation_token,
+                )
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                self._emit_failure(STATUS_CANCELLED, "cancelled")
+                raise
+            except Exception as e:
+                _log.exception("%s.speak() failed", self.name)
+                self._emit_failure(STATUS_ERROR, str(e))
+                return None
+
+            msg = self.room.append(self.name, text, message_id=message_id)
+            # message_end.data.text 是兜底字段（前端可以靠它做一次性渲染，不用拼 chunk）。
+            self._transport.emit_chahua(
+                ChahuaEventType.MESSAGE_END,
+                {"text": text},
+                status=STATUS_OK,
+                seq=msg.seq,
+            )
+            return msg
+
+    def _emit_failure(self, status: str, error: str) -> None:
+        """两条失败分支（cancelled / error）共用的 message_end emit。"""
+        self._transport.emit_chahua(
+            ChahuaEventType.MESSAGE_END,
+            {"partial_text": self._transport.partial_text, "error": error},
+            status=status,
+        )
 
     def close(self) -> None:
         """释放 agent 资源。多次调用安全。"""

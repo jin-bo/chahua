@@ -9,22 +9,18 @@
    - 选下一位发言者：
      - 用户消息里 ``@<茶客名>`` → 确定性路由，跳过打分（``score = 1.0``）；
      - 否则对每个不在冷却中的茶客并发跑一遍 :class:`IntentScorer`，取最高分 ≥ 阈值的那位。
-   - 选不出来 → 跳出 AI 链，等用户。
-   - 选中 → 调用 :class:`TeaGuest.speak`（串行持麦），把回复追到 transcript，
+   - 选不出来 → ``turn_end(status=ok, data.next="user")`` 后跳出 AI 链，等用户。
+   - 选中 → emit ``turn_start({scores})``，串行调用每位 :class:`TeaGuest.speak`
+     （它们各自合成 ``message_start`` / ``message_end``），随后 ``turn_end``，
      推进游标，启动冷却。
    - 连续 AI 轮数到 ``max_consecutive_ai_turns`` 或没人达到阈值 → 跳出，等用户。
 
 3. 每轮发言后**异步**踢一次 :meth:`Summarizer.maybe_summarize`，让摘要随聊天增长 ——
    摘要 LLM 调用不挡用户等回复的路径，只供下次 onboarding 用。
 
-注入加固（§3.3.1）的承担：
-
-- **JSON / clamp / 失败降级** 在 :mod:`chahua.scoring` 里。
-- **@ 确定性路由**、**冷却归零**、**阈值衰减** 在本文件里。
-- **轮数上限** 也在本文件里（硬截断 + 阈值衰减两道闸都开着）。
-
-P1 上下文喂养：根据 :class:`GuestCursor` 决定喂 onboarding（首次 / 增量过长）还是
-增量片段。onboarding 块里拼"房间元数据 + USER.md 介绍 + 已有摘要 + 最近 K 条原文"。
+P2.2：所有前端事件都套 :class:`ChahuaEnvelope`，单一 :data:`EnvelopeSink` 出口。
+``turn_start`` / ``turn_end`` 在本文件合成；``message_*`` 由 :class:`TeaGuest.speak`
+合成。这两类事件不一一对应：一个 turn 可包含 1~2 个 messages（top-1~2 抢话）。
 """
 
 from __future__ import annotations
@@ -33,9 +29,18 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 from .cursor import GuestCursor
+from .events import (
+    NOOP_SINK,
+    STATUS_OK,
+    ChahuaEnvelope,
+    ChahuaEventType,
+    EnvelopeSink,
+    emit_to_sink,
+    new_turn_id,
+)
 from .guest import TeaGuest
 from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
@@ -43,14 +48,6 @@ from .summarizer import Summarizer
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 
 _log = logging.getLogger(__name__)
-
-ChunkCallback = Callable[[str], None]
-TurnStartHook = Callable[[str, list[ScoreResult]], None]
-"""选定茶客准备发言时的钩子。参数：``(guest_name, all_scores)``。
-
-``all_scores`` 含本轮所有打分结果（``ScoreKind`` 标识每条来源：正常 / @ / 冷却 / 失败），
-方便 CLI / UI 打印"打分明细"。
-"""
 
 
 # ── 配置 ─────────────────────────────────────────────────────────────────────
@@ -172,47 +169,69 @@ class Orchestrator:
         self,
         text: str,
         *,
-        on_chunk: Optional[ChunkCallback] = None,
-        on_turn_start: Optional[TurnStartHook] = None,
+        sink: Optional[EnvelopeSink] = None,
     ) -> None:
-        """处理一条用户消息，跑到本回合结束（轮上限 / 没人想接话 / 失败）。"""
+        """处理一条用户消息，跑到本回合结束（轮上限 / 没人想接话 / 失败）。
+
+        所有前端事件走 ``sink``；``None`` = :data:`NOOP_SINK`（程序化驱动 / 测试常用）。
+        本入口不 emit 用户消息事件 —— 用户消息进 transcript 是同步行为，CLI / UI 不
+        依赖事件回放（前端打了字就是打了字）。
+        """
         if not text:
             return
+        if sink is None:
+            sink = NOOP_SINK
         self.room.append(USER_SPEAKER_ID, text)
         self._consecutive_ai_turns = 0
         self._rounds_without_user_or_mention = 0
         self._tick_cooldown()
         self._kick_summarize()
-        await self._run_ai_chain(on_chunk=on_chunk, on_turn_start=on_turn_start)
+        await self._run_ai_chain(sink=sink)
 
     # ── AI 链 ─────────────────────────────────────────────────────────
 
-    async def _run_ai_chain(
-        self,
-        *,
-        on_chunk: Optional[ChunkCallback],
-        on_turn_start: Optional[TurnStartHook],
-    ) -> None:
+    async def _run_ai_chain(self, *, sink: EnvelopeSink) -> None:
         while self._consecutive_ai_turns < self.config.max_consecutive_ai_turns:
             pick = await self._pick_next_speaker(
                 respect_at_mention=self._consecutive_ai_turns == 0
             )
             if pick is None:
+                # 没人想接话 —— 没 emit 过 turn_start，不需要 turn_end 收尾。
+                # CLI / UI 看到 submit_user_message 返回即知本回合结束。
                 return
+
             winners, scores = pick
+            turn_id = new_turn_id()
+            # turn_start / turn_end 是轮级事件，跨多位茶客；guest_name=None。winners
+            # 都在 data.scores 里，前端按 turn_id 聚合。
+            self._emit_turn(
+                sink,
+                turn_id=turn_id,
+                type=ChahuaEventType.TURN_START,
+                data={"scores": [_score_to_dict(s) for s in scores]},
+            )
+
             # 同回合"抢话"的多位茶客串行发言；第 2 位发言时，第 1 位的回复已经在
             # transcript 里，靠 cursor 增量自然喂入。每位都计 1 轮（max 卡死整体上限）。
             for guest_name in winners:
                 if self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
                     break
-                if on_turn_start is not None:
-                    try:
-                        on_turn_start(guest_name, scores)
-                    except Exception:
-                        _log.exception("on_turn_start hook raised")
-                await self._let_speak(guest_name, on_chunk=on_chunk)
+                await self._let_speak(guest_name, turn_id=turn_id, sink=sink)
                 self._consecutive_ai_turns += 1
                 self._rounds_without_user_or_mention += 1
+
+            next_state = (
+                "ai"
+                if self._consecutive_ai_turns < self.config.max_consecutive_ai_turns
+                else "user"
+            )
+            self._emit_turn(
+                sink,
+                turn_id=turn_id,
+                type=ChahuaEventType.TURN_END,
+                data={"next": next_state},
+            )
+
             # 摘要 / 冷却递减每"pick 周期"一次（不是每个发言者一次）—— 否则同回合 2 位
             # 同时说后第一位的冷却被立刻 tick 掉，下个 pick 就能再次入选，违背"刚发言不接自己"。
             self._kick_summarize()
@@ -306,23 +325,43 @@ class Orchestrator:
     # ── 发言 ──────────────────────────────────────────────────────────
 
     async def _let_speak(
-        self, guest_name: str, *, on_chunk: Optional[ChunkCallback]
+        self, guest_name: str, *, turn_id: str, sink: EnvelopeSink
     ) -> None:
         entry = self._guests[guest_name]
         ctx = self._build_context_for(guest_name)
-        try:
-            text = await entry.guest.speak(ctx, on_chunk=on_chunk)
-        except KeyboardInterrupt:
-            raise
-        except Exception:
-            _log.exception("%s.speak() failed; skip this turn", guest_name)
+        # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
+        # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
+        msg = await entry.guest.speak(ctx, turn_id=turn_id, sink=sink)
+        if msg is None:
             # 失败的发言不进 transcript（§3.5.2），冷却也不启动 —— 让他下一轮还有机会。
             return
-
-        msg = self.room.append(guest_name, text)
         self.cursor.set(guest_name, msg.seq)
         # cooldown 进入下个"AI 子轮"前先减一次，所以 +1 抵消，得到"持续 N 个 AI 子轮"。
         self._cooldown[guest_name] = self.config.speaker_cooldown_turns + 1
+
+    def _emit_turn(
+        self,
+        sink: EnvelopeSink,
+        *,
+        turn_id: str,
+        type: ChahuaEventType,
+        data: dict,
+    ) -> None:
+        """合成轮级 envelope（turn_start / turn_end）走 sink。message-级事件经
+        :class:`ChahuaTransport` emit。
+        """
+        emit_to_sink(
+            sink,
+            ChahuaEnvelope(
+                room_id=self.room.name,
+                turn_id=turn_id,
+                guest_name=None,
+                message_id=None,
+                type=type,
+                status=STATUS_OK,
+                data=data,
+            ),
+        )
 
     def _tick_cooldown(self) -> None:
         for name in list(self._cooldown):
@@ -431,3 +470,15 @@ class Orchestrator:
             )
         except Exception:
             _log.exception("summarize iteration failed")
+
+
+# ── 序列化 ───────────────────────────────────────────────────────────────────
+
+
+def _score_to_dict(r: ScoreResult) -> dict:
+    """:class:`ScoreResult` → JSON-safe dict（``turn_start.data.scores`` 里塞 N 条）。"""
+    return {
+        "guest_name": r.guest_name,
+        "score": r.score,
+        "kind": r.kind.value,
+    }
