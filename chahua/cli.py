@@ -1,13 +1,14 @@
-"""茶话室 CLI（P0 → P1.5）。
+"""茶话室 CLI（P0 → P2.1）。
 
 P0 范围（已落）：agentao 接线、人格注入、多 provider、流式输出、read-only 拦截
 P1 新增：意愿打分、@ 路由、增量喂养、摘要、USER.md 偏好注入
 P1 调优：top-1~2 抢话、want_threshold 0.45
 P1.5 新增：``chahua --room <dir>``，房间配置走 ``room.toml``（``chahua.config``）；
 逐茶客可独立配 ``permission``（默认 read-only，可选 workspace-write / full-access）。
+P2.1 新增：transcript.jsonl / summary.jsonl / cursor.json 三件落盘 + 启动续聊。
 
-不在 P1.5 范围：逐茶客 provider/model、isolation、[scoring]/[summary] 模型分流、
-WebSocket、Electron、持久化（transcript.jsonl / cursor.json / summary.jsonl）。
+不在 P2.1 范围：事件 envelope 合成（P2.2）、WebSocket server（P2.3）、Electron（P3）、
+逐茶客 provider/model / isolation / [scoring]/[summary] / transport（P4）。
 """
 
 from __future__ import annotations
@@ -127,12 +128,21 @@ def _print_banner(
     user_config: UserConfig,
     guests: list[TeaGuest],
     room_config: RoomConfig,
+    room: Room,
     provider: str,
-    room_dir_display: Path,
+    repo_root: Path,
 ) -> None:
     src = user_config.source
+    # 显示相对 repo_root 的形式，全绝对路径在 banner 里太长；房间在仓库外则用绝对路径。
+    try:
+        room_dir_display: Path = room_config.room_dir.relative_to(repo_root)
+    except ValueError:
+        room_dir_display = room_config.room_dir
     print("─" * 60)
-    print(f"茶话室 · 房间：{room_config.name}  ({room_dir_display})")
+    head = f"茶话室 · 房间：{room_config.name}  ({room_dir_display})"
+    if room.latest_seq > 0:
+        head += f"  · 续聊（已有 {room.latest_seq} 条记录）"
+    print(head)
     print(
         f"你的身份：{user_config.display_name}"
         + (f"  ({src})" if src else "  (USER.md 未找到，回退 '用户')")
@@ -195,7 +205,7 @@ def _on_chunk(c: str) -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="chahua",
-        description="多 Agent 群聊「茶话室」CLI（P1.5）",
+        description="多 Agent 群聊「茶话室」CLI（P2.1）",
     )
     parser.add_argument(
         "--room",
@@ -233,10 +243,16 @@ async def _repl(args: argparse.Namespace) -> int:
     )
     llm_client, provider = _make_llm_client()
 
+    # 持久化文件全部塞在 room_dir 下 —— 删房间一并清掉（设计文档 §3.7）。
+    transcript_path = room_config.room_dir / "transcript.jsonl"
+    summary_path = room_config.room_dir / "summary.jsonl"
+    cursor_path = room_config.room_dir / "cursor.json"
+
     room = Room(
         name=room_config.name,
         topic=room_config.topic,
         rules=room_config.rules,
+        transcript_path=transcript_path,
     )
     room.add_participant(USER_SPEAKER_ID)
 
@@ -247,26 +263,20 @@ async def _repl(args: argparse.Namespace) -> int:
         room=room,
         user_config=user_config,
         scorer=IntentScorer(llm_client),
-        summarizer=Summarizer(llm_client),
-        cursor=GuestCursor(),
+        summarizer=Summarizer(llm_client, summary_path=summary_path),
+        cursor=GuestCursor(cursor_path=cursor_path),
         config=OrchestratorConfig(),
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
 
-    # banner 里把 room_dir 显示成相对仓库的形式，全路径太长。
-    try:
-        room_dir_display = room_config.room_dir.relative_to(repo_root)
-    except ValueError:
-        # 房间目录在仓库外（罕见）—— 直接给绝对路径
-        room_dir_display = room_config.room_dir
-
     _print_banner(
         user_config=user_config,
         guests=guests,
         room_config=room_config,
+        room=room,
         provider=provider,
-        room_dir_display=room_dir_display,
+        repo_root=repo_root,
     )
 
     try:
