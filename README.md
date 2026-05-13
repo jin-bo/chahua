@@ -3,9 +3,14 @@
 多 Agent 群聊「茶话室」桌面 App —— 用户和多个由 [agentao](../agentao) 驱动的 AI「茶客」
 在同一个聊天室里对话。完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
-当前进度：**P0 骨架**。单茶客（宝总）、CLI、内存 transcript、`USER.md` 角色、流式输出。
+当前进度：**P3.1 桌面壳骨架**。
+底层（P0–P2.3）已稳：三茶客 + 意愿打分调度 + 事件 envelope + transcript/summary/cursor 续聊 + USER.md 角色。
+桌面壳 P3.1 能做的：拉 sidecar / 建窗 / 一条 message_end 一行 / 回车发言。
+打字机流式 / @ 补全 / 茶客侧栏 / 停止按钮 / 打包 .dmg 都在 P3.2–P3.3。
 
 ## 跑起来
+
+### CLI（最快验证 LLM 凭据 / room.toml）
 
 ```bash
 # 1. 装依赖（uv 会按 pyproject.toml 把 ../agentao 编辑模式装上）
@@ -19,29 +24,43 @@ $EDITOR .env   # 填 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
 
 # 3. 编辑 USER.md，设你自己的「显示名」和偏好
 
-# 4. 进茶话室
+# 4. 进茶话室（默认房间 rooms/p1-test）
 uv run chahua
 ```
 
 REPL 内：
 
-- `老金> 你好`（提示符的"老金"来自 USER.md `## 显示名`）→ 宝总会流式回话
-- `/info` 看权限状态（验证 `read-only` 同时设了 `permission_engine` 和 `tool_runner.readonly_mode`）
+- `老金> 你好`（提示符的"老金"来自 USER.md `## 显示名`）→ 茶客流式接话
+- `/info` 看每位茶客权限（read-only / workspace-write / full-access）
 - `/quit`、空行、Ctrl-D 退出
+
+### Electron 桌面壳（P3.1）
+
+CLI 跑通后，桌面壳是同一套 sidecar（`chahua-server`）+ ws 渲染：
+
+```bash
+cd app
+npm install        # 装 Electron（~150MB，一次）
+npm run dev        # main 进程自动拉起 chahua-server sidecar，建窗连 ws
+```
+
+P3.1 范围：拉 sidecar / 建窗 / 极简消息流（一条 message_end 一行）/ 输入框发 user_message。
+打字机流式、@ 补全、茶客侧栏、停止按钮、打包 .dmg 都在 P3.2 / P3.3。
 
 ## 数据位置（本地明文）
 
 所有数据都在用户机器上，没有云端，没有加密。详见 `docs/DESIGN.md` §3.7。
 
-- `rooms/p0-test/transcript`（P0 是内存，未落盘；P2 会写 `transcript.jsonl`）
-- `rooms/p0-test/guests/宝总/.agentao/` —— 宝总的私有 memory.db / sessions
-- `rooms/p0-test/guests/宝总/agentao.log`
+- `rooms/<room>/transcript.jsonl` —— 房间公开记录（append-only）
+- `rooms/<room>/summary.jsonl` —— onboarding 摘要历史
+- `rooms/<room>/cursor.json` —— 每位茶客的喂养游标
+- `rooms/<room>/guests/<name>/.agentao/` —— 茶客的私有 memory.db / sessions
+- `rooms/<room>/guests/<name>/agentao.log` —— agentao 日志
 - `USER.md` —— 你的角色卡，每轮 reload
 - `.env` —— LLM 凭据（已 `.gitignore`）
 
 ## 接下来
 
-- **P1 调度**：意愿打分主循环、`@` 提及确定性路由、刚发言者冷却、阈值衰减、cursor + onboarding 摘要。
-- **P2 服务化**：WebSocket server + 前端事件 envelope + 落盘。
-- **P3 Electron**：桌面 UI。
-- **P4 打磨 + ACP**：异构茶客（接入非 agentao 的 ACP-speaking agent）。
+- **P3.2 消息 UI**：打字机流式（message_delta）、turn_start 打分徽章、茶客侧栏、@ 补全、error/cancelled 渲染。
+- **P3.3 cancel + 打包**：停止按钮（ws `cancel` 帧）、electron-builder 打 macOS .dmg、isolation 徽章先位。
+- **P4 打磨 + ACP**：逐茶客 provider/model、isolation=global、`[scoring]`/`[summary]` 分派、异构茶客（接入非 agentao 的 ACP-speaking agent）。

@@ -523,10 +523,13 @@ chahua/
     config.py             # 读 room.toml，装配 TeaGuest（统一走 apply_permission_mode）
     cli.py                # 纯终端驱动（早期开发用，不依赖 Electron）
     personas/             # 内置茶客人格卡 *.md
-  app/                    # Electron
+  app/                    # Electron（P3.1 起）
     package.json
-    main.js               # 启动 python 子进程 + 建窗口
-    preload.js
+    main/
+      index.js            # app 生命周期 · 建窗口 · before-quit 关 sidecar
+      sidecar.js          # 拉 chahua-server 子进程 · 找空闲端口 · 读 stderr 等 ready
+    preload/
+      index.js            # contextBridge 暴露 wsUrl 给 renderer
     renderer/             # 聊天界面：消息流 · 打字机 · 茶客侧栏 · @提及
   rooms/                  # 运行期数据（.gitignore）
     <room-id>/
@@ -547,7 +550,9 @@ chahua/
 | **P2.1 持久化** | `Room` / `Summarizer` / `GuestCursor` 接 `rooms/<id>/{transcript,summary}.jsonl` + `cursor.json`；jsonl append-only + 加载时跳过坏行，cursor.json 原子重写。茶客自己的 `.agentao/` 由 agentao runtime 走 `working_directory` 自管，无需茶话室主动写 | quit → 重启 chahua --room <dir> 续聊；transcript 文件可手编后续；崩溃只伤最后一行 |
 | **P2.2 事件 envelope** | `chahua.events`（envelope dataclass + 事件枚举）；`ChahuaTransport`（`SdkTransport` 子类）转译 LLM_TEXT / THINKING / TOOL_* → 茶话室事件并维护 partial_text；`TeaGuest` 持 `Room` 引用，`speak()` 用 nested try / except / finally 合成 `message_start` / `message_end`（status: ok / cancelled / error，CancelledError 与 KeyboardInterrupt 都按 cancelled 走）；orchestrator 合成 `turn_start({scores})` / `turn_end({next})`，turn 对应一次 pick（top-1~2 抢话）；`agentao.CancellationToken` 走 `speak(..., cancellation_token=)` 透传给 `arun`；CLI `_CliRenderer` 单 sink 渲染回打字流，GUEST_THINKING / TOOL_* 默认静默 | message_start 必有对应 message_end；ctrl-C 中断单条发言后 envelope 仍配对；partial_text 落 `message_end.data` 不入 transcript |
 | **P2.3 WebSocket server** | `chahua/session.py`（`build_room_session` 把房间装配从 CLI 抽出，CLI 与 server 共用）；`chahua/server.py` 用 `websockets` 起本地 ws（默认 127.0.0.1:7860，`--port` / `CHAHUA_WS_PORT` 覆盖）；服务端 → 客户端每帧一条 `envelope.to_dict()` JSON（含 `schema_version`）；客户端 → 服务端 `{"type": "user_message", "text": "..."}`；session 跨多次客户端连接复用；单客户端语义（第二个连接 1008 拒）；SIGINT/SIGTERM 优雅关停；`chahua-server` 入口加进 `pyproject [project.scripts]`。**显式后压到 P3**：多客户端广播、reconnect-replay、mid-stream 取消；**后压到 P4**：TLS、auth、多房间路由 | wscat 连上能看到 envelope JSON 流；单客户端策略生效；服务端断电后 transcript.jsonl 保留 |
-| **P3 Electron** | main 进程拉起 python、renderer 聊天 UI（打字机、茶客侧栏、@提及、isolation 标志） | 桌面 App 可用、用户能看到哪个茶客跨房间记忆 |
+| **P3.1 Electron 壳 + sidecar** | `app/` Electron 工程骨架（main / preload / renderer 三级）；main 进程随机选空闲端口、`uv run chahua-server --port <port>` 拉 sidecar、`stdio:pipe` 读 stderr 等到 "监听 ws://" 行后建窗、`SIGINT` + 2s grace + `SIGKILL` 兜底关停；`requestSingleInstanceLock` 防双开抢 transcript；preload 用 `contextBridge.exposeInMainWorld("chahua", {wsUrl})`（额外 `--chahua-ws-url=` argv，不走 ipcRenderer）；renderer 极简：消息列表按 `message_end` 一行 + 输入框发 `user_message`；webPreferences 标准三件套 `contextIsolation:true / nodeIntegration:false / sandbox:true` + CSP `connect-src ws://127.0.0.1:*`。**显式后压**：打字机流式（P3.2）、@ 补全 / 侧栏（P3.2）、cancel 帧 / 打包（P3.3） | 双击 / `npm run dev` 起窗 → 自动连 ws → 能聊一回合；关窗 → sidecar 进程退干净；transcript.jsonl 保留 |
+| **P3.2 消息 UI** | `message_delta` 消费 → 打字机流；`turn_start.scores` 渲染成"宝总·0.72 / 玲子·@"小标签；`message_end.status=error/cancelled` 灰底；茶客侧栏（名字 + permission 徽章）；输入框 @ 弹补全；ws `onclose` 后退避重连（P3.1 只显示断开，靠重启 app 恢复，dev 期间烦） | 视觉与 §3.5 envelope 一一对应；error/cancelled 与 ok 不混色；@ 补全选中后服务端 `_route` 命中；sidecar 中途死能自动重连 |
+| **P3.3 cancel + 打包** | 停止按钮 → ws 发 `{"type":"cancel","turn_id":...}`；server 加 inbound `cancel` 类型 → `CancellationToken.cancel()`；electron-builder 打 macOS .dmg；isolation 徽章先位（hardcode `"room"`，P4 接真值）；main 进程 SIGTERM / SIGINT 路径补全（P3.1 只挂 `before-quit`，macOS 直发 SIGTERM 不走该事件）；sidecar stderr/stdout 落盘到 `app.getPath('logs')`（打包后 process.stderr 会丢） | turn 跑到一半能停；.dmg 双击装可用；徽章位置 / 样式定型；后台异常发布版本能拿到日志 |
 | **P4 打磨 + ACP 异构茶客** | 房间配置文件完善、人格画廊、运行时增删茶客、可选「主持人」agent、工具权限预设、删除房间/清茶客记忆 UI；**抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip** | 成品；并接入第一个非 agentao 的 ACP 茶客作为验收 |
 
 ## 7. 待定 / 后续
@@ -559,6 +564,16 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-05-13（P2.3 完工后）** —— §6 把原 **P3 Electron** 一行拆 **P3.1 Electron 壳 + sidecar** / **P3.2 消息 UI** / **P3.3 cancel + 打包**。P3.1 落地决策：
+  - **main 进程拉 sidecar 而非"先起 server 再起 app"** —— 用户双击 .app 一步到位；端口由 main 进程 `net.createServer().listen(0)` 选可用端口后通过 `--port` 喂给 sidecar（避开本机已占 7860 / 多实例冲突）。
+  - **ready 信号走 stderr 行匹配 `/监听\s+ws:\/\//`** —— 比 retry-connect 更确定（端口被别的进程占了也能立刻 fail-fast）；唯一硬耦合点是 server.py 那行 print 措辞。
+  - **wsUrl 走 `additionalArguments` 不走 IPC** —— preload 一加载即拿到，省一次 main↔renderer 往返，也不把 `ipcRenderer` 拉进 contextBridge 表面。
+  - **`sandbox: true`** —— Electron 安全推荐姿态；preload 在 sandboxed renderer 子进程里只能用 `contextBridge` + `process.argv`（够用，因为 wsUrl 走 argv）。
+  - **single-instance lock 立即生效** —— 第二实例 `app.quit() + process.exit(0)` 不喊出 dock，避免抢 transcript.jsonl 文件锁。"focus existing window" 留到 P3.3+ 多房间路由再处理 `second-instance` 事件。
+  - **window-all-closed → app.quit()**（不留 macOS dock 残影）—— 茶话室 P3.1 是单房间会话型，关窗等于退出；reopen-on-dock-click 留给 P3.3+ 改。
+  - **CSP `connect-src ws://127.0.0.1:* ws://localhost:*`** —— 端口动态，通配符；loopback only 安全可接受。
+  - **不写 IPC 双向通道** —— P3.1 极简：renderer 直接 ws 连，main 进程只管 sidecar 生命周期 + 建窗。任何"main 替 renderer 转发 ws"都是 over-engineer。
 
 - **2026-05-13（P2.2 完工后）** —— P2.3 落地决策：
   - **`chahua/session.py` 抽出** —— 房间装配（room.toml → Room + Orchestrator + 三茶客）从 `cli._repl` 内联段提到 `build_room_session`。CLI 与 server 走同一口径，加 SDK-style 调用口（未来嵌入第三方宿主）。

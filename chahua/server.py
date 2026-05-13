@@ -78,6 +78,8 @@ class ChahuaServer:
         兜底（停 accept + 等已连接客户端处理完）。
         """
         async with serve(self._handle, self._host, self._port):
+            # 这行 "监听 ws://" 措辞被 app/main/sidecar.js 的 SIDECAR_READY_RE
+            # 字符串匹配 —— 改文案时同步那边的正则。
             print(
                 f"茶话室 server 监听 ws://{self._host}:{self._port}",
                 file=sys.stderr,

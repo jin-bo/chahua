@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <!-- CSP：只允许本地 ws + 同源资源；inline style 给 system font fallback 留口。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>茶话室</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="status" class="status">连接中…</div>
+  <ul id="messages" aria-live="polite"></ul>
+  <form id="composer">
+    <input id="text" type="text" placeholder="说点什么…  (@ 茶客名 直接点)" autocomplete="off" autofocus>
+    <button type="submit">发送</button>
+  </form>
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>

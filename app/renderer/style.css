@@ -1,0 +1,20 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; }
+
+.status { font-size: 12px; padding: 6px 12px; color: #999; border-bottom: 1px solid #eee; }
+.status.error { color: #c00; }
+.status.ok { color: #690; }
+
+#messages { flex: 1; list-style: none; margin: 0; padding: 8px 12px; overflow-y: auto; }
+#messages li { padding: 4px 0; line-height: 1.5; word-wrap: break-word; }
+#messages li .speaker { font-weight: 600; margin-right: 8px; color: #555; }
+#messages li.user .speaker { color: #084; }
+#messages li.error .speaker { color: #c00; }
+#messages li.error .text { color: #c00; }
+
+#composer { display: flex; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
+#text { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+#text:focus { outline: none; border-color: #888; }
+button { margin-left: 8px; padding: 8px 16px; border: none; border-radius: 4px; background: #444; color: #fff; cursor: pointer; }
+button:disabled { background: #aaa; cursor: not-allowed; }
