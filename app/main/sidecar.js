@@ -203,6 +203,10 @@ async function startSidecar({ paths, logsDir }) {
       // 之前 SIGINT 路径在 Windows 上其实是 TerminateProcess（不 graceful），
       // 还要 python 端两段式 signal trick 才能接到 —— stdin EOF 一条路径覆盖所有
       // 平台，且不依赖信号语义。``.end()`` 关写端，python 那侧 read() 返空 bytes。
+      //
+      // 但 Windows ProactorEventLoop 上 ``connect_read_pipe(sys.stdin)`` 经常拿
+      // ``OSError [WinError 6]`` 静默关掉 watcher（详见 chahua/server.py），EOF
+      // 路径形同虚设；2s grace 必跑完。
       try {
         child.stdin?.end();
       } catch {
@@ -211,8 +215,12 @@ async function startSidecar({ paths, logsDir }) {
       return await new Promise((res) => {
         const t = setTimeout(() => {
           // grace 没赶上 = python 卡了 / stdin watcher 没装上 → 硬杀。
-          child.kill("SIGKILL");
-          res(false);
+          forceKillTree(child).finally(() => {
+            // forceKillTree 自身不 reject —— 这里走 finally 只是显式表达
+            // "不管 taskkill 返回啥都接 child exit 事件"。child.once("exit") 会
+            // 解掉这个 Promise；万一 child 已经在 taskkill 期间退了，下面 race
+            // 仍 OK（Promise 只 resolve 一次）。
+          });
         }, STOP_GRACE_MS);
         child.once("exit", () => {
           clearTimeout(t);
@@ -221,6 +229,50 @@ async function startSidecar({ paths, logsDir }) {
       });
     },
   };
+}
+
+// 跨平台强杀整棵进程树。
+//
+// POSIX：``child.kill("SIGKILL")`` 即 ``kill -9``，对直接子进程足够 —— 我们这套
+// dev / packaged 都不会再嵌一层 shell（uv 直接 exec python，python 也基本不再
+// spawn 子进程）。
+//
+// Windows：``child.kill("SIGKILL")`` 实际是 ``TerminateProcess(pid)``，只杀直接
+// 子进程。dev 模式下链路是 ``electron → uv.exe → python.exe`` —— 杀 uv 留下
+// python 做孤儿（chahua-server 仍占 127.0.0.1:<port> 蹲在后台）。packaged 模式
+// 直接 spawn python.exe，但万一 python 内部起子进程（未来扩展）同样泄漏。
+//
+// 解法：用 ``taskkill /F /T /PID`` —— /T 递归整棵树，/F 强制。Node 没原生
+// 暴露 Job Object，shell 出 taskkill 是最便携且零依赖的做法。
+function forceKillTree(child) {
+  if (process.platform !== "win32") {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // 已退就算了。
+    }
+    return Promise.resolve();
+  }
+  if (child.pid == null) {
+    return Promise.resolve();
+  }
+  return new Promise((res) => {
+    // ``windowsHide: true`` 避免弹一个空 cmd 窗。stderr 吞掉 —— 进程已退时
+    // taskkill 会喊 "进程不存在"，对调用方无意义。
+    const killer = spawn(
+      "taskkill",
+      ["/pid", String(child.pid), "/T", "/F"],
+      { windowsHide: true, stdio: "ignore" },
+    );
+    killer.on("exit", () => res());
+    killer.on("error", () => {
+      // taskkill 找不到（极罕见，Windows 自带）→ 退回 SIGKILL，至少杀掉直接子进程。
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      res();
+    });
+  });
 }
 
 module.exports = { startSidecar };
