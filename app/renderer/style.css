@@ -25,18 +25,44 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #guests li { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
 #guests li .avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
 #guests li .guest-name { color: #444; }
-#guests li .permission-badge {
-  display: inline-block;
-  font-size: 10px;
-  padding: 1px 5px;
-  margin-left: 6px;
-  border-radius: 8px;
-  background: #ddd;
-  color: #555;
+/* Permission V 标 —— 圆形彩色 + 白 ✓。read-only 不渲染（renderer 先过滤）；
+   workspace-write 蓝、full-access 红。base 共形（sidebar inline fallback / @ dropdown），
+   ``.on-avatar`` 修饰让它浮在头像右上角。 */
+.permission-badge,
+.mention-permission {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 11px;
+  height: 11px;
+  margin-left: 4px;
+  border-radius: 50%;
+  font-size: 8px;
+  font-weight: bold;
+  color: #fff;
+  line-height: 1;
+  flex-shrink: 0;
+  /* 半透明 —— 让 V 标"轻"一点，不抢头像戏；颜色靠 alpha 与底色调和。 */
+  opacity: 0.7;
 }
-#guests li .permission-badge[data-permission="read-only"] { background: #e0e0e0; color: #666; }
-#guests li .permission-badge[data-permission="workspace-write"] { background: #fde9c8; color: #864; }
-#guests li .permission-badge[data-permission="full-access"] { background: #f5d0d0; color: #844; }
+.permission-badge[data-permission="workspace-write"],
+.mention-permission[data-permission="workspace-write"] { background: #4a90e2; }
+.permission-badge[data-permission="full-access"],
+.mention-permission[data-permission="full-access"] { background: #d05050; }
+
+/* sidebar 头像 + V 标的 wrap：让 V 标用绝对定位浮在头像右上角。 */
+#guests li .avatar-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
+.permission-badge.on-avatar {
+  position: absolute;
+  /* 头像 28px 圆，badge 中心放到圆 45° tangent 外侧 —— 大部分 badge 在头像外面，
+     只用左下小角搭在头像边缘上。 */
+  top: -4px;
+  right: -4px;
+  margin: 0;
+  /* 跟 sidebar 背景同色的描边，从头像里"切"出一块感，避免边缘混在皮肤里。 */
+  border: 1.5px solid #f5f1e6;
+  box-sizing: content-box;
+}
 /* isolation 占位徽章 —— P4 接真值时这里读 data-isolation 区分 room / global。 */
 #guests li .isolation-badge {
   display: inline-block;
@@ -143,8 +169,4 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .mention-dropdown li.active,
 .mention-dropdown li:hover { background: #f0e8d4; }
 .mention-dropdown li .mention-name { color: #333; }
-.mention-dropdown li .mention-permission {
-  margin-left: 8px;
-  font-size: 11px;
-  color: #999;
-}
+/* .mention-permission 的圆形 V 标样式见上面 #guests li .permission-badge 共形规则。 */

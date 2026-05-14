@@ -84,14 +84,43 @@ function scoreText(r) {
   }
 }
 
-// 通用 badge 工厂：permission / isolation / mention-permission 三处同构。
-// 调用方决定 className（决定 CSS 样式）和 dataKey（决定语义色）。
+// 通用 badge 工厂：guest-name / isolation / mention-name 走这个（文字徽章）。
+// permission 不走这里 —— 走 makePermissionBadge（V 标）。
 function makeBadge(className, dataKey, value) {
   const b = document.createElement("span");
   b.className = className;
   if (dataKey) b.dataset[dataKey] = value;
   b.textContent = value;
   return b;
+}
+
+// Permission V 标。workspace-write 蓝 / full-access 红 / read-only 调用方先过滤不渲染。
+// 颜色经 data-permission 由 CSS 决定；title 给鼠标 hover 文本兜底 + 屏幕阅读器。
+// 调用方决定 inline（默认）还是 overlay（加 .on-avatar，浮在头像右上角）。
+function makePermissionBadge(permission, className) {
+  const b = document.createElement("span");
+  b.className = className;
+  b.dataset.permission = permission;
+  b.textContent = "✓";
+  b.title = permission;
+  return b;
+}
+
+// 头像 + 右上角 V 标的组合节点。头像缺图返 null（调用方自行决定 fallback）；
+// 头像有 + 显著 permission → 用 ``.avatar-wrap`` 包起来，badge 浮右上角；
+// 头像有 + 默认 permission → 直接返 img。
+function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
+  const img = makeAvatar(g.name, avatarClassName);
+  if (!img) return null;
+  const showBadge = g.permission && g.permission !== "read-only";
+  if (!showBadge) return img;
+  const wrap = document.createElement("span");
+  wrap.className = "avatar-wrap";
+  wrap.appendChild(img);
+  const badge = makePermissionBadge(g.permission, badgeClassName);
+  badge.classList.add("on-avatar");
+  wrap.appendChild(badge);
+  return wrap;
 }
 
 // ── 消息流渲染 ───────────────────────────────────────────────────────
@@ -220,13 +249,13 @@ function renderSidebar(roomInfo) {
   guestsEl.replaceChildren();
   for (const g of guests) {
     const li = document.createElement("li");
-    const avatar = makeAvatar(g.name, "avatar");
-    if (avatar) li.appendChild(avatar);
-    const name = makeBadge("guest-name", null, g.name);
-    li.appendChild(name);
-    // read-only 是默认，徽章只标显著权限节省视觉噪音；isolation=room 同理。
-    if (g.permission && g.permission !== "read-only") {
-      li.appendChild(makeBadge("permission-badge", "permission", g.permission));
+    // V 标默认浮在头像右上角；缺头像（罕见）时回退到名字后 inline，避免丢失权限提示。
+    const showBadge = g.permission && g.permission !== "read-only";
+    const node = makeAvatarWithPermission(g, "avatar", "permission-badge");
+    if (node) li.appendChild(node);
+    li.appendChild(makeBadge("guest-name", null, g.name));
+    if (!node && showBadge) {
+      li.appendChild(makePermissionBadge(g.permission, "permission-badge"));
     }
     if (g.isolation && g.isolation !== "room") {
       li.appendChild(makeBadge("isolation-badge", "isolation", g.isolation));
@@ -274,7 +303,7 @@ function showMentionDropdown(candidates, match) {
     if (i === 0) li.className = "active";
     li.appendChild(makeBadge("mention-name", null, g.name));
     if (g.permission && g.permission !== "read-only") {
-      li.appendChild(makeBadge("mention-permission", null, g.permission));
+      li.appendChild(makePermissionBadge(g.permission, "mention-permission"));
     }
     li.dataset.name = g.name;
     li.addEventListener("mousedown", (ev) => {
