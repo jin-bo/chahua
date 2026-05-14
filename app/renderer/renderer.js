@@ -370,9 +370,24 @@ function detectMention() {
   return { start, end, query: m[1] };
 }
 
+// @broadcast 候选项 —— 镜像 chahua/orchestrator.py:_BROADCAST_TOKENS 的"全员"语义。
+// 用 `.find()` 选**第一个匹配**返回单条，避免空 query 时 "所有人 / ALL" 同时
+// 占两行（语义重复）。顺序决定优先级：中文优先（茶话室中文为主），拉丁起头时
+// fallthrough 到 ALL。server 端 _BROADCAST_TOKENS 还包含 everyone / 大家 / 各位
+// 三个不展示但能手输的兼容词。
+const BROADCAST_CANDIDATES = Object.freeze([
+  { name: "所有人", broadcast: true },
+  { name: "ALL", broadcast: true },
+]);
+
 function matchGuests(query) {
   const q = query.toLowerCase();
-  return guests.filter((g) => g.name.toLowerCase().startsWith(q));
+  const broadcast = BROADCAST_CANDIDATES.find((b) =>
+    b.name.toLowerCase().startsWith(q)
+  );
+  const guestMatches = guests.filter((g) => g.name.toLowerCase().startsWith(q));
+  // broadcast 候选放前面 —— 广播是更强烈的意图（"我要全员注意"vs"我点名某个人"）。
+  return broadcast ? [broadcast, ...guestMatches] : guestMatches;
 }
 
 function showMentionDropdown(candidates, match) {
@@ -384,9 +399,17 @@ function showMentionDropdown(candidates, match) {
   candidates.forEach((g, i) => {
     const li = document.createElement("li");
     if (i === 0) li.className = "active";
+    if (g.broadcast) li.classList.add("broadcast");
     li.appendChild(makeBadge("mention-name", null, g.name));
-    if (g.permission && g.permission !== "read-only") {
+    // broadcast 项不显示 permission 徽章；只茶客有 permission 概念。
+    if (!g.broadcast && g.permission && g.permission !== "read-only") {
       li.appendChild(makePermissionBadge(g.permission, "mention-permission"));
+    }
+    if (g.broadcast) {
+      const hint = document.createElement("span");
+      hint.className = "mention-hint";
+      hint.textContent = "广播";
+      li.appendChild(hint);
     }
     li.dataset.name = g.name;
     li.addEventListener("mousedown", (ev) => {

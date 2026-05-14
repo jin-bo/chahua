@@ -213,8 +213,12 @@ class Orchestrator:
 
             # 同回合"抢话"的多位茶客串行发言；第 2 位发言时，第 1 位的回复已经在
             # transcript 里，靠 cursor 增量自然喂入。每位都计 1 轮（max 卡死整体上限）。
+            # @ 路径（单点 / broadcast）绕过本回合的内层 cap —— 用户已显式指定谁该说话，
+            # 不该被 max_consecutive_ai_turns 截断；下一次 outer while 检查时 cap 自然
+            # 终止 AI 链续接。
+            bypass_inner_cap = all(s.kind == ScoreKind.MENTION for s in scores)
             for guest_name in winners:
-                if self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
+                if not bypass_inner_cap and self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
                     break
                 await self._let_speak(guest_name, turn_id=turn_id, sink=sink)
                 self._consecutive_ai_turns += 1
@@ -248,8 +252,21 @@ class Orchestrator:
         ``respect_at_mention=True``：检查 transcript 最后一条（用户消息）里的 ``@``。
         AI 间接力时（``_consecutive_ai_turns > 0``）不再认 @ —— 否则一个茶客在自己发言里
         @ 别人会形成"自动续接"，与"持麦串行 + 上限"的设计相冲。
+
+        优先级：``@broadcast``（@all / @所有人 等）→ 全员发言一次（含冷却中的）；
+        否则 ``@<guest>`` 单点路由；否则走打分。
         """
-        # 1) @ 提及确定性路由（仅当回应用户那条时）
+        # 1a) @broadcast → 全员一次（用户意图明确，绕过冷却 + 打分）
+        if respect_at_mention and self._find_user_broadcast():
+            self._rounds_without_user_or_mention = 0
+            winners = list(self._guests.keys())  # 注册顺序，确定性
+            scores = [
+                ScoreResult(guest_name=n, score=1.0, kind=ScoreKind.MENTION)
+                for n in winners
+            ]
+            return winners, scores
+
+        # 1b) @ 提及确定性路由（仅当回应用户那条时）
         if respect_at_mention:
             mention = self._find_user_mention()
             if mention is not None and self._cooldown.get(mention, 0) == 0:
@@ -308,7 +325,13 @@ class Orchestrator:
         )
 
     def _find_user_mention(self) -> Optional[str]:
-        """扫 transcript 最后一条消息里的 @ 提及；返回首个匹配的在场茶客名。"""
+        """扫 transcript 最后一条消息里的 @ 提及；返回首个匹配的在场茶客名。
+
+        @broadcast（@all / @所有人 等）不在这里处理 —— 由 :meth:`_find_user_broadcast`
+        独立检查，调用方在该方法前查 broadcast，因此这里遇到 broadcast token 时
+        ``continue`` 看后续是否有具体茶客名（同条消息里 ``@all @宝总`` 的极少数情况
+        broadcast 优先，调用方不会走到 @ 单点路由）。
+        """
         last = self.room.last_message()
         if last is None or last.speaker_id != USER_SPEAKER_ID:
             # 只承认用户消息里的 @；AI 互相 @ 不走确定性路由（见 _run_ai_chain 注释）。
@@ -316,11 +339,24 @@ class Orchestrator:
         for m in _AT_PATTERN.finditer(last.text):
             name = m.group(1).strip()
             if name.lower() in _BROADCAST_TOKENS:
-                # P1 不实现 @all 轮流值守；视为没 @，回退到打分。
-                return None
+                continue
             if name in self._guests:
                 return name
         return None
+
+    def _find_user_broadcast(self) -> bool:
+        """扫 transcript 最后一条消息里有没有 @broadcast 词（all / everyone / 大家 /
+        各位 / 所有人 —— 见 :data:`_BROADCAST_TOKENS`，英文大小写无关）。
+
+        broadcast 走"全员发言一次"路径，独立于 :meth:`_find_user_mention` 的 @ 单点路由。
+        """
+        last = self.room.last_message()
+        if last is None or last.speaker_id != USER_SPEAKER_ID:
+            return False
+        for m in _AT_PATTERN.finditer(last.text):
+            if m.group(1).strip().lower() in _BROADCAST_TOKENS:
+                return True
+        return False
 
     # ── 发言 ──────────────────────────────────────────────────────────
 

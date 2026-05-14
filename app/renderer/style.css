@@ -218,3 +218,17 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .mention-dropdown li:hover { background: #f0e8d4; }
 .mention-dropdown li .mention-name { color: #333; }
 /* .mention-permission 的圆形 V 标样式见上面 #guests li .permission-badge 共形规则。 */
+
+/* @broadcast 项（ALL / 所有人）—— 与茶客视觉区分：左边一条柔和的强调色边，
+   后面挂"广播"提示，避免误点成单点 @。 */
+.mention-dropdown li.broadcast {
+  border-left: 3px solid #a07a3a;
+  padding-left: 9px;  /* 12 - 3 抵消左边变化 */
+}
+.mention-dropdown li.broadcast .mention-name { font-weight: 600; color: #5a4520; }
+.mention-dropdown li .mention-hint {
+  margin-left: 8px;
+  font-size: 10px;
+  color: #a07a3a;
+  letter-spacing: 0.5px;
+}
