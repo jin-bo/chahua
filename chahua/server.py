@@ -132,6 +132,7 @@ class ChahuaServer:
         writer = asyncio.create_task(self._writer(ws, outbound), name="ws-writer")
         try:
             self._emit_room_info(sink)
+            self._emit_room_history(sink)
             async for raw in ws:
                 if not isinstance(raw, str):
                     # 二进制帧不在协议里（envelope 是 JSON 文本）。
@@ -203,6 +204,29 @@ class ChahuaServer:
                     "user_display_name": self._session.user_config.display_name,
                     "user_avatar_data_uri": self._session.user_config.read_avatar_data_uri(),
                 },
+            )
+        )
+
+    def _emit_room_history(self, sink: EnvelopeSink) -> None:
+        """ws 连上 / room_info 之后立刻下发 transcript.jsonl 历史。
+
+        一帧把 ``Room._messages`` 全部塞下去（``Message.to_jsonl_dict()`` 同款字段：
+        ``seq / speaker_id / text / ts_ms / message_id``）。前端按 ``speaker_id``：
+        ``"user"`` → 用户气泡（取 ``user_avatar_data_uri``）；其余 → 茶客气泡，名字
+        即 ``speaker_id``、头像走 guests 名册查找（不在册的茶客退化成无头像，正常）。
+
+        所有历史一次性下发的取舍：实现简单；目前 transcript 体量（数百条）单帧没压力；
+        将来 ws 默认 max_size（~1MB）不够时再改成分页 / 后向滚动懒拉。
+        """
+        msgs = self._session.room.messages_since(0)
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=ChahuaEventType.ROOM_HISTORY,
+                data={"messages": [m.to_jsonl_dict() for m in msgs]},
             )
         )
 

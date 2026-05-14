@@ -13,6 +13,8 @@ agentao 的原生 :class:`agentao.transport.AgentEvent` **不带** 这些字段�
 
 - ``room_info``：``server.py`` 在 ws 连上时一次性下发，给前端装 sidebar / @ 补全；
   不属于任何 turn（``turn_id`` 为 ``None``）。
+- ``room_history``：``server.py`` 在 ``room_info`` 之后下发，回放 transcript.jsonl，
+  前端用来在进 Room 时显示历史对话；同样不属任何 turn（``turn_id`` 为 ``None``）。
 - ``turn_start`` / ``turn_end``：orchestrator 合成；turn 对应一次 pick（top-1~2 抢话）。
 - ``message_start`` / ``message_end``：``TeaGuest.speak()`` 的 ``try / except / finally``
   外层合成 —— 保证 start 必有 end（status 三选一）。
@@ -49,6 +51,7 @@ class ChahuaEventType(str, Enum):
     """前端事件类型。值是 JSON-friendly 字符串，envelope 落盘 / 上线时直接用 ``.value``。"""
 
     ROOM_INFO = "room_info"
+    ROOM_HISTORY = "room_history"
     TURN_START = "turn_start"
     MESSAGE_START = "message_start"
     MESSAGE_DELTA = "message_delta"

@@ -423,10 +423,35 @@ textInput.addEventListener("blur", () => {
 
 // ── envelope 分派 ────────────────────────────────────────────────
 
+// USER 的稳定 ID（与 chahua/user_md.py::USER_SPEAKER_ID 同源；transcript.jsonl 里
+// 用户发言的 speaker_id 字段值）。前端按 speaker_id 分派气泡布局。
+const USER_SPEAKER_ID = "user";
+
+function renderHistory(messages) {
+  // 进 Room 时全量回放 —— 重连场景为防 DOM 残留先清空。
+  messagesEl.replaceChildren();
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  stickToBottom(() => {
+    for (const m of messages) {
+      if (m.speaker_id === USER_SPEAKER_ID) {
+        messagesEl.appendChild(makeUserRow(m.text));
+      } else {
+        const row = makeGuestRow(m.speaker_id);
+        row.textEl.textContent = m.text;
+        messagesEl.appendChild(row.li);
+      }
+    }
+    // 强制滚到底 —— stickToBottom 在 mutate 前还是空，stick=true，会自动定到底。
+  });
+}
+
 function handleEnvelope(env) {
   switch (env.type) {
     case EventType.ROOM_INFO:
       renderSidebar(env.data ?? {});
+      return;
+    case EventType.ROOM_HISTORY:
+      renderHistory(env.data?.messages ?? []);
       return;
     case EventType.TURN_START: {
       const scores = env.data?.scores ?? [];

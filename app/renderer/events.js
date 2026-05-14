@@ -9,6 +9,7 @@
 
 export const EventType = Object.freeze({
   ROOM_INFO: "room_info",
+  ROOM_HISTORY: "room_history",
   TURN_START: "turn_start",
   MESSAGE_START: "message_start",
   MESSAGE_DELTA: "message_delta",
