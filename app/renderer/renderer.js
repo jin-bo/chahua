@@ -5,11 +5,11 @@
 // envelope 消费完整路径：
 //   room_info     → ws 连上首帧：装 sidebar（房间名 / topic / 茶客 + permission）
 //                  + 喂 @ 补全候选 + 触发 user_display_name 显示
-//   turn_start    → 顶端横条列本轮打分明细（同步装 scoresByName）
-//   message_start → 起新一行 <li>，speaker 后面挂当前茶客的 score 徽章
+//   turn_start    → sidebar 各茶客名右侧显示本轮打分小数字（applyScoresToSidebar）
+//   message_start → 起新一行 <li>（头像 + 气泡，无 score 徽章 —— 在 sidebar）
 //   message_delta → 增量 append chunk 到 textEl
 //   message_end   → 按 status 封口（ok 收尾 / cancelled / error）
-//   turn_end      → 清 scoresByName
+//   turn_end      → 清 sidebar 上的打分
 //   guest_thinking / tool_*  → 静默
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
@@ -40,6 +40,9 @@ let connected = false;
 const inFlight = new Map();
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
+// 茶客行 → 打分 span 的引用。sidebar 装好后填，turn_start/turn_end 直接改文字，
+// 不重建 DOM（避免头像 / 徽章闪烁）。
+const scoreSpansByName = new Map();
 // 茶客名单（room_info 来时装）—— @ 补全候选 + 头像查找 + 用户显示名 / 头像。
 let guests = []; // [{name, permission, isolation, avatar_data_uri}, ...]
 let userDisplayName = "我";
@@ -146,6 +149,8 @@ function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
 
 // 茶客行（speaker bubble + avatar）。streaming=true 时 text span 带 streaming class 闪光标。
 // 返回 li 与 textEl —— 调用方在 textEl 上 append 文本（流式 / 一次性）。
+//
+// 打分不挂在气泡里 —— 沿 sidebar 茶客名右侧显示，见 ``applyScoresToSidebar``。
 function makeGuestRow(speaker, { streaming = false } = {}) {
   const li = document.createElement("li");
   li.className = "msg";
@@ -159,8 +164,6 @@ function makeGuestRow(speaker, { streaming = false } = {}) {
   s.className = "speaker";
   s.textContent = speaker;
   header.appendChild(s);
-  const badge = makeScoreBadge(speaker);
-  if (badge) header.appendChild(badge);
   bubble.appendChild(header);
   const textEl = document.createElement("span");
   textEl.className = streaming ? "text streaming" : "text";
@@ -201,27 +204,24 @@ function appendBubble({ speaker, text, kind }) {
   });
 }
 
-function appendTurnBanner(scores) {
-  if (!scores || scores.length === 0) return;
-  stickToBottom(() => {
-    const li = document.createElement("li");
-    li.className = "turn-banner";
-    li.textContent = scores
-      .map((r) => `${r.guest_name ?? "?"}·${scoreText(r)}`)
-      .join("  ");
-    messagesEl.appendChild(li);
-  });
-}
-
-function makeScoreBadge(speaker) {
-  const score = scoresByName.get(speaker);
-  if (!score) return null;
-  const b = document.createElement("span");
-  b.className = "score-badge";
-  b.textContent = scoreText(score);
-  // kind=scored 走默认色（数字打分），其余 kind 给 [data-kind=...] 语义色。
-  if (score.kind && score.kind !== ScoreKind.SCORED) b.dataset.kind = score.kind;
-  return b;
+// 打分写到 sidebar 各茶客行的 ``.guest-score`` span 上（不是主聊天区）。
+// scoresByName 没该茶客 → 清空 span（turn_end 走这条路径，统一清）。
+function applyScoresToSidebar() {
+  for (const [name, span] of scoreSpansByName) {
+    const r = scoresByName.get(name);
+    if (!r) {
+      span.textContent = "";
+      delete span.dataset.kind;
+      continue;
+    }
+    span.textContent = scoreText(r);
+    // kind=scored 走默认浅灰（数字打分），其余 kind 给 [data-kind=...] 语义色。
+    if (r.kind && r.kind !== ScoreKind.SCORED) {
+      span.dataset.kind = r.kind;
+    } else {
+      delete span.dataset.kind;
+    }
+  }
 }
 
 function startStreamingMessage(env) {
@@ -291,6 +291,7 @@ function renderSidebar(roomInfo) {
   // 容器，让接下来的 room_history.replaceChildren 不闪过旧房 DOM。
   inFlight.clear();
   scoresByName = new Map();
+  scoreSpansByName.clear();
   messagesEl.replaceChildren();
   setStatus("ok", `已连接 ${wsUrl}`);
   roomNameEl.textContent = roomInfo.room_name || "—";
@@ -312,6 +313,12 @@ function renderSidebar(roomInfo) {
     if (g.isolation && g.isolation !== "room") {
       li.appendChild(makeBadge("isolation-badge", "isolation", g.isolation));
     }
+    // 打分小数字（turn_start 时填，turn_end 时清）。margin-left:auto 推到右侧；
+    // 空 textContent 时占位不可见，文字一来就显示，不引发布局抖动（min-width）。
+    const score = document.createElement("span");
+    score.className = "guest-score";
+    li.appendChild(score);
+    scoreSpansByName.set(g.name, score);
     guestsEl.appendChild(li);
   }
   renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
@@ -517,7 +524,7 @@ function handleEnvelope(env) {
       const scores = env.data?.scores ?? [];
       console.debug("[turn_start]", scores);
       scoresByName = new Map(scores.map((r) => [r.guest_name, r]));
-      appendTurnBanner(scores);
+      applyScoresToSidebar();
       return;
     }
     case EventType.MESSAGE_START:
@@ -531,6 +538,7 @@ function handleEnvelope(env) {
       return;
     case EventType.TURN_END:
       scoresByName = new Map();
+      applyScoresToSidebar();
       return;
     // guest_thinking / tool_* 暂时静默。
   }
