@@ -17,6 +17,7 @@ P0 在 REPL 启动时加载一次；P1 接入意愿打分主循环后改为按�
 
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,22 @@ class UserConfig:
     def has_persona(self) -> bool:
         """是否有可注入的用户角色信息（决定 onboarding 要不要附"关于「X」"块）。"""
         return self.full_md is not None
+
+    def read_avatar_data_uri(self) -> Optional[str]:
+        """用户头像约定：与命中的 USER.md sibling 同名只换 ``.png``（默认 ``<repo>/USER.png``）。
+
+        与 :meth:`chahua.config.GuestConfig.read_avatar_data_uri` 同模式 —— sibling .png +
+        base64 data URI；没文件返 ``None``，前端按无头像渲染。``source`` 是 None（用户没
+        放 USER.md）时直接返 ``None`` —— 没角色卡也就没头像约定可言。
+        """
+        if self.source is None:
+            return None
+        avatar = self.source.with_suffix(".png")
+        try:
+            data = avatar.read_bytes()
+        except FileNotFoundError:
+            return None
+        return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
 
 
 def strip_top_h1(md: str) -> str:

@@ -39,22 +39,36 @@ let connected = false;
 const inFlight = new Map();
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
-// 茶客名单（room_info 来时装）—— @ 补全候选 + 头像查找 + 用户显示名。
+// 茶客名单（room_info 来时装）—— @ 补全候选 + 头像查找 + 用户显示名 / 头像。
 let guests = []; // [{name, permission, isolation, avatar_data_uri}, ...]
 let userDisplayName = "我";
+let userAvatarDataUri = null;
 
-// 头像 <img>。缺图（或不是注册茶客）返 null —— 调用方按"无头像"降级（不挂）。
-// 茶客 ≤ 个位数，线性 find 比维护并行 Map 简单（且任何 guests 变更都自动跟上）。
-function makeAvatar(name, className) {
-  const src = guests.find((g) => g.name === name)?.avatar_data_uri;
-  if (!src) return null;
+// 头像 <img> 通用工厂：dataUri 缺 → 返 null（调用方按"无头像"降级）。
+function makeAvatarImg(dataUri, className, alt) {
+  if (!dataUri) return null;
   const img = document.createElement("img");
   img.className = className;
-  img.src = src;
-  img.alt = name;
+  img.src = dataUri;
+  img.alt = alt || "";
   // data URI 不会 404，但解码失败（坏图）时静默 hide。
   img.addEventListener("error", () => img.remove(), { once: true });
   return img;
+}
+
+// 茶客头像 —— 按名字在 guests 数组里 find；茶客 ≤ 个位数，线性查比维护并行 Map 简单
+// （且任何 guests 变更都自动跟上）。
+function makeAvatar(name, className) {
+  return makeAvatarImg(
+    guests.find((g) => g.name === name)?.avatar_data_uri,
+    className,
+    name,
+  );
+}
+
+// 用户头像 —— 走 userAvatarDataUri（room_info 时装）。
+function makeUserAvatar(className) {
+  return makeAvatarImg(userAvatarDataUri, className, userDisplayName);
 }
 
 function setStatus(kind, text) {
@@ -154,7 +168,8 @@ function makeGuestRow(speaker, { streaming = false } = {}) {
   return { li, textEl };
 }
 
-// 用户行：右对齐气泡，无头像无名字。
+// 用户行：右对齐气泡 + 头像（无名字 —— 自己看自己 redundant）。镜像茶客布局：
+// 茶客是 [头像][气泡]，用户是 [气泡][头像]。
 function makeUserRow(text) {
   const li = document.createElement("li");
   li.className = "user";
@@ -165,6 +180,8 @@ function makeUserRow(text) {
   t.textContent = text;
   bubble.appendChild(t);
   li.appendChild(bubble);
+  const avatar = makeUserAvatar("msg-avatar");
+  if (avatar) li.appendChild(avatar);
   return li;
 }
 
@@ -273,6 +290,7 @@ function renderSidebar(roomInfo) {
   roomNameEl.textContent = roomInfo.room_name || "—";
   roomTopicEl.textContent = roomInfo.topic || "";
   userDisplayName = roomInfo.user_display_name || "我";
+  userAvatarDataUri = roomInfo.user_avatar_data_uri || null;
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   guestsEl.replaceChildren();
   for (const g of guests) {

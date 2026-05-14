@@ -77,9 +77,9 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #messages { flex: 1; list-style: none; margin: 0; padding: 8px 12px; overflow-y: auto; }
 #messages li { padding: 4px 0; line-height: 1.5; }
 
-/* 茶客行：头像左、气泡右；用户行：气泡靠右。turn-banner 不走 flex（保持块级 + ::before）。 */
+/* 茶客行：头像左、气泡右；用户行：气泡右、头像更右（镜像）；turn-banner 不走 flex。 */
 #messages li.msg, #messages li.error { display: flex; align-items: flex-start; gap: 8px; }
-#messages li.user { display: flex; justify-content: flex-end; }
+#messages li.user { display: flex; justify-content: flex-end; align-items: flex-start; gap: 8px; }
 #messages li .msg-avatar {
   width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
   flex-shrink: 0; margin-top: 2px;
