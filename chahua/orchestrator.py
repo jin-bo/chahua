@@ -219,13 +219,28 @@ class Orchestrator:
     # ── AI 链 ─────────────────────────────────────────────────────────
 
     async def _run_ai_chain(self, *, sink: EnvelopeSink) -> None:
+        # 上一轮已经 emit ``turn_end(next='ai')``、UI 仍守在"停止"按钮等下一个 turn_start
+        # 的那个 turn_id；下一次 pick 成功（emit 新 turn_start / turn_end）就清零，pick 失败
+        # 则用这个 id 补一帧 ``turn_end(next='user')`` 让 UI 收回按钮。None = 无未结链。
+        last_open_turn_id: Optional[str] = None
         while self._consecutive_ai_turns < self.config.max_consecutive_ai_turns:
             pick = await self._pick_next_speaker(
                 respect_at_mention=self._consecutive_ai_turns == 0
             )
             if pick is None:
-                # 没人想接话 —— 没 emit 过 turn_start，不需要 turn_end 收尾。
-                # CLI / UI 看到 submit_user_message 返回即知本回合结束。
+                # 没人想接话。两种子情况：
+                #   a) 本回合一上来就 None（用户消息触发，但全员低分 / 全员冷却）——
+                #      没 emit 过 turn_start，UI 状态干净，直接返回。
+                #   b) AI 链中途 None（前一轮 next='ai'，但下一轮打分全 miss）——
+                #      UI 上一轮收到 turn_end(next='ai') 守在"停止"按钮等永远不来的
+                #      下一个 turn_start，补一帧 turn_end(next='user') 让它回到"发送"。
+                if last_open_turn_id is not None:
+                    self._emit_turn(
+                        sink,
+                        turn_id=last_open_turn_id,
+                        type=ChahuaEventType.TURN_END,
+                        data={"next": "user"},
+                    )
                 return
 
             winners, scores = pick
@@ -276,6 +291,9 @@ class Orchestrator:
                 type=ChahuaEventType.TURN_END,
                 data={"next": next_state},
             )
+            # next='ai' 时记下本 turn_id，下一轮 pick 若失败要回来补 fixup；
+            # next='user' 时 UI 已自行收回按钮，无 pending 状态。
+            last_open_turn_id = turn_id if next_state == "ai" else None
 
             # 摘要 / 冷却递减每"pick 周期"一次（不是每个发言者一次）—— 否则同回合 2 位
             # 同时说后第一位的冷却被立刻 tick 掉，下个 pick 就能再次入选，违背"刚发言不接自己"。
