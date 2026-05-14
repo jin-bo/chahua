@@ -18,6 +18,11 @@ const { startSidecar } = require("./sidecar");
 const { resolvePaths } = require("./paths");
 const { seedUserData } = require("./seed");
 
+// app.getPath('logs') 读的是 app.getName()。package.json 里 name 是 "chahua-app"
+// （Electron 要 dash 而非空格），但日志目录想要的是 ~/Library/Logs/chahua/。
+// setName 必须在 getPath('logs') 之前；放最顶安全。
+app.setName("chahua");
+
 const PRELOAD_PATH = path.join(__dirname, "..", "preload", "index.js");
 const RENDERER_HTML = path.join(__dirname, "..", "renderer", "index.html");
 
@@ -61,7 +66,7 @@ app.whenReady().then(async () => {
     console.error("[chahua] seed userData 失败:", e);
   }
   try {
-    sidecar = await startSidecar({ paths });
+    sidecar = await startSidecar({ paths, logsDir: app.getPath("logs") });
   } catch (e) {
     console.error("[chahua] sidecar 启动失败:", e);
     app.quit();

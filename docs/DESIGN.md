@@ -558,7 +558,7 @@ chahua/
 | **P3.2.2 茶客侧栏 + @ 补全** | `ChahuaEventType.ROOM_INFO` + `ChahuaEnvelope.turn_id` 改 `Optional[str]`（连接级事件 turn_id=None）；`server._emit_room_info` 在 `_serve_one` 起头从 `room_config.guests` 一次性下发：`{room_name, topic, guests:[{name, permission, isolation}], user_display_name}`；renderer 横向 layout（aside#sidebar | ul#messages） + 底 composer；sidebar 列茶客 + permission 徽章（read-only 默认不显眼，workspace-write 黄、full-access 红）+ isolation 徽章占位（hardcode `"room"`，P4 接真值）；@ 正则 `\S*` 与服务端反黑名单对齐，候选靠 guests 名册 `startsWith` 过滤，键盘 ↑↓ Enter/Tab Esc 操作，mousedown 而非 click 抢 input blur，IME composition Enter 守卫不抢拼音回车，submit 时若 dropdown 开着 noop 防误发；composer 等 `room_info` 到达才解锁（避 echo 名跳变窗口）；用户消息 echo 用 `user_display_name`（从 room_info 拿） | sidebar 有人；@ 弹候选含 `-`/`.`/中点茶客名；选中后服务端 `_route` 命中；user echo 名字与 CLI 一致；中文 IME 输入不被前端误抢 |
 | **P3.2.3 ws 重连退避** | renderer `ws.onclose` 退避重连（1s → 2s → 5s → 10s 上限），状态条显示尝试次数；用户主动关窗 / 退出不触发重连（main 进程关 sidecar 前先 webContents.send 一个 "shutting-down" 信号） | sidecar 中途死或 macOS sleep/wake，App 自动恢复 |
 | **P3.3.1 cancel**（✓ 完工） | wire 加 inbound `cancel`；server 改 in-flight task 模型（`asyncio.create_task` 挂 `_inflight_turn_task`，task.cancel() 收 turn），`switch_room` / `clear_room` 走 `_cancel_and_drain_inflight()` 先收净再切；orchestrator `_run_ai_chain` 加 try/except CancelledError emit `turn_end(status=cancelled, next:"user")`；前端 submitBtn 形变「发送 / 停止」按 `currentTurnId` 切，submit handler 双语义路由，断线本地清 `currentTurnId` | turn 跑到一半能停；停止后 next user_message 还能继续；`switch_room` / `clear_room` 在 turn 跑时先 cancel 再操作 |
-| **P3.3.2 打包前置 + 打包 + 主进程兜底**（部分） | (a) ✓ python 拆 `app_root` / `user_data_root`：`Paths` dataclass + `Paths.from_env()` 读 `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`，persona 双根搜，USER.md 只在 user_data；(b) ✓ Electron 首启动 seed：`app/main/paths.js` 决定双根（dev 同源仓库根 / packaged 拆 `process.resourcesPath` + `app.getPath('userData')`），`app/main/seed.js` 把 `app/templates/{USER.md, .env.example, rooms/p3-黄河路}` 拷到 `userDataRoot` 并写 `.chahua-seeded` marker（幂等 + dev 同源跳过），spawn sidecar 时显式 export `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`；(c) electron-builder 打 macOS .dmg + sidecar bundling 策略（依赖系统 uv vs. 内嵌 Python）；(d) SIGTERM / SIGINT 路径补全；(e) sidecar stderr/stdout 落盘到 `app.getPath('logs')` | dev `CHAHUA_USER_DATA=/tmp/x` 起 server 验证；.dmg 双击装可用；后台异常发布版本能拿到日志 |
+| **P3.3.2 打包前置 + 打包 + 主进程兜底**（部分） | (a) ✓ python 拆 `app_root` / `user_data_root`：`Paths` dataclass + `Paths.from_env()` 读 `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`，persona 双根搜，USER.md 只在 user_data；(b) ✓ Electron 首启动 seed：`app/main/paths.js` 决定双根（dev 同源仓库根 / packaged 拆 `process.resourcesPath` + `app.getPath('userData')`），`app/main/seed.js` 把 `app/templates/{USER.md, .env.example, rooms/p3-黄河路}` 拷到 `userDataRoot` 并写 `.chahua-seeded` marker（幂等 + dev 同源跳过），spawn sidecar 时显式 export `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`；(c) electron-builder 打 macOS .dmg + sidecar bundling 策略（依赖系统 uv vs. 内嵌 Python）；(d) SIGTERM / SIGINT 路径补全；(e) ✓ sidecar stderr/stdout 落盘到 `app.getPath('logs')` —— `app.setName("chahua")` 让路径走 `~/Library/Logs/chahua/sidecar.log`，append + session header（timestamp + pid），exit/error 写 footer 后 idempotent close；顺手吃掉 stdout（之前 `stdio[1]="pipe"` 无 listener 风险） | dev `CHAHUA_USER_DATA=/tmp/x` 起 server 验证；.dmg 双击装可用；后台异常发布版本能拿到日志 |
 | **P4 打磨 + ACP 异构茶客** | 房间配置文件完善、人格画廊、运行时增删茶客、可选「主持人」agent、工具权限预设、删除房间/清茶客记忆 UI；**抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip** | 成品；并接入第一个非 agentao 的 ACP 茶客作为验收 |
 
 ## 7. 待定 / 后续
@@ -570,6 +570,30 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-05-14（P3.3.2 第 3 层：sidecar 日志落盘完工后）** —— stderr/stdout 落
+  `~/Library/Logs/chahua/sidecar.log` 的落地决策：
+  - **`app.setName("chahua")` 而非接受默认 "chahua-app"** —— Electron 的 `name`
+    字段要 dash 友好（不能空格），但日志目录想看到的是 `~/Library/Logs/chahua/`
+    而不是 `~/Library/Logs/chahua-app/`。`setName` 在 `app.getPath('logs')` 之前
+    调一次，packaged 模式下用户找日志的"App 名"也对齐。
+  - **append 模式 + session header 而非滚动新文件** —— 每次启动写一行
+    ``----- sidecar session <ISO> pid=N -----`` 头，exit 写 footer ``----- sidecar
+    exit code=N signal=... -----``。多次启动累加进同一文件，grep / `tail -f` 顺手；
+    rotation 留 P4。崩溃场景下 footer 不写也不影响 forensic（header 已经记了时间）。
+  - **stdout 顺手吃掉** —— P3.1 起 `stdio[1]="pipe"` 但 stdout 无 listener，Python
+    那边 `print` 写满 64KB pipe buffer 会阻塞（server.py 自身没怎么 print 所以一直
+    没爆，但 agentao runtime 之类的子层 print 是不可控变量）。P3.3.2.e 落盘顺手
+    `child.stdout.on("data", ...)` 同样落文件 + 透传 `[sidecar]` 到 main 的 stdout。
+  - **idempotent `closeLog`** —— Node 不保证 `error` 与 `exit` 互斥（ENOENT 路径只
+    `error`、正常退只 `exit`，但极端竞态都触发也不能让 stream 二次 `end`）。一个
+    `logClosed` boolean 防双关。
+  - **失败软退** —— `logsDir` 不可写 → `openSidecarLog` 返回 null，sidecar 继续起，
+    `logEntry?.stream.write` 全 no-op。日志写不了不该挡 sidecar 启动；console
+    透传仍照走，dev 能在 terminal 看到。
+  - **console 透传 + 文件落盘并行**——`[sidecar]` 前缀只加到 main 进程 stdout/stderr
+    透传那条路径，文件里是原始内容（无前缀）。dev 模式 terminal 看 `[sidecar]`
+    立刻分辨来源；packaged 模式 terminal 不挂时透传是 no-op、文件仍然落。
 
 - **2026-05-14（P3.3.2 第 2 层：Electron 首启动 seed 完工后）** —— Electron 把
   `app/templates/` 拷进 `userDataRoot` 的落地决策：
