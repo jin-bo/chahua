@@ -1,7 +1,8 @@
 # 黄河路 —— P3.2.2 sidebar / @ 补全验证用。
 # 三人都是《繁花》黄河路上的角色，话茬比 p1-test 的玲子 / 爷叔活。
 #
-# 三人都 workspace-write —— 与 p1-test 同口径，本地玩开放 / shipped 默认仍 read-only。
+# 宝总 full-access（演示红 V 标）/ 其他两人 workspace-write —— 本地玩开放，
+# shipped 默认仍 read-only。
 
 [room]
 name  = "黄河路"
@@ -11,7 +12,7 @@ rules = "保持中文、单条不超过 200 字、不复述别人的话。"
 [[guest]]
 name       = "宝总"
 persona    = "chahua/personas/宝总.md"
-permission = "workspace-write"
+permission = "full-access"
 
 [[guest]]
 name       = "汪小姐"
