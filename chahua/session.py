@@ -18,6 +18,7 @@ from typing import Optional
 from agentao.llm import LLMClient
 from dotenv import load_dotenv
 
+from ._paths import Paths
 from .config import RoomConfig, load_room_config
 from .cursor import GuestCursor
 from .guest import TeaGuest
@@ -30,7 +31,7 @@ from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
 _log = logging.getLogger(__name__)
 
 
-# 默认房间目录（相对 :func:`find_repo_root`）。CLI 与 server 共用，避免两边各自硬编。
+# 默认房间目录（相对 :attr:`Paths.user_data_root`）。CLI 与 server 共用，避免两边各自硬编。
 DEFAULT_ROOM_REL: Path = Path("rooms/p1-test")
 
 
@@ -45,19 +46,14 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
 }
 
 
-def find_repo_root() -> Path:
-    """仓库根目录 = 包目录的父目录。函数名避开 ``build_room_session(repo_root=...)``
-    参数名的局部 shadow。
+def load_env_files(paths: Paths) -> None:
+    """凭码查找顺序（高 → 低）：shell export > ``user_data_root/.env`` > ``~/.env``。
+
+    ``load_dotenv`` 默认 ``override=False``，shell 的值不会被覆盖。打包路径上
+    ``user_data_root`` = ``~/Library/Application Support/chahua/``，与 dev 仓库根的
+    ``.env`` 自动解耦。
     """
-    return Path(__file__).resolve().parent.parent
-
-
-def load_env_files(root: Path) -> None:
-    """凭据查找顺序（高 → 低）：shell export > 项目 .env > ~/.env。
-
-    ``load_dotenv`` 默认 ``override=False``，shell 的值不会被覆盖。
-    """
-    load_dotenv(root / ".env")
+    load_dotenv(paths.user_data_root / ".env")
     load_dotenv(Path.home() / ".env")
 
 
@@ -145,8 +141,9 @@ class RoomSession:
                 _log.exception("guest %s close failed", guest.name)
 
 
-def discover_rooms(repo_root: Path) -> list[dict]:
-    """扫 ``<repo>/rooms/*/room.toml``，返回 ``[{room_id, name, topic}, ...]``，按 id 升序。
+def discover_rooms(paths: Paths) -> list[dict]:
+    """扫 ``user_data_root/rooms/*/room.toml``，返回 ``[{room_id, name, topic}, ...]``，
+    按 id 升序。
 
     ``room_id`` = 房间目录名（P4 加 ``[room].id`` 字段前的稳定 ID 占位 —— 同
     :mod:`chahua.events` 里 envelope ``room_id`` 也用 ``room.name`` 占位）。
@@ -154,9 +151,10 @@ def discover_rooms(repo_root: Path) -> list[dict]:
     一个坏 toml 不该让整个房间列表崩。
 
     给 P3.2.x 切换房间 wire 用，server 端 ``_emit_room_info`` 调一次塞进
-    ``rooms_available`` 字段。
+    ``rooms_available`` 字段。房间永远在 ``user_data_root`` 下 —— 打包后 app bundle
+    不带 rooms（首启动会从 templates/ 拷一份默认房进 user_data）。
     """
-    rooms_dir = repo_root / "rooms"
+    rooms_dir = paths.user_data_root / "rooms"
     if not rooms_dir.is_dir():
         return []
     results: list[dict] = []
@@ -181,7 +179,7 @@ def discover_rooms(repo_root: Path) -> list[dict]:
 
 def build_room_session(
     room_dir: Path,
-    repo_root: Path,
+    paths: Paths,
     *,
     orchestrator_config: Optional[OrchestratorConfig] = None,
 ) -> RoomSession:
@@ -190,9 +188,9 @@ def build_room_session(
     抛 :class:`chahua.config.RoomConfigError` 当 toml 缺/错；抛 SystemExit 当 LLM
     凭据缺失（与 P0~P2.2 行为一致 —— 缺凭据没法跑，早炸早好）。
     """
-    room_config = load_room_config(room_dir, repo_root=repo_root)
+    room_config = load_room_config(room_dir, paths=paths)
     user_config = load_user_md(
-        repo_root=repo_root,
+        user_data_root=paths.user_data_root,
         room_dir=room_config.room_dir,
         explicit=room_config.user_md_override,
     )

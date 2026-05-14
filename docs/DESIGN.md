@@ -558,7 +558,7 @@ chahua/
 | **P3.2.2 茶客侧栏 + @ 补全** | `ChahuaEventType.ROOM_INFO` + `ChahuaEnvelope.turn_id` 改 `Optional[str]`（连接级事件 turn_id=None）；`server._emit_room_info` 在 `_serve_one` 起头从 `room_config.guests` 一次性下发：`{room_name, topic, guests:[{name, permission, isolation}], user_display_name}`；renderer 横向 layout（aside#sidebar | ul#messages） + 底 composer；sidebar 列茶客 + permission 徽章（read-only 默认不显眼，workspace-write 黄、full-access 红）+ isolation 徽章占位（hardcode `"room"`，P4 接真值）；@ 正则 `\S*` 与服务端反黑名单对齐，候选靠 guests 名册 `startsWith` 过滤，键盘 ↑↓ Enter/Tab Esc 操作，mousedown 而非 click 抢 input blur，IME composition Enter 守卫不抢拼音回车，submit 时若 dropdown 开着 noop 防误发；composer 等 `room_info` 到达才解锁（避 echo 名跳变窗口）；用户消息 echo 用 `user_display_name`（从 room_info 拿） | sidebar 有人；@ 弹候选含 `-`/`.`/中点茶客名；选中后服务端 `_route` 命中；user echo 名字与 CLI 一致；中文 IME 输入不被前端误抢 |
 | **P3.2.3 ws 重连退避** | renderer `ws.onclose` 退避重连（1s → 2s → 5s → 10s 上限），状态条显示尝试次数；用户主动关窗 / 退出不触发重连（main 进程关 sidecar 前先 webContents.send 一个 "shutting-down" 信号） | sidecar 中途死或 macOS sleep/wake，App 自动恢复 |
 | **P3.3.1 cancel**（✓ 完工） | wire 加 inbound `cancel`；server 改 in-flight task 模型（`asyncio.create_task` 挂 `_inflight_turn_task`，task.cancel() 收 turn），`switch_room` / `clear_room` 走 `_cancel_and_drain_inflight()` 先收净再切；orchestrator `_run_ai_chain` 加 try/except CancelledError emit `turn_end(status=cancelled, next:"user")`；前端 submitBtn 形变「发送 / 停止」按 `currentTurnId` 切，submit handler 双语义路由，断线本地清 `currentTurnId` | turn 跑到一半能停；停止后 next user_message 还能继续；`switch_room` / `clear_room` 在 turn 跑时先 cancel 再操作 |
-| **P3.3.2 打包 + 主进程兜底**（待） | electron-builder 打 macOS .dmg；sidecar bundling 策略（依赖系统 uv vs. 内嵌 Python）；main 进程 SIGTERM / SIGINT 路径补全（P3.1 只挂 `before-quit`，macOS 直发 SIGTERM 不走该事件）；sidecar stderr/stdout 落盘到 `app.getPath('logs')`（打包后 process.stderr 会丢） | .dmg 双击装可用；后台异常发布版本能拿到日志 |
+| **P3.3.2 打包前置 + 打包 + 主进程兜底**（部分） | (a) ✓ python 拆 `app_root` / `user_data_root`：`Paths` dataclass + `Paths.from_env()` 读 `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`，persona 双根搜，USER.md 只在 user_data；(b) Electron main 进程首启动从 `app/templates/` 拷默认房 + `.env.example` + 空 `USER.md` 到 `app.getPath('userData')`；(c) electron-builder 打 macOS .dmg + sidecar bundling 策略（依赖系统 uv vs. 内嵌 Python）；(d) SIGTERM / SIGINT 路径补全；(e) sidecar stderr/stdout 落盘到 `app.getPath('logs')` | dev `CHAHUA_USER_DATA=/tmp/x` 起 server 验证；.dmg 双击装可用；后台异常发布版本能拿到日志 |
 | **P4 打磨 + ACP 异构茶客** | 房间配置文件完善、人格画廊、运行时增删茶客、可选「主持人」agent、工具权限预设、删除房间/清茶客记忆 UI；**抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip** | 成品；并接入第一个非 agentao 的 ACP 茶客作为验收 |
 
 ## 7. 待定 / 后续
@@ -570,6 +570,33 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-05-14（P3.3.2 第 1 层：python 拆 root 完工后）** —— 打包前置的 app_root /
+  user_data_root 双根：
+  - **拆两个 root 而非一个 `CHAHUA_HOME`** —— `app_root` 是只读 asset 根（ship 自带的
+    `chahua/personas/` 等），`user_data_root` 是用户数据根（rooms / USER.md / .env /
+    用户自定义 personas）。打包后两者必须分离（app bundle 只读，用户数据 macOS 走
+    `~/Library/Application Support/chahua/`）；混在一起会让"用户改 USER.md"和
+    "ship 自带人格卡"互相污染。dev 模式两个 env 都不设 → 都回退到包目录的父
+    （仓库根），与 P3.3.1 行为 100% 一致。
+  - **`Paths` dataclass 一处构造、到处透传** —— 比起每函数加 `app_root` /
+    `user_data_root` 两个参数，单个 dataclass 参数省得参数表炸开；未来加 `cache_root` /
+    `logs_root` 也只动一个类型。`Paths.from_env()` 读 `CHAHUA_APP_ROOT` /
+    `CHAHUA_USER_DATA` env，Electron main 进程 spawn sidecar 时显式 export。
+  - **persona 走 `find_in_data_then_app`，USER.md 只在 user_data 找** —— persona 是
+    asset 性质（ship 默认 + 用户可加 / 可 override），双根搜 user 优先 + fall through
+    app；USER.md 是用户私有数据，无 fall-through，找不到就 default。两条路径的语义
+    分歧由 `_resolve_user_md_override` docstring 显式说明，免得未来手抖统一掉。
+  - **`build_room_session(room_dir, paths=...)`** —— `repo_root` 参数彻底删除，所有
+    路径解析下沉到 `paths` 对象的方法（`find_in_data_then_app` / `user_data_root /
+    'rooms'`）。`session.py:find_repo_root` 函数被 `Paths.from_env()` 取代；env 都
+    不设时的 dev fallback 由 `_paths._dev_fallback_root()` 统一实现。
+  - **启动日志只在两 root 分离时打** —— `_serve` 检查 `app_root != user_data_root`，
+    分离了才打两行 root 信息（dev 同源时打了反而 noise）。
+  - **room.toml `persona` 字段语义微妙改变** —— 原是"相对 repo_root"，现在"相对
+    `user_data_root` 优先 + 相对 `app_root` fall-through"。dev 模式两根同源 → 100%
+    兼容；打包后用户想改 / 加 persona，只要在 `user_data_root` 下镜像
+    `chahua/personas/<name>.md` 路径放文件即生效（不动 ship 的 app bundle）。
 
 - **2026-05-13（P3.3 cancel 完工后）** —— turn 跑到一半能停的落地决策：
   - **cancel 走 `asyncio.Task.cancel()` 而非 `CancellationToken.cancel()`** —— agentao 的 `arun` 已经把"外部 task 被 cancel"转译成 token cancel（捕到 `await future` 的 CancelledError 后 `token.cancel(ASYNC_CANCEL_REASON)` 再 reraise），所以服务端只持 task 引用、不持 token 引用就够。好处：异常类型统一成 `asyncio.CancelledError`，与 `guest.speak` 现有的 `except (asyncio.CancelledError, KeyboardInterrupt)` 同口径；不需要在 chahua 这边引入 `AgentCancelledError` 第二条分支。

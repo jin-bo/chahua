@@ -10,9 +10,12 @@
 **为什么严格而不是忽略未知键**：toml 写错 / 写了 P4 字段以为生效，是这个阶段最容易发生
 的事。静默忽略会让用户配置和实际行为之间出现幻觉。错得响一点更安全。
 
-**路径解析**：``persona`` / ``user_md`` 相对路径相对 **repo_root**，绝对路径原样
-（走 :func:`chahua._paths.resolve_under`）。同一 repo 多房间共享人格 → 相对 repo_root
-是合适默认。room-self-contained 需要时 P4 再扩展。
+**路径解析**：
+- ``persona`` 相对路径走 :meth:`Paths.find_in_data_then_app` 双根搜 ——
+  ``user_data_root`` 优先（用户可 override 或加新茶客），fall through 到 ``app_root``
+  （ship 自带）。绝对路径原样。
+- ``user_md`` 相对路径只在 ``user_data_root`` 下找（USER.md 是用户私有，不该 fall
+  through 到 app bundle）。绝对路径原样。
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from ._paths import resolve_under
+from ._paths import Paths, resolve_under
 from .permissions import VALID_MODES, is_valid_mode
 
 # [room] 段允许的键。P1.5 故意保持小。
@@ -110,7 +113,7 @@ class RoomConfig:
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
 
-def load_room_config(room_dir: Path, *, repo_root: Path) -> RoomConfig:
+def load_room_config(room_dir: Path, *, paths: Paths) -> RoomConfig:
     """读 ``<room_dir>/room.toml`` 并校验。
 
     所有错误都包成 :class:`RoomConfigError` 抛出，CLI 层一致捕获并打用户友好提示。
@@ -129,7 +132,7 @@ def load_room_config(room_dir: Path, *, repo_root: Path) -> RoomConfig:
     except tomllib.TOMLDecodeError as e:
         raise RoomConfigError(f"{toml_path} TOML 解析失败：{e}") from e
 
-    return _build(data, room_dir=room_dir, repo_root=repo_root)
+    return _build(data, room_dir=room_dir, paths=paths)
 
 
 # ── 内部 ─────────────────────────────────────────────────────────────────────
@@ -139,7 +142,7 @@ def _build(
     data: dict[str, Any],
     *,
     room_dir: Path,
-    repo_root: Path,
+    paths: Paths,
 ) -> RoomConfig:
     toml_path = room_dir / "room.toml"
     _check_unknown_toplevel(data, toml_path)
@@ -165,12 +168,12 @@ def _build(
 
     user_md_override = _resolve_user_md_override(
         room_raw.get("user_md"),
-        repo_root=repo_root,
+        paths=paths,
         toml_path=toml_path,
     )
 
     guests = _build_guests(
-        data.get("guest", []), repo_root=repo_root, toml_path=toml_path
+        data.get("guest", []), paths=paths, toml_path=toml_path
     )
 
     return RoomConfig(
@@ -184,7 +187,7 @@ def _build(
 
 
 def _build_guests(
-    guests_raw: Any, *, repo_root: Path, toml_path: Path
+    guests_raw: Any, *, paths: Paths, toml_path: Path
 ) -> tuple[GuestConfig, ...]:
     if not isinstance(guests_raw, list) or not guests_raw:
         raise RoomConfigError(
@@ -223,11 +226,16 @@ def _build_guests(
             raise RoomConfigError(
                 f"{toml_path}: [[guest]] {name!r} 缺 persona"
             )
-        persona_path = resolve_under(repo_root, persona_raw).resolve()
-        if not persona_path.is_file():
+        # 双根搜：user_data 优先 → app fall through。打包后 ship 的 personas 在
+        # app_root/chahua/personas/，用户自定义放 user_data_root 同位置即 override。
+        hit = paths.find_in_data_then_app(persona_raw)
+        if hit is None:
             raise RoomConfigError(
-                f"{toml_path}: [[guest]] {name!r} 的 persona 文件不存在：{persona_path}"
+                f"{toml_path}: [[guest]] {name!r} 的 persona 文件不存在：{persona_raw}\n"
+                f"已搜：{paths.user_data_root / persona_raw}\n"
+                f"     {paths.app_root / persona_raw}"
             )
+        persona_path = hit.resolve()
 
         permission_raw = _as_str(
             g.get("permission") or "read-only",
@@ -250,12 +258,15 @@ def _build_guests(
 
 
 def _resolve_user_md_override(
-    raw: Any, *, repo_root: Path, toml_path: Path
+    raw: Any, *, paths: Paths, toml_path: Path
 ) -> str | None:
     """处理 ``[room].user_md`` 字段。给了的话必须存在 —— typo 不能静默回退。
 
-    返回原字符串（不是 resolved Path）—— ``load_user_md`` 自己会再次拿 ``repo_root``
-    拼一遍。这里只是早一步校验。
+    返回原字符串（不是 resolved Path）—— ``load_user_md`` 自己会再次拿
+    ``user_data_root`` 拼一遍。这里只是早一步校验。
+
+    USER.md 不走 persona 那种"双根搜"路径（user_data_root 优先 + fall through app
+    bundle）—— USER.md 是用户私有数据，app bundle 不带；解析只在 user_data_root 下找。
     """
     if raw is None:
         return None
@@ -266,7 +277,7 @@ def _resolve_user_md_override(
     s = raw.strip()
     if not s:
         return None
-    candidate = resolve_under(repo_root, s)
+    candidate = resolve_under(paths.user_data_root, s)
     if not candidate.is_file():
         raise RoomConfigError(
             f"{toml_path}: [room].user_md={s!r} 指定的文件不存在：{candidate}"

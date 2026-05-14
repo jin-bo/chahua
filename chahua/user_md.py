@@ -100,22 +100,27 @@ def strip_top_h1(md: str) -> str:
 
 
 def _resolve_path(
-    repo_root: Path,
+    user_data_root: Path,
     room_dir: Optional[Path],
     explicit: Optional[str],
 ) -> Optional[Path]:
-    """三级回退按顺序探测，返回第一个存在的文件。"""
+    """三级回退按顺序探测，返回第一个存在的文件。
+
+    USER.md 是用户私有数据（角色卡、偏好），只在 ``user_data_root`` 下找 —— 不会
+    fall through 到 ``app_root``（打包后 app bundle 里没有 USER.md 模板，首启动初始化
+    时拷一份空模板到 user_data_root 里去）。
+    """
     candidates: list[Path] = []
 
     if explicit:
-        # explicit 可以是绝对路径，也可以是相对于 repo_root 的相对路径
-        # （room.toml 在 rooms/<id>/ 下，但 user_md 路径以 repo 根为基准更直观）。
-        candidates.append(resolve_under(repo_root, explicit))
+        # explicit 可以是绝对路径，也可以是相对于 user_data_root 的相对路径
+        # （room.toml 在 rooms/<id>/ 下，但 user_md 路径以 user_data_root 为基准更直观）。
+        candidates.append(resolve_under(user_data_root, explicit))
 
     if room_dir is not None:
         candidates.append(room_dir / "USER.md")
 
-    candidates.append(repo_root / "USER.md")
+    candidates.append(user_data_root / "USER.md")
 
     for c in candidates:
         if c.is_file():
@@ -154,20 +159,20 @@ def _extract_preferences_block(md: str) -> str:
 
 
 def load_user_md(
-    repo_root: Path,
+    user_data_root: Path,
     room_dir: Optional[Path] = None,
     explicit: Optional[str] = None,
 ) -> UserConfig:
     """读取 USER.md（三级回退），返回 :class:`UserConfig`。
 
     Args:
-        repo_root: 仓库根目录（顶层 USER.md 的所在）。
+        user_data_root: 用户数据根（顶层 USER.md 的所在）。
         room_dir: 房间目录 ``rooms/<room-id>/``，若有房间级 USER.md 优先。
         explicit: ``room.toml`` ``[room].user_md`` 字段的值，最高优先级。
 
     永远不抛异常 —— 文件读取失败按"没有 USER.md"处理。茶话室聊天能跑是底线。
     """
-    path = _resolve_path(repo_root, room_dir, explicit)
+    path = _resolve_path(user_data_root, room_dir, explicit)
     if path is None:
         return UserConfig(
             display_name=DEFAULT_DISPLAY_NAME,

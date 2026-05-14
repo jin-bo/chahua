@@ -35,7 +35,7 @@ from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from ._paths import resolve_under
+from ._paths import Paths, resolve_under
 from .config import RoomConfigError
 from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink
 from .session import (
@@ -43,7 +43,6 @@ from .session import (
     RoomSession,
     build_room_session,
     discover_rooms,
-    find_repo_root,
     load_env_files,
 )
 
@@ -81,12 +80,12 @@ class ChahuaServer:
         *,
         host: str,
         port: int,
-        repo_root: Path,
+        paths: Paths,
     ) -> None:
         self._session = session
         self._host = host
         self._port = port
-        self._repo_root = repo_root
+        self._paths = paths
         # 当前在线的客户端句柄。``None`` 表示空闲；非 ``None`` 时第二个连接被拒。
         self._active: Optional[ServerConnection] = None
         # 当前在跑的 turn task —— P3.3 cancel 入口对这个 task 做 ``task.cancel()``。
@@ -242,7 +241,7 @@ class ChahuaServer:
                     "user_display_name": self._session.user_config.display_name,
                     "user_avatar_data_uri": self._session.user_config.read_avatar_data_uri(),
                     "current_room_id": rc.room_dir.name,
-                    "rooms_available": discover_rooms(self._repo_root),
+                    "rooms_available": discover_rooms(self._paths),
                 },
             )
         )
@@ -286,13 +285,13 @@ class ChahuaServer:
         if room_id == self._session.room_config.room_dir.name:
             _log.info("switch_room: %r already current, noop", room_id)
             return
-        new_room_dir = self._repo_root / "rooms" / room_id
+        new_room_dir = self._paths.user_data_root / "rooms" / room_id
         if not new_room_dir.is_dir():
             _log.warning("switch_room: room_id=%r 目录不存在：%s", room_id, new_room_dir)
             self._emit_room_info(sink)
             return
         try:
-            new_session = build_room_session(new_room_dir, repo_root=self._repo_root)
+            new_session = build_room_session(new_room_dir, paths=self._paths)
         except Exception:
             _log.exception("switch_room: build_room_session 失败 room_id=%r", room_id)
             self._emit_room_info(sink)
@@ -435,7 +434,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_ROOM_REL,
         help=(
             f"房间目录，含 room.toml（默认 {DEFAULT_ROOM_REL}）。"
-            f"相对路径相对 repo_root，绝对路径原样。"
+            f"相对路径相对 user_data_root（CHAHUA_USER_DATA 或 dev 仓库根），"
+            f"绝对路径原样。"
         ),
     )
     parser.add_argument(
@@ -455,12 +455,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 async def _serve(args: argparse.Namespace) -> int:
-    repo_root = find_repo_root()
-    load_env_files(repo_root)
+    paths = Paths.from_env()
+    load_env_files(paths)
 
-    room_dir = resolve_under(repo_root, args.room)
+    room_dir = resolve_under(paths.user_data_root, args.room)
     try:
-        session = build_room_session(room_dir, repo_root=repo_root)
+        session = build_room_session(room_dir, paths=paths)
     except RoomConfigError as e:
         print(f"房间配置错误：\n{e}", file=sys.stderr)
         return 2
@@ -471,7 +471,12 @@ async def _serve(args: argparse.Namespace) -> int:
         env_port = os.environ.get("CHAHUA_WS_PORT")
         port = int(env_port) if env_port else DEFAULT_PORT
 
-    server = ChahuaServer(session, host=args.host, port=port, repo_root=repo_root)
+    # 启动日志打出两个 root —— 打包后区分 dev / packaged 路径走的是哪条，排查方便。
+    if paths.app_root != paths.user_data_root:
+        print(f"app_root      : {paths.app_root}", file=sys.stderr)
+        print(f"user_data_root: {paths.user_data_root}", file=sys.stderr)
+
+    server = ChahuaServer(session, host=args.host, port=port, paths=paths)
     stop = asyncio.Event()
 
     # add_signal_handler 在 Windows 不支持 —— 茶话室目前定位 macOS / Linux，

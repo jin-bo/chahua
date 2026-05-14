@@ -23,7 +23,7 @@ import logging
 import sys
 from pathlib import Path
 
-from ._paths import resolve_under
+from ._paths import Paths, resolve_under
 from .config import RoomConfigError
 from .events import (
     STATUS_CANCELLED,
@@ -38,7 +38,6 @@ from .session import (
     DEFAULT_ROOM_REL,
     RoomSession,
     build_room_session,
-    find_repo_root,
     load_env_files,
 )
 
@@ -48,12 +47,13 @@ _log = logging.getLogger(__name__)
 # ── REPL 渲染 ──────────────────────────────────────────────────────────────
 
 
-def _print_banner(session: RoomSession, *, repo_root: Path) -> None:
+def _print_banner(session: RoomSession, *, paths: Paths) -> None:
     user_config = session.user_config
     src = user_config.source
-    # 显示相对 repo_root 的形式，全绝对路径在 banner 里太长；房间在仓库外则用绝对路径。
+    # 显示相对 user_data_root 的形式，全绝对路径在 banner 里太长；房间在 user_data 外
+    # 则用绝对路径。
     try:
-        room_dir_display: Path = session.room_config.room_dir.relative_to(repo_root)
+        room_dir_display: Path = session.room_config.room_dir.relative_to(paths.user_data_root)
     except ValueError:
         room_dir_display = session.room_config.room_dir
     print("─" * 60)
@@ -163,7 +163,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_ROOM_REL,
         help=(
             f"房间目录，含 room.toml（默认 {DEFAULT_ROOM_REL}）。"
-            f"相对路径相对 repo_root，绝对路径原样。"
+            f"相对路径相对 user_data_root（CHAHUA_USER_DATA 或 dev 仓库根），绝对路径原样。"
         ),
     )
     return parser.parse_args(argv)
@@ -173,17 +173,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 async def _repl(args: argparse.Namespace) -> int:
-    repo_root = find_repo_root()
-    load_env_files(repo_root)
+    paths = Paths.from_env()
+    load_env_files(paths)
 
-    room_dir = resolve_under(repo_root, args.room)
+    room_dir = resolve_under(paths.user_data_root, args.room)
     try:
-        session = build_room_session(room_dir, repo_root=repo_root)
+        session = build_room_session(room_dir, paths=paths)
     except RoomConfigError as e:
         print(f"房间配置错误：\n{e}", file=sys.stderr)
         return 2
 
-    _print_banner(session, repo_root=repo_root)
+    _print_banner(session, paths=paths)
 
     renderer = _CliRenderer()
     try:
