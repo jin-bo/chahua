@@ -71,6 +71,7 @@ guest = Agentao(
 - `working_directory` 各自独立 → memory.db / sessions / tool-outputs 天然隔离。
 - `project_instructions=` 直接注入人格，无需在磁盘上铺 `AGENTAO.md`。
 - 不同茶客挂不同 `LLMClient` → 不同 provider / model（宝总=Claude、玲子=GPT、爷叔=本地模型……）。
+- **per-guest MCP server 也天然分流**：agentao 默认从 `<working_directory>/.agentao/mcp.json` 读 MCP 配置，所以宝总连一组工具、汪小姐连另一组，互不污染。无需 room.toml 显式配置（room.toml 的 `extra_mcp_servers` 是 P4 才接的 toml 层 override，见 §6 / §8）。
 
 ### 3.2 上下文喂养（群聊的核心难点）
 
@@ -305,8 +306,10 @@ App 首次启动 / README / "关于" 页面要明文说清楚：所有聊天数�
 | `rooms/<room>/summary.jsonl` | 房间近期摘要 | 跟着房间走 |
 | `rooms/<room>/guests/<name>/.agentao/memory.db` | `isolation=room` 茶客的私有长期记忆 | 跟着房间走 |
 | `rooms/<room>/guests/<name>/.agentao/sessions/` | 该茶客在该房间的 agentao 会话历史 | 跟着房间走 |
+| `rooms/<room>/guests/<name>/.agentao/mcp.json` | 该茶客在该房间连哪些 MCP server（手编，agentao 默认读这） | 跟着房间走 |
 | `guests/<name>/.agentao/memory.db` | `isolation=global` 茶客的私有长期记忆 | **跨房间长期存在**，不随任何房间删除 |
 | `guests/<name>/.agentao/sessions/` | global 茶客的 agentao 会话历史 | 同上 |
+| `guests/<name>/.agentao/mcp.json` | global 茶客的 MCP server 配置 | 同上 |
 
 #### 3.7.2 删除语义
 
