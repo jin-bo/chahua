@@ -570,6 +570,14 @@ chahua/
 
 ## 8. 修订记录
 
+- **2026-05-13（P3.2.2 完工后）** —— P3.2.x 增量 + P3.2.3 ws 重连退避落地决策：
+  - **茶室头像走 base64 嵌 envelope 而非 file:// / custom protocol** —— `<repo>/chahua/personas/<name>.png`（人格卡 sibling）由 `GuestConfig.read_avatar_data_uri()` 读 + base64 + 嵌 `room_info.data.guests[i].avatar_data_uri`；用户头像同模式走 `UserConfig.read_avatar_data_uri()`（`<USER.md>.with_suffix(".png")`）→ `room_info.data.user_avatar_data_uri`。原图 1.5MB×6 太重，sips 压到 128px ~30KB/张，5 茶客 + 1 用户共 ~190KB on wire 单帧塞下；HiDPI 2× 也只需 64px，128 余量足。CSP `img-src` 加 `data:` —— 默认 `default-src 'self'` 拦 data URI，是漏检 trap。
+  - **permission V 标，不是文字 pill** —— workspace-write 蓝 / full-access 红 / read-only 不渲染。`makePermissionBadge` 与 `makeBadge` 分家：前者固定 `✓` textContent + `data-permission` + title hover；后者保留给 guest-name / mention-name / isolation 文字徽章。V 标用 `.avatar-wrap` + `.on-avatar` 绝对定位浮头像右上角，sidebar 背景同色 1.5px 描边制造"切"出感；opacity 0.7 让 V 标不抢头像戏。
+  - **气泡布局：茶客左 / 用户右镜像** —— 茶客 `[头像][气泡（header: 名字 + 打分徽章 / body: 文字）]`，用户 `[气泡][头像]`，错误气泡走茶客布局但浅红底 + 红字 + 红描边。`makeGuestRow` / `makeUserRow` 两个 helper 收编之前 `appendBubble` / `startStreamingMessage` 各自 ~10 行铺平 DOM 代码。speaker 去掉"："因为它在 bubble-header 单行不需要分隔；score-badge 之前 `margin-right:6px` + `vertical-align:1px` 是 inline 兜底，flex header gap 8px 取代。
+  - **进 Room 显示历史**：wire 加 `ChahuaEventType.ROOM_HISTORY`，`_emit_room_history` 在 `_emit_room_info` 之后单帧下发 `Room.messages_since(0)`；前端 `renderHistory` 按 `speaker_id` 分派（`"user"` → 用户气泡 + USER.png 头像，其余 → 茶客气泡 + guests 名册查头像）。`replaceChildren` 防重连场景 DOM 残留；`stickToBottom` 在空容器起步 stick=true 自动定位最新。一帧全发的取舍：几百条没压力，超 ws 默认 1MB max_size 再改分页。
+  - **ws 重连退避档位 `[1s, 2s, 5s, 10s]` 上限定档而非指数到分钟级** —— 桌面 App 无云端账号，用户没退就还想用；长时间断线后再等一分钟磨人。`NO_RECONNECT_CODES = {1000, 1001, 1008}`：1000/1001 双方约定关 + 页面切走，1008 server.py 拒第二客户端（重连只会再被拒）。重连成功 `reconnectAttempt` 清零，状态栏显示 "第 N 次重试，X 秒后…"。
+  - **重连恢复路径走 room_info + room_history replay 自然清理** —— 不需要专门的"重连后恢复"代码：`closeInFlightOnDisconnect` 给在途流式消息封口 "[连接断开]"；重连成功后 `renderHistory.replaceChildren` 清掉所有 DOM，按 transcript 真理重建。失败的 in-flight 消息没持久化进 transcript → replay 后正确消失，单一来源不污染。composer `input.value` 在 disabled 期间保留 → 用户重连后能继续发原来键入的文本。
+
 - **2026-05-13（P3.2.1 完工后）** —— P3.2.2 落地决策（simplify 后调整）：
   - **@ 正则放宽到 `\S*`** —— 早期用 `[\p{L}\p{N}_·]` 是过度严格的正白名单，与 server 端 `_AT_PATTERN`（反黑名单 `@([^\s，。！？,!?；;：:]+)`）字符集不对齐 —— 含 `-` `.` 撇号的茶客名前端 typeahead 搜不到、手输又能命中，是 trap。改成"`@` 起头到下一个空白"全捕，过滤靠 guests 名册 `startsWith` 兜底。
   - **`detectMention` 返回 `{start, end, query}`，调用方零计算** —— 之前 input 与 keydown Enter 两路各自重算 detectMention + 读 selectionStart 切 after，状态可能不一致；改成 match 由触发点拿一次，acceptMention 接 match 参数。
