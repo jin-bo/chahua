@@ -15,6 +15,28 @@
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
 import { EventType, Status, Inbound, ScoreKind } from "./events.js";
+import { marked } from "../node_modules/marked/lib/marked.esm.js";
+import DOMPurify from "../node_modules/dompurify/dist/purify.es.mjs";
+
+// gfm 开 GitHub 风格扩展（表格 / 删除线 / 任务列表）；breaks 让单换行 = <br>，
+// 符合聊天里"按 Enter 换行"的直觉（LLM 输出也常用单换行分句）。
+marked.setOptions({ gfm: true, breaks: true });
+
+// LLM 输出走 marked → DOMPurify 一遍：前者结构化为 HTML，后者剥掉
+// <script> / on* / javascript: 等危险载荷。USE_PROFILES.html 是 DOMPurify 推荐的
+// 富文本白名单（允许 a/ul/ol/li/code/pre/blockquote/h*/table 但禁脚本）。
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text || ""), { USE_PROFILES: { html: true } });
+}
+
+// 流式重渲 ``innerHTML`` 会把节点全换一遍，用户正在做的拖选 / Cmd+C copy 会瞬间被擦。
+// 这里检测有活动选区（非 collapsed）且 anchor 或 focus 在 node 子树内，调用方据此跳过
+// 本次渲染、等 selection 解除再补渲。``isCollapsed`` 排除"光标位置"这种没意义的伪选区。
+function isSelectionInside(node) {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed) return false;
+  return node.contains(sel.anchorNode) || node.contains(sel.focusNode);
+}
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -166,8 +188,9 @@ function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
 // 用户发言（li.user）：单独气泡，右对齐，无头像无名字（自己知道是自己）。
 // turn-banner（li.turn-banner）：不变，meta 行，非气泡。
 
-// 茶客行（speaker bubble + avatar）。streaming=true 时 text span 带 streaming class 闪光标。
-// 返回 li 与 textEl —— 调用方在 textEl 上 append 文本（流式 / 一次性）。
+// 茶客行（speaker bubble + avatar）。streaming=true 时气泡末尾挂闪烁 ``.streaming-cursor``。
+// 返回 li / textEl / bubble —— textEl 上由调用方 ``innerHTML = renderMarkdown(...)``
+// 整段重渲；cursor 与状态尾走 sibling 节点，避开 innerHTML 替换的擦除。
 //
 // 打分不挂在气泡里 —— 沿 sidebar 茶客名右侧显示，见 ``applyScoresToSidebar``。
 function makeGuestRow(speaker, { streaming = false } = {}) {
@@ -184,11 +207,16 @@ function makeGuestRow(speaker, { streaming = false } = {}) {
   s.textContent = speaker;
   header.appendChild(s);
   bubble.appendChild(header);
-  const textEl = document.createElement("span");
-  textEl.className = streaming ? "text streaming" : "text";
+  const textEl = document.createElement("div");
+  textEl.className = "text markdown";
   bubble.appendChild(textEl);
+  if (streaming) {
+    const cursor = document.createElement("span");
+    cursor.className = "streaming-cursor";
+    bubble.appendChild(cursor);
+  }
   li.appendChild(bubble);
-  return { li, textEl };
+  return { li, textEl, bubble };
 }
 
 // 用户行：右对齐气泡 + 头像（无名字 —— 自己看自己 redundant）。镜像茶客布局：
@@ -202,10 +230,64 @@ function makeUserRow(text) {
   t.className = "text";
   t.textContent = text;
   bubble.appendChild(t);
+  attachCopyButton(bubble, () => text);
   li.appendChild(bubble);
   const avatar = makeUserAvatar("msg-avatar");
   if (avatar) li.appendChild(avatar);
   return li;
+}
+
+// 气泡右上角 hover 出现的「复制」按钮。复制的是 ``getText()`` 返回的 markdown 源
+// 而非 ``textEl.textContent`` —— 后者会把代码块 / 列表的结构压扁成连续文字，粘到别处
+// 几乎不可读。流式气泡传 ``() => entry.accumulated`` 闭包动态读取；定稿气泡 / 用户
+// 气泡传静态 ``() => text``。
+function attachCopyButton(bubble, getText) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "bubble-copy";
+  btn.title = "复制";
+  btn.textContent = "复制";
+  btn.addEventListener("click", async (ev) => {
+    // 防止冒泡触发 messagesEl 的 link 拦截 / sticky-bottom 等。
+    ev.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(getText());
+      btn.textContent = "已复制";
+      btn.classList.add("copied");
+    } catch {
+      btn.textContent = "失败";
+    }
+    setTimeout(() => {
+      btn.textContent = "复制";
+      btn.classList.remove("copied");
+    }, 1500);
+  });
+  bubble.appendChild(btn);
+}
+
+// 静态茶客文本（历史回放 / 一次性 appendBubble / message_end fallback）的"渲染 +
+// 挂复制按钮"三件套。流式茶客的复制按钮在 startStreamingMessage 单独挂（闭包要持
+// inFlight entry 引用，动态读 accumulated）。
+function renderGuestText({ textEl, bubble }, text) {
+  textEl.innerHTML = renderMarkdown(text);
+  attachCopyButton(bubble, () => text);
+}
+
+// 茶客气泡的 status tail（[中断] / [出错…] / [连接断开]）走 bubble 的 sibling
+// .status-tail span —— textEl 已经被 innerHTML(markdown) 占据，纯文本尾巴塞同一节点
+// 会被下一次 markdown 重渲覆盖；且 tail 视觉上属于"元信息"，不该走 markdown。
+function setStatusTail(bubble, text) {
+  let tail = bubble.querySelector(":scope > .status-tail");
+  if (!tail) {
+    tail = document.createElement("span");
+    tail.className = "status-tail";
+    bubble.appendChild(tail);
+  }
+  tail.textContent = text;
+}
+
+function removeStreamingCursor(bubble) {
+  bubble.querySelector(":scope > .streaming-cursor")?.remove();
 }
 
 function appendBubble({ speaker, text, kind }) {
@@ -215,7 +297,7 @@ function appendBubble({ speaker, text, kind }) {
       li = makeUserRow(text);
     } else {
       const row = makeGuestRow(speaker);
-      row.textEl.textContent = text;
+      renderGuestText(row, text);
       if (kind === "error") row.li.classList.add("error");
       li = row.li;
     }
@@ -246,25 +328,36 @@ function applyScoresToSidebar() {
 function startStreamingMessage(env) {
   stickToBottom(() => {
     const speaker = env.guest_name || "?";
-    const { li, textEl } = makeGuestRow(speaker, { streaming: true });
+    const { li, textEl, bubble } = makeGuestRow(speaker, { streaming: true });
     messagesEl.appendChild(li);
-    inFlight.set(env.message_id, { textEl, li });
+    // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
+    // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
+    const entry = { textEl, li, bubble, accumulated: "" };
+    inFlight.set(env.message_id, entry);
+    // 闭包持 entry 引用，click 时读最新 accumulated（流式过程中也能复制到当前为止的全部）。
+    attachCopyButton(bubble, () => entry.accumulated);
   });
 }
 
 function appendDelta(env) {
   const m = inFlight.get(env.message_id);
   if (!m) return;
+  const chunk = env.data?.chunk ?? "";
+  if (!chunk) return;
+  m.accumulated += chunk;
+  // 选区在 textEl 内 → 跳渲，让用户的拖选 / Cmd+C 不被擦；下一个 chunk 来时如果选区
+  // 已解除，会一次性追上累积差额（accumulated 全量重渲）。
+  if (isSelectionInside(m.textEl)) return;
   stickToBottom(() => {
-    m.textEl.append(env.data?.chunk ?? "");
+    m.textEl.innerHTML = renderMarkdown(m.accumulated);
   });
 }
 
 function statusTail(env) {
-  if (env.status === Status.CANCELLED) return "  [中断]";
+  if (env.status === Status.CANCELLED) return "[中断]";
   if (env.status === Status.ERROR) {
     const err = env.data?.error || "未知错误";
-    return `  [出错：${err}]`;
+    return `[出错：${err}]`;
   }
   return "";
 }
@@ -272,33 +365,57 @@ function statusTail(env) {
 function endStreamingMessage(env) {
   const m = inFlight.get(env.message_id);
   if (!m) {
+    // server 没发过 message_start 直接 message_end（罕见但合法 —— 比如缓存命中
+    // 整段一次性回）。OK 路径走 appendBubble；error 路径要挂 status-tail，appendBubble
+    // 没那个口子，单独装一行。
     const speaker = env.guest_name || "?";
     if (env.status === Status.OK) {
       appendBubble({ speaker, text: env.data?.text ?? "" });
-    } else {
-      appendBubble({
-        speaker,
-        text: (env.data?.partial_text ?? "") + statusTail(env),
-        kind: "error",
-      });
+      return;
     }
+    const partial = env.data?.partial_text ?? "";
+    const row = makeGuestRow(speaker);
+    renderGuestText(row, partial);
+    row.li.classList.add("error");
+    setStatusTail(row.bubble, statusTail(env));
+    stickToBottom(() => messagesEl.appendChild(row.li));
     return;
   }
   inFlight.delete(env.message_id);
   stickToBottom(() => {
-    m.textEl.classList.remove("streaming");
-    if (env.status === Status.OK) return;
-    m.li.classList.add("error");
-    m.textEl.append(statusTail(env));
+    removeStreamingCursor(m.bubble);
+    if (env.status !== Status.OK) {
+      m.li.classList.add("error");
+      setStatusTail(m.bubble, statusTail(env));
+    }
+    // 选区还在 textEl 内 —— 用户正在 copy。光标 / 状态尾 / error class 先就位，但
+    // 最终 markdown 内容延后渲染到 selection 解除（一次性 selectionchange 监听）；
+    // 否则 innerHTML 替换会瞬间擦掉选区，复制操作功亏一篑。
+    // ``isConnected`` 是兜底：换房 / 清空 / 断线把 bubble 从 DOM 摘了，下一次任何
+    // selectionchange 触发时本监听器自卸，避免持 m 引用 + 写到孤立节点。
+    if (isSelectionInside(m.textEl)) {
+      const finalize = () => {
+        if (!m.textEl.isConnected) {
+          document.removeEventListener("selectionchange", finalize);
+          return;
+        }
+        if (isSelectionInside(m.textEl)) return;
+        document.removeEventListener("selectionchange", finalize);
+        m.textEl.innerHTML = renderMarkdown(m.accumulated);
+      };
+      document.addEventListener("selectionchange", finalize);
+      return;
+    }
+    m.textEl.innerHTML = renderMarkdown(m.accumulated);
   });
 }
 
 function closeInFlightOnDisconnect() {
   if (inFlight.size === 0) return;
   for (const m of inFlight.values()) {
-    m.textEl.classList.remove("streaming");
+    removeStreamingCursor(m.bubble);
     m.li.classList.add("error");
-    m.textEl.append("  [连接断开]");
+    setStatusTail(m.bubble, "[连接断开]");
   }
   inFlight.clear();
 }
@@ -523,7 +640,7 @@ function renderHistory(messages) {
         messagesEl.appendChild(makeUserRow(m.text));
       } else {
         const row = makeGuestRow(m.speaker_id);
-        row.textEl.textContent = m.text;
+        renderGuestText(row, m.text);
         messagesEl.appendChild(row.li);
       }
     }
@@ -669,6 +786,14 @@ composer.addEventListener("submit", (ev) => {
   appendBubble({ speaker: userDisplayName, text, kind: "user" });
   ws.send(JSON.stringify({ type: Inbound.USER_MESSAGE, text }));
   textInput.value = "";
+});
+
+// markdown 渲染出的 <a href> 默认在 renderer 进程里导航 —— 那会把整页换成外部 URL，
+// 整个聊天 UI 就没了。这里一律 preventDefault 拦住；后续 P3.x 接 main 的
+// shell.openExternal 桥再把外链甩给系统浏览器。
+messagesEl.addEventListener("click", (ev) => {
+  const a = ev.target.closest("a[href]");
+  if (a) ev.preventDefault();
 });
 
 connect();

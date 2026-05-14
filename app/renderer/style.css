@@ -137,8 +137,10 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   flex-shrink: 0; margin-top: 2px;
 }
 
-/* 气泡通用：圆角、padding、最大宽 75%（短消息自动收缩）。一边角削成 4px 当"尾巴"指方向。 */
+/* 气泡通用：圆角、padding、最大宽 75%（短消息自动收缩）。一边角削成 4px 当"尾巴"指方向。
+   position:relative 给 .bubble-copy 提供定位锚（绝对定位 hover 出现的复制按钮）。 */
 .bubble {
+  position: relative;
   max-width: 75%;
   padding: 8px 12px;
   border-radius: 12px;
@@ -172,8 +174,10 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 /* 打分横条 + 气泡内 score-badge 已下线，打分移到 sidebar 茶客行右侧
    （见 #guests li .guest-score）。 */
 
-/* P3.2.1：streaming 中的消息末尾闪烁光标，message_end 来时移除 .streaming。 */
-.text.streaming::after {
+/* streaming 末尾闪烁光标，挂在 bubble 而非 textEl 内 —— textEl 走
+   ``innerHTML = renderMarkdown(...)`` 每个 delta 整段替换，cursor 放进去会被擦；同时
+   cursor 跟在最后一个块状元素后面也更顺眼（不卡在 <p> 内部破坏 baseline）。 */
+.streaming-cursor::after {
   content: "▌";
   margin-left: 1px;
   color: #888;
@@ -183,8 +187,130 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   to { visibility: hidden; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .text.streaming::after { animation: none; }
+  .streaming-cursor::after { animation: none; }
 }
+
+/* 茶客气泡 markdown 渲染：marked + DOMPurify 后塞到 .text.markdown 里。聊天场景下
+   block 元素 margin 全部收紧到 0.3em 左右，避免列表/代码块/标题在小气泡里"撑开"；
+   table 自带边线 + 行高让数据可读；blockquote 用左竖条而非缩进，省横向空间。 */
+.bubble .text.markdown > :first-child { margin-top: 0; }
+.bubble .text.markdown > :last-child { margin-bottom: 0; }
+.bubble .text.markdown p { margin: 0.3em 0; }
+.bubble .text.markdown ul,
+.bubble .text.markdown ol { margin: 0.3em 0; padding-left: 1.5em; }
+.bubble .text.markdown li { margin: 0.15em 0; }
+.bubble .text.markdown h1,
+.bubble .text.markdown h2,
+.bubble .text.markdown h3,
+.bubble .text.markdown h4,
+.bubble .text.markdown h5,
+.bubble .text.markdown h6 {
+  margin: 0.5em 0 0.3em;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.bubble .text.markdown h1 { font-size: 1.3em; }
+.bubble .text.markdown h2 { font-size: 1.2em; }
+.bubble .text.markdown h3 { font-size: 1.1em; }
+.bubble .text.markdown h4,
+.bubble .text.markdown h5,
+.bubble .text.markdown h6 { font-size: 1em; }
+.bubble .text.markdown code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.bubble .text.markdown pre {
+  margin: 0.4em 0;
+  padding: 8px 10px;
+  background: #2b2b2b;
+  color: #e8e3d6;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.88em;
+  line-height: 1.45;
+}
+.bubble .text.markdown pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  border-radius: 0;
+}
+.bubble .text.markdown blockquote {
+  margin: 0.3em 0;
+  padding: 0.1em 0.6em;
+  border-left: 3px solid #d0c8b4;
+  color: #666;
+}
+.bubble .text.markdown a {
+  color: #4a6da7;
+  text-decoration: underline;
+}
+.bubble .text.markdown a:hover { color: #324e80; }
+.bubble .text.markdown table {
+  border-collapse: collapse;
+  margin: 0.3em 0;
+  font-size: 0.95em;
+}
+.bubble .text.markdown th,
+.bubble .text.markdown td {
+  border: 1px solid #e0d8c4;
+  padding: 3px 8px;
+}
+.bubble .text.markdown th {
+  background: #f5f1e6;
+  font-weight: 600;
+}
+.bubble .text.markdown hr {
+  margin: 0.6em 0;
+  border: none;
+  border-top: 1px solid #e0d8c4;
+}
+.bubble .text.markdown img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 复制按钮 —— hover 气泡时浮现在右上角；点击后短暂变 "已复制"。透明度过渡避免
+   光标进出气泡时按钮闪烁；user-select:none 防止 Cmd+A 把按钮文字一起选进剪贴板。 */
+.bubble-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: inherit;
+  color: #888;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #d0c8b4;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.bubble:hover .bubble-copy,
+.bubble-copy:focus { opacity: 1; }
+.bubble-copy:hover { background: #fff; color: #333; }
+.bubble-copy.copied { color: #690; border-color: #b3d6a0; }
+/* 用户气泡（绿底）下，白底按钮太亮 —— 给它一层薄绿背景 + 深绿字保证可读。 */
+.bubble-user .bubble-copy { background: rgba(232, 244, 232, 0.92); }
+.bubble-user .bubble-copy:hover { background: #fff; }
+
+/* status tail（[中断] / [出错] / [连接断开]）—— textEl sibling，markdown 之外，
+   半透明灰把它从主消息内容里"退一步"。 */
+.bubble .status-tail {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+}
+#messages li.error .bubble .status-tail { color: #c66; }
 
 #composer { display: flex; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
 #composer-wrap { position: relative; flex: 1; }
