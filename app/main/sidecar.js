@@ -23,6 +23,11 @@ const READY_TIMEOUT_MS = 15_000;
 // SIGINT 后给 server 多久优雅关停（asyncio Event.wait → finally 关 ws）。
 const STOP_GRACE_MS = 2_000;
 
+// Electron 缺省进哪个茶室。与 chahua/session.py:DEFAULT_ROOM_REL 解耦 —— CLI 仍走
+// p1-test（开发自测），桌面壳走 p3-黄河路（默认展示 3 茶客 + workspace-write）。
+// P3.3+ 加房间选择 UI 后改成参数。
+const DEFAULT_ROOM_REL = "rooms/p3-黄河路";
+
 async function findFreePort() {
   return await new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -39,7 +44,12 @@ async function startSidecar({ repoRoot }) {
   const port = await findFreePort();
   const child = spawn(
     "uv",
-    ["run", "chahua-server", "--host", "127.0.0.1", "--port", String(port)],
+    [
+      "run", "chahua-server",
+      "--host", "127.0.0.1",
+      "--port", String(port),
+      "--room", DEFAULT_ROOM_REL,
+    ],
     {
       cwd: repoRoot,
       // PYTHONUNBUFFERED 让 print 立即冲到 stderr，不至于卡在 buffer 等不到 ready 行。
