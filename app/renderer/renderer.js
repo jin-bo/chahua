@@ -24,6 +24,7 @@ const submitBtn = composer.querySelector("button");
 const roomNameEl = document.getElementById("room-name");
 const roomTopicEl = document.getElementById("room-topic");
 const guestsEl = document.getElementById("guests");
+const roomsEl = document.getElementById("rooms");
 const dropdownEl = document.getElementById("mention-dropdown");
 
 const wsUrl = window.chahua?.wsUrl;
@@ -286,6 +287,11 @@ function closeInFlightOnDisconnect() {
 // ── sidebar 装配（room_info）────────────────────────────────────────
 
 function renderSidebar(roomInfo) {
+  // 进新房（首次连接 / 换房）的全量重置：清 in-flight 流 + 当前 turn 打分残留 + 消息
+  // 容器，让接下来的 room_history.replaceChildren 不闪过旧房 DOM。
+  inFlight.clear();
+  scoresByName = new Map();
+  messagesEl.replaceChildren();
   setStatus("ok", `已连接 ${wsUrl}`);
   roomNameEl.textContent = roomInfo.room_name || "—";
   roomTopicEl.textContent = roomInfo.topic || "";
@@ -308,10 +314,41 @@ function renderSidebar(roomInfo) {
     }
     guestsEl.appendChild(li);
   }
+  renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
   // room_info 到达 → composer 解锁；之前 onopen 不再 enable，避免 userDisplayName
   // 跳变窗口（用户在 "我" 状态发了一条，第二条又变成实际显示名）。
   setComposerEnabled(true);
   textInput.focus();
+}
+
+// 切换房间列表 —— 列其它房间（含当前），click 非 current 项发 switch_room frame。
+// 当前房间高亮、不可点；其它房间显示 name + topic 一句话预览。
+function renderRoomsList(roomsAvailable, currentRoomId) {
+  roomsEl.replaceChildren();
+  const rooms = Array.isArray(roomsAvailable) ? roomsAvailable : [];
+  for (const r of rooms) {
+    const li = document.createElement("li");
+    li.dataset.roomId = r.room_id;
+    if (r.room_id === currentRoomId) li.classList.add("current");
+    const name = document.createElement("div");
+    name.className = "room-name";
+    name.textContent = r.name || r.room_id;
+    li.appendChild(name);
+    if (r.topic) {
+      const topic = document.createElement("div");
+      topic.className = "room-topic";
+      topic.textContent = r.topic;
+      li.appendChild(topic);
+    }
+    if (r.room_id !== currentRoomId) {
+      li.addEventListener("click", () => {
+        if (!connected) return;
+        ws.send(JSON.stringify({ type: Inbound.SWITCH_ROOM, room_id: r.room_id }));
+        setStatus("", `切换到 ${r.name || r.room_id}…`);
+      });
+    }
+    roomsEl.appendChild(li);
+  }
 }
 
 // ── @ 补全 ────────────────────────────────────────────────────────
@@ -428,8 +465,8 @@ textInput.addEventListener("blur", () => {
 const USER_SPEAKER_ID = "user";
 
 function renderHistory(messages) {
-  // 进 Room 时全量回放 —— 重连场景为防 DOM 残留先清空。
-  messagesEl.replaceChildren();
+  // 进 Room（首次连接 / 重连 / 换房）时全量回放。messagesEl 的清空由 renderSidebar
+  // 一帧前完成（room_info 先于 room_history 到达），单点 owner 改一处即可。
   if (!Array.isArray(messages) || messages.length === 0) return;
   stickToBottom(() => {
     for (const m of messages) {
@@ -441,7 +478,7 @@ function renderHistory(messages) {
         messagesEl.appendChild(row.li);
       }
     }
-    // 强制滚到底 —— stickToBottom 在 mutate 前还是空，stick=true，会自动定到底。
+    // 强制滚到底 —— stickToBottom 在 mutate 前 messagesEl 是空，stick=true，自动定到底。
   });
 }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -142,6 +143,40 @@ class RoomSession:
             except Exception:
                 # 一位关失败不该阻止其他茶客清理 —— 但要留痕。
                 _log.exception("guest %s close failed", guest.name)
+
+
+def discover_rooms(repo_root: Path) -> list[dict]:
+    """扫 ``<repo>/rooms/*/room.toml``，返回 ``[{room_id, name, topic}, ...]``，按 id 升序。
+
+    ``room_id`` = 房间目录名（P4 加 ``[room].id`` 字段前的稳定 ID 占位 —— 同
+    :mod:`chahua.events` 里 envelope ``room_id`` 也用 ``room.name`` 占位）。
+    ``name`` / ``topic`` 取自 toml ``[room]`` 段；解析失败的房间跳过 + WARN，
+    一个坏 toml 不该让整个房间列表崩。
+
+    给 P3.2.x 切换房间 wire 用，server 端 ``_emit_room_info`` 调一次塞进
+    ``rooms_available`` 字段。
+    """
+    rooms_dir = repo_root / "rooms"
+    if not rooms_dir.is_dir():
+        return []
+    results: list[dict] = []
+    for entry in sorted(rooms_dir.iterdir()):
+        toml_path = entry / "room.toml"
+        if not toml_path.is_file():
+            continue
+        try:
+            with toml_path.open("rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            _log.warning("discover_rooms: skip %s (toml parse failed)", toml_path)
+            continue
+        room_section = data.get("room", {}) if isinstance(data.get("room"), dict) else {}
+        results.append({
+            "room_id": entry.name,
+            "name": str(room_section.get("name") or entry.name),
+            "topic": str(room_section.get("topic", "")),
+        })
+    return results
 
 
 def build_room_session(

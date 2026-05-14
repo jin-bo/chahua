@@ -12,9 +12,11 @@ agentao 的原生 :class:`agentao.transport.AgentEvent` **不带** 这些字段�
 **type 与发生位置**：
 
 - ``room_info``：``server.py`` 在 ws 连上时一次性下发，给前端装 sidebar / @ 补全；
-  不属于任何 turn（``turn_id`` 为 ``None``）。
+  不属于任何 turn（``turn_id`` 为 ``None``）。换房时（``switch_room`` inbound）
+  会重发一次。``data`` 含 ``rooms_available``（其它可切房间列表）+ ``current_room_id``。
 - ``room_history``：``server.py`` 在 ``room_info`` 之后下发，回放 transcript.jsonl，
   前端用来在进 Room 时显示历史对话；同样不属任何 turn（``turn_id`` 为 ``None``）。
+  换房时也重发。
 - ``turn_start`` / ``turn_end``：orchestrator 合成；turn 对应一次 pick（top-1~2 抢话）。
 - ``message_start`` / ``message_end``：``TeaGuest.speak()`` 的 ``try / except / finally``
   外层合成 —— 保证 start 必有 end（status 三选一）。

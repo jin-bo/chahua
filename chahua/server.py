@@ -42,6 +42,7 @@ from .session import (
     DEFAULT_ROOM_REL,
     RoomSession,
     build_room_session,
+    discover_rooms,
     find_repo_root,
     load_env_files,
 )
@@ -52,8 +53,9 @@ _log = logging.getLogger(__name__)
 DEFAULT_PORT = 7860
 DEFAULT_HOST = "127.0.0.1"
 
-# 客户端 → 服务端 message type 字段值。"用户发言"——唯一在 P2.3 实装的。
+# 客户端 → 服务端 message type 字段值。
 INBOUND_USER_MESSAGE = "user_message"
+INBOUND_SWITCH_ROOM = "switch_room"
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -64,14 +66,36 @@ class ChahuaServer:
 
     在同一 session 上跨多次客户端连接复用 —— 客户端断开后房间状态保留，下次连上
     就是续聊（与 :mod:`chahua.cli` 的 ``/quit`` → 重启 → 续聊一个意思）。
+
+    P3.2.x 加 :meth:`_switch_room` 支持运行时换房：tear down 当前 session（
+    所有茶客 agentao close），按新 ``room_id`` 装配新 session 替换 ``_session``，
+    复用 ws 连接 + ``_emit_room_info`` / ``_emit_room_history`` —— 客户端拿到
+    新 room_info + 全量历史回放，DOM ``replaceChildren`` 自动清掉前一个房间残留。
     """
 
-    def __init__(self, session: RoomSession, *, host: str, port: int) -> None:
+    def __init__(
+        self,
+        session: RoomSession,
+        *,
+        host: str,
+        port: int,
+        repo_root: Path,
+    ) -> None:
         self._session = session
         self._host = host
         self._port = port
+        self._repo_root = repo_root
         # 当前在线的客户端句柄。``None`` 表示空闲；非 ``None`` 时第二个连接被拒。
         self._active: Optional[ServerConnection] = None
+
+    def close(self) -> None:
+        """关停**当前**活动 session。
+
+        换房会替换 ``self._session`` 引用（旧 session 在 ``_switch_room`` 里已 close），
+        所以进程退出时该关的是 server 持有的当前 session，不是 ``_serve`` 局部变量里
+        最初装配的那个（那个换房后变 stale）。
+        """
+        self._session.close()
 
     async def serve_forever(self, stop: asyncio.Event) -> None:
         """起 ws server，跑到 ``stop`` 被 set。关闭由 :func:`serve` 的 ``__aexit__``
@@ -177,6 +201,10 @@ class ChahuaServer:
         ``avatar_data_uri`` / ``user_avatar_data_uri``：茶客 / 用户头像，与对应 md sibling
         同名 ``.png``，base64 嵌进 envelope。缺图返 ``None``，前端按无头像渲染。
 
+        ``rooms_available`` / ``current_room_id``：P3.2.x 切房功能的 wire 输入 —— 前端
+        sidebar 列其它房间供切换。``current_room_id`` 用房间目录名（P4 才有
+        ``[room].id`` 稳定字段，与 envelope ``room_id`` 占位口径一致）。
+
         副作用：runtime 期 ``permission`` 切换（P4 才支持）不会反映到 sidebar —— 届时加
         ``room_info_delta`` wire 帧增量下发。
         """
@@ -203,6 +231,8 @@ class ChahuaServer:
                     "guests": guests,
                     "user_display_name": self._session.user_config.display_name,
                     "user_avatar_data_uri": self._session.user_config.read_avatar_data_uri(),
+                    "current_room_id": rc.room_dir.name,
+                    "rooms_available": discover_rooms(self._repo_root),
                 },
             )
         )
@@ -230,9 +260,53 @@ class ChahuaServer:
             )
         )
 
+    def _switch_room(self, room_id: str, sink: EnvelopeSink) -> None:
+        """换房：tear down 当前 session + 装配新房 + 重发 room_info / room_history。
+
+        失败（room_id 不存在、room.toml 坏、LLM 凭据缺）→ WARN + 保留当前 session +
+        重发当前 room_info 让前端把"切换到 X…"状态复位回"已连接"。proper 错误反馈
+        wire（错误码 + 用户可见原因）留给 P3.3 跟 cancel 事件一并设计。
+
+        ws 连接复用：``_serve_one`` 的 ``async for raw in ws`` 串行消费 inbound，
+        所以 switch_room 永远在上一条 user_message 的 submit 之后才到达 ——
+        天然无 race。（顺带 UX 注：长 turn 期间用户 click 切房会感觉"卡"，
+        要 P3.3 cancel 完才能即时切。）
+        """
+        # 同房间忽略 —— 频繁 click 同一项不该 close + 重建。
+        if room_id == self._session.room_config.room_dir.name:
+            _log.info("switch_room: %r already current, noop", room_id)
+            return
+        new_room_dir = self._repo_root / "rooms" / room_id
+        if not new_room_dir.is_dir():
+            _log.warning("switch_room: room_id=%r 目录不存在：%s", room_id, new_room_dir)
+            self._emit_room_info(sink)
+            return
+        try:
+            new_session = build_room_session(new_room_dir, repo_root=self._repo_root)
+        except Exception:
+            _log.exception("switch_room: build_room_session 失败 room_id=%r", room_id)
+            self._emit_room_info(sink)
+            return
+        old = self._session
+        self._session = new_session
+        try:
+            old.close()
+        except Exception:
+            _log.exception("switch_room: 旧 session close 出错（已切换，忽略）")
+        _log.info("switch_room: → %r", room_id)
+        self._emit_room_info(sink)
+        self._emit_room_history(sink)
+
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
-        """分派一条客户端消息。本期只处理 ``user_message``。"""
+        """分派一条客户端消息。"""
         msg_type = data.get("type")
+        if msg_type == INBOUND_SWITCH_ROOM:
+            room_id = data.get("room_id")
+            if not isinstance(room_id, str) or not room_id:
+                _log.warning("ignoring switch_room with missing/empty room_id")
+                return
+            self._switch_room(room_id, sink)
+            return
         if msg_type != INBOUND_USER_MESSAGE:
             # 友好容忍：未知 type 不断连，仅 WARN。前端在协议升级期发新 type 时
             # 服务端旧版本也不至于把它踢下线。
@@ -300,7 +374,7 @@ async def _serve(args: argparse.Namespace) -> int:
         env_port = os.environ.get("CHAHUA_WS_PORT")
         port = int(env_port) if env_port else DEFAULT_PORT
 
-    server = ChahuaServer(session, host=args.host, port=port)
+    server = ChahuaServer(session, host=args.host, port=port, repo_root=repo_root)
     stop = asyncio.Event()
 
     # add_signal_handler 在 Windows 不支持 —— 茶话室目前定位 macOS / Linux，
@@ -316,7 +390,8 @@ async def _serve(args: argparse.Namespace) -> int:
     try:
         await server.serve_forever(stop)
     finally:
-        session.close()
+        # 关 server 持有的当前 session（换房后 self._session 已不是局部 `session`）。
+        server.close()
     return 0
 
 

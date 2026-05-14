@@ -63,6 +63,30 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   border: 1.5px solid #f5f1e6;
   box-sizing: content-box;
 }
+/* 切换房间列表。当前高亮 + cursor default；其它项可点。 */
+#rooms { list-style: none; margin: 0; padding: 0; }
+#rooms li {
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+#rooms li:hover:not(.current) { background: #ece5d2; }
+#rooms li.current {
+  background: #d8c9a3;
+  cursor: default;
+}
+#rooms li .room-name { color: #444; font-weight: 500; }
+#rooms li .room-topic {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* isolation 占位徽章 —— P4 接真值时这里读 data-isolation 区分 room / global。 */
 #guests li .isolation-badge {
   display: inline-block;
