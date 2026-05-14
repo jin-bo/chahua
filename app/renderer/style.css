@@ -22,7 +22,8 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .sidebar-room-name { font-weight: 600; color: #555; }
 .sidebar-room-topic { font-size: 12px; color: #888; margin-top: 2px; }
 #guests { list-style: none; margin: 0; padding: 0; }
-#guests li { padding: 4px 0; font-size: 13px; }
+#guests li { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
+#guests li .avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
 #guests li .guest-name { color: #444; }
 #guests li .permission-badge {
   display: inline-block;
@@ -49,7 +50,17 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 
 #messages { flex: 1; list-style: none; margin: 0; padding: 8px 12px; overflow-y: auto; }
 #messages li { padding: 4px 0; line-height: 1.5; word-wrap: break-word; }
-#messages li .speaker { font-weight: 600; margin-right: 8px; color: #555; }
+/* 普通发言行才走 flex（头像 + 文字内联）；turn-banner 还是块级，避免 flex 把 ::before 错位。 */
+#messages li.msg, #messages li.user, #messages li.error {
+  display: flex; align-items: flex-start; gap: 8px;
+}
+#messages li .msg-avatar {
+  width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
+  flex-shrink: 0; margin-top: 2px;
+}
+#messages li .speaker { font-weight: 600; margin-right: 8px; color: #555; flex-shrink: 0; }
+/* flex item 默认 min-width: auto 会让长字符串撑爆 li —— 让 .text 占满剩余空间且能 wrap。 */
+#messages li .text { flex: 1; min-width: 0; }
 #messages li.user .speaker { color: #084; }
 #messages li.error .speaker { color: #c00; }
 #messages li.error .text { color: #c00; }

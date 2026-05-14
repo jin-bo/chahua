@@ -27,5 +27,9 @@ rooms/**/cursor.json
 agentao.log
 agentao.log.*
 
+# 头像源图（高清原图）。压缩版（128px ~30KB）在 chahua/personas/<name>.png，
+# 跟 persona .md 一起 commit；原图保留在本地作为可重新压缩的来源。
+docs/personas/*.png
+
 # Macs being Macs
 .DS_Store

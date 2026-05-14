@@ -2,9 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <!-- CSP：只允许本地 ws + 同源资源；inline style 给 system font fallback 留口。 -->
+  <!-- CSP：只允许本地 ws + 同源资源；inline style 给 system font fallback 留口；
+       img-src 多放 data: 给茶客头像 base64 data URI（room_info envelope 嵌入）。 -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'">
+        content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
   <title>茶话室</title>
   <link rel="stylesheet" href="style.css">
 </head>

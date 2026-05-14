@@ -39,9 +39,23 @@ let connected = false;
 const inFlight = new Map();
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
-// 茶客名单（room_info 来时装）—— @ 补全候选 + 用户显示名。
-let guests = []; // [{name, permission, isolation}, ...]
+// 茶客名单（room_info 来时装）—— @ 补全候选 + 头像查找 + 用户显示名。
+let guests = []; // [{name, permission, isolation, avatar_data_uri}, ...]
 let userDisplayName = "我";
+
+// 头像 <img>。缺图（或不是注册茶客）返 null —— 调用方按"无头像"降级（不挂）。
+// 茶客 ≤ 个位数，线性 find 比维护并行 Map 简单（且任何 guests 变更都自动跟上）。
+function makeAvatar(name, className) {
+  const src = guests.find((g) => g.name === name)?.avatar_data_uri;
+  if (!src) return null;
+  const img = document.createElement("img");
+  img.className = className;
+  img.src = src;
+  img.alt = name;
+  // data URI 不会 404，但解码失败（坏图）时静默 hide。
+  img.addEventListener("error", () => img.remove(), { once: true });
+  return img;
+}
 
 function setStatus(kind, text) {
   statusEl.className = `status ${kind}`;
@@ -86,6 +100,8 @@ function appendBubble({ speaker, text, kind }) {
   stickToBottom(() => {
     const li = document.createElement("li");
     if (kind) li.className = kind;
+    const avatar = makeAvatar(speaker, "msg-avatar");
+    if (avatar) li.appendChild(avatar);
     const s = document.createElement("span");
     s.className = "speaker";
     s.textContent = `${speaker}：`;
@@ -126,6 +142,8 @@ function startStreamingMessage(env) {
     const speaker = env.guest_name || "?";
     const li = document.createElement("li");
     li.className = "msg";
+    const avatar = makeAvatar(speaker, "msg-avatar");
+    if (avatar) li.appendChild(avatar);
     const s = document.createElement("span");
     s.className = "speaker";
     s.textContent = `${speaker}：`;
@@ -202,6 +220,8 @@ function renderSidebar(roomInfo) {
   guestsEl.replaceChildren();
   for (const g of guests) {
     const li = document.createElement("li");
+    const avatar = makeAvatar(g.name, "avatar");
+    if (avatar) li.appendChild(avatar);
     const name = makeBadge("guest-name", null, g.name);
     li.appendChild(name);
     // read-only 是默认，徽章只标显著权限节省视觉噪音；isolation=room 同理。

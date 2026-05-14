@@ -173,6 +173,9 @@ class ChahuaServer:
         P4 加 ``[[guest]].isolation`` 字段后这里读真值，前端按 ``data-isolation`` 渲染
         无需改。P3.2.2 内 ``isolation="room"`` hardcode 占位。
 
+        ``avatar_data_uri``：P3.2.x 加的茶客头像，与 persona md sibling 同名 ``.png``，
+        base64 嵌进 envelope。缺图返 ``None``，前端按无头像渲染。
+
         副作用：runtime 期 ``permission`` 切换（P4 才支持）不会反映到 sidebar —— 届时加
         ``room_info_delta`` wire 帧增量下发。
         """
@@ -182,6 +185,7 @@ class ChahuaServer:
                 "name": gc.name,
                 "permission": gc.permission,
                 "isolation": "room",
+                "avatar_data_uri": gc.read_avatar_data_uri(),
             }
             for gc in rc.guests
         ]

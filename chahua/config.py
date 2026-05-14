@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
+import base64
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from ._paths import resolve_under
 from .permissions import VALID_MODES, is_valid_mode
@@ -66,6 +67,20 @@ class GuestConfig:
 
     def read_persona(self) -> str:
         return self.persona_path.read_text(encoding="utf-8")
+
+    def read_avatar_data_uri(self) -> Optional[str]:
+        """头像约定：与 persona md sibling 同名只换 ``.png``（``chahua/personas/宝总.png``）。
+
+        返回 ``data:image/png;base64,...`` data URI；找不到文件返 ``None``，前端按缺省渲染
+        （不挂 ``<img>``）。压缩到 128px PNG 时一张 ~30KB，5 茶客约 150KB on wire 单帧塞得下；
+        将来加更大的人头或更多茶客时（>1MB room_info）再改成按需懒拉。
+        """
+        avatar = self.persona_path.with_suffix(".png")
+        try:
+            data = avatar.read_bytes()
+        except FileNotFoundError:
+            return None
+        return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
 
     def workspace_in(self, room_dir: Path) -> Path:
         """茶客的 ``working_directory`` 约定 = ``<room_dir>/guests/<name>/``。
