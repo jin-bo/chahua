@@ -63,6 +63,16 @@ class GuestCursor:
             # 文件 <1KB，整体原子重写最省心；append-only json 单行重写反而要锁。
             write_json_atomic(self.cursor_path, self._last_seen)
 
+    def clear(self) -> None:
+        """全员游标归零 —— 内存 + cursor.json 重写为 ``{}``。
+
+        清空 transcript 时一并调用：清完后 ``get()`` 全返 0，所有茶客下一轮都走
+        onboarding，相当于"忘掉本房间所有人发过什么"。
+        """
+        self._last_seen.clear()
+        if self.cursor_path is not None:
+            write_json_atomic(self.cursor_path, self._last_seen)
+
     def snapshot(self) -> dict[str, int]:
         """供持久化 / 调试用的只读副本。"""
         return dict(self._last_seen)

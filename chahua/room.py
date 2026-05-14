@@ -165,6 +165,20 @@ class Room:
             append_jsonl(self.transcript_path, msg.to_jsonl_dict())
         return msg
 
+    def clear(self) -> None:
+        """清空 transcript —— 内存 + 落盘文件。``_participants`` 不动（房间还在，茶客
+        还在场，只是历史话都没了）。
+
+        落盘走 ``open("w")`` 截断而非 ``unlink`` —— 与构造期 ``mkdir`` 同样的简化口径，
+        下一次 ``append`` 不用再判文件是否存在；同时也避免 Windows 下文件被监控工具占用时
+        ``unlink`` 失败。
+        """
+        self._messages.clear()
+        if self.transcript_path is not None:
+            # 截断为空文件，下次 append_jsonl 直接写一行。
+            with self.transcript_path.open("w", encoding="utf-8"):
+                pass
+
     def messages_since(self, last_seq: int) -> list[Message]:
         """返回 ``seq > last_seq`` 的所有消息。``last_seq=0`` 表示"从头"。"""
         # seq 从 1 起密集递增 → _messages[i].seq == i + 1，直接切片 O(k)。

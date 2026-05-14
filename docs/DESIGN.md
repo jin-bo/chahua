@@ -570,6 +570,14 @@ chahua/
 
 ## 8. 修订记录
 
+- **2026-05-13（P3.2.x 增量·清空聊天）** —— sidebar 加「清空聊天」落地决策：
+  - **清空范围 = transcript + 摘要 + 游标**，三层走对应 `clear()`；茶客 agentao `working_directory` 不动 —— 人设印象 / 自有笔记保留，但他们看不到房间公共记录里之前发生过什么；游标归零让下条消息走 onboarding（重新介绍房间 + 当前在场）。"全清含 agentao session" 留给 P4，需要 tear-down + 重建所有 TeaGuest（约等于换房一遍），不在本次表面积内。
+  - **wire 复用 `room_info` + `room_history`，不另开 `room_cleared` envelope** —— 服务端 `_clear_room` 完后重发 room_info + 空 room_history，前端 `renderSidebar` 一帧 `messagesEl.replaceChildren()` 自动复位。与 `_switch_room` 同口径，减少 wire 表面积；代价是 sidebar 整段会重建一次 DOM（茶客名册 / 头像没变，但 React-style diff 不在的 vanilla 路径下是无脑全量），可接受。
+  - **inbound `clear_room` 无 payload** —— 只要 `{"type": "clear_room"}`，房间作用域由当前 session 决定（与 user_message 同语义）；服务端串行 inbound 循环保证与 `submit_user_message` / `switch_room` 互斥，编排器不需要额外加锁。
+  - **Orchestrator.reset_room 取消在跑的 `_summary_task` 不 await** —— 摘要任务读 clear 前的 transcript 切片，跑完会把陈旧 SummarySpan append 回刚清空的列表里。cancel 不 await 维持"摘要不挡路径"原则；极端竞态下落进一条陈旧 span 也无伤大雅（下次 clear 也能再清）。
+  - **按钮做小 + native `confirm()` 兜底误点** —— sidebar 房间段一个低对比度小按钮（11px 文字 + 透明底 + 浅边框），点击后走 `window.confirm()`（Electron 是 native dialog 阻断）；本地不抢先清 DOM，让回环（服务端→ room_info→ renderSidebar 清屏）一致：失败 / 服务端拒收时不会出现"明明清了又冒出来"。
+  - **`participants` 不动** —— 房间还在，茶客还在场，只是历史话没了；`Room.clear` 只清 `_messages` + 截断 jsonl 文件。下次 append 直接复用既有 participants 名册（避免 add_participant 校验意外报"speaker 不在场"）。
+
 - **2026-05-13（P3.2.2 完工后）** —— P3.2.x 增量 + P3.2.3 ws 重连退避落地决策：
   - **茶室头像走 base64 嵌 envelope 而非 file:// / custom protocol** —— `<repo>/chahua/personas/<name>.png`（人格卡 sibling）由 `GuestConfig.read_avatar_data_uri()` 读 + base64 + 嵌 `room_info.data.guests[i].avatar_data_uri`；用户头像同模式走 `UserConfig.read_avatar_data_uri()`（`<USER.md>.with_suffix(".png")`）→ `room_info.data.user_avatar_data_uri`。原图 1.5MB×6 太重，sips 压到 128px ~30KB/张，5 茶客 + 1 用户共 ~190KB on wire 单帧塞下；HiDPI 2× 也只需 64px，128 余量足。CSP `img-src` 加 `data:` —— 默认 `default-src 'self'` 拦 data URI，是漏检 trap。
   - **permission V 标，不是文字 pill** —— workspace-write 蓝 / full-access 红 / read-only 不渲染。`makePermissionBadge` 与 `makeBadge` 分家：前者固定 `✓` textContent + `data-permission` + title hover；后者保留给 guest-name / mention-name / isolation 文字徽章。V 标用 `.avatar-wrap` + `.on-avatar` 绝对定位浮头像右上角，sidebar 背景同色 1.5px 描边制造"切"出感；opacity 0.7 让 V 标不抢头像戏。

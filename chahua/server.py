@@ -56,6 +56,7 @@ DEFAULT_HOST = "127.0.0.1"
 # 客户端 → 服务端 message type 字段值。
 INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
+INBOUND_CLEAR_ROOM = "clear_room"
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -155,8 +156,7 @@ class ChahuaServer:
 
         writer = asyncio.create_task(self._writer(ws, outbound), name="ws-writer")
         try:
-            self._emit_room_info(sink)
-            self._emit_room_history(sink)
+            self._emit_room_snapshot(sink)
             async for raw in ws:
                 if not isinstance(raw, str):
                     # 二进制帧不在协议里（envelope 是 JSON 文本）。
@@ -294,8 +294,29 @@ class ChahuaServer:
         except Exception:
             _log.exception("switch_room: 旧 session close 出错（已切换，忽略）")
         _log.info("switch_room: → %r", room_id)
+        self._emit_room_snapshot(sink)
+
+    def _emit_room_snapshot(self, sink: EnvelopeSink) -> None:
+        """下发 room_info + room_history —— 前端拿来全量复位 sidebar + 消息区。
+
+        三处调用：首次连接（``_serve_one``）、换房成功（``_switch_room``）、清空房间
+        （``_clear_room``）。前端 ``renderSidebar`` 一帧 ``messagesEl.replaceChildren()``
+        清屏，再用 ``room_history`` 回放。``_switch_room`` 的失败兜底只单发 room_info
+        让 sidebar 状态复位，不走这个 helper。
+        """
         self._emit_room_info(sink)
         self._emit_room_history(sink)
+
+    def _clear_room(self, sink: EnvelopeSink) -> None:
+        """清空当前房间公共状态 + 重发 room snapshot 让前端复位。
+
+        不另开新 envelope 类型 —— 与换房同口径减少 wire 表面积；服务端串行 inbound 循环
+        保证与 ``submit_user_message`` 互斥；编排器内部 ``_summary_task`` 由 ``reset_room``
+        cancel。
+        """
+        self._session.orchestrator.reset_room()
+        _log.info("clear_room: %r 已清空", self._session.room.name)
+        self._emit_room_snapshot(sink)
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息。"""
@@ -306,6 +327,9 @@ class ChahuaServer:
                 _log.warning("ignoring switch_room with missing/empty room_id")
                 return
             self._switch_room(room_id, sink)
+            return
+        if msg_type == INBOUND_CLEAR_ROOM:
+            self._clear_room(sink)
             return
         if msg_type != INBOUND_USER_MESSAGE:
             # 友好容忍：未知 type 不断连，仅 WARN。前端在协议升级期发新 type 时

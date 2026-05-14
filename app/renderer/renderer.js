@@ -26,6 +26,7 @@ const roomTopicEl = document.getElementById("room-topic");
 const guestsEl = document.getElementById("guests");
 const roomsEl = document.getElementById("rooms");
 const dropdownEl = document.getElementById("mention-dropdown");
+const clearRoomBtn = document.getElementById("clear-room");
 
 const wsUrl = window.chahua?.wsUrl;
 if (!wsUrl) {
@@ -80,9 +81,10 @@ function setStatus(kind, text) {
   statusEl.textContent = text;
 }
 
-function setComposerEnabled(enabled) {
+function setInputEnabled(enabled) {
   textInput.disabled = !enabled;
   submitBtn.disabled = !enabled;
+  clearRoomBtn.disabled = !enabled;
 }
 
 function stickToBottom(mutate) {
@@ -324,7 +326,7 @@ function renderSidebar(roomInfo) {
   renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
   // room_info 到达 → composer 解锁；之前 onopen 不再 enable，避免 userDisplayName
   // 跳变窗口（用户在 "我" 状态发了一条，第二条又变成实际显示名）。
-  setComposerEnabled(true);
+  setInputEnabled(true);
   textInput.focus();
 }
 
@@ -575,7 +577,7 @@ function connect() {
   // 重试中文案 vs 首次连接区分开 —— 首次空白，重试带次数。
   const tag = reconnectAttempt > 0 ? `（第 ${reconnectAttempt} 次重试）` : "";
   setStatus("", `连接中… ${wsUrl}${tag}`);
-  setComposerEnabled(false);
+  setInputEnabled(false);
   ws = new WebSocket(wsUrl);
   ws.addEventListener("open", () => {
     connected = true;
@@ -593,7 +595,7 @@ function connect() {
   });
   ws.addEventListener("close", (ev) => {
     connected = false;
-    setComposerEnabled(false);
+    setInputEnabled(false);
     closeInFlightOnDisconnect();
     if (NO_RECONNECT_CODES.has(ev.code)) {
       setStatus("error", `连接断开 (${ev.code} ${ev.reason || ""})`);
@@ -605,6 +607,17 @@ function connect() {
     console.error("ws error", ev);
   });
 }
+
+// 清空聊天：本地不抢先清 DOM，让回环一致 —— 服务端清完会重发 room_info +
+// room_history(空)，renderSidebar 一帧 messagesEl.replaceChildren；失败 / 服务端拒收
+// 时 UI 不会出现"明明清了又冒出来"的诡异状态。
+clearRoomBtn.addEventListener("click", () => {
+  if (!connected) return;
+  const roomName = roomNameEl.textContent;
+  if (!window.confirm(`确定清空「${roomName}」的全部聊天记录？\n茶客在场，但本房间的 transcript / 摘要 / 游标会被重置。`)) return;
+  ws.send(JSON.stringify({ type: Inbound.CLEAR_ROOM }));
+  setStatus("", `清空「${roomName}」…`);
+});
 
 composer.addEventListener("submit", (ev) => {
   ev.preventDefault();

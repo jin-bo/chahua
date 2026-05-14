@@ -105,6 +105,21 @@ class Summarizer:
         """已被摘要覆盖的最大 seq；空则 0。"""
         return self._summaries[-1].end_seq if self._summaries else 0
 
+    # ── 清空 ────────────────────────────────────────────────────────────
+
+    def clear(self) -> None:
+        """清空摘要 —— 内存 + summary.jsonl + 退避状态全归零。
+
+        清空 transcript 时一并调用：原 SummarySpan 的 ``start_seq/end_seq`` 指向已不存在的
+        seq 区间，保留只会污染下次 onboarding 的"近期梗概"段。
+        """
+        self._summaries.clear()
+        self._failures = 0
+        self._next_eligible_seq = 0
+        if self._summary_path is not None:
+            with self._summary_path.open("w", encoding="utf-8"):
+                pass
+
     # ── 主入口 ──────────────────────────────────────────────────────────
 
     async def maybe_summarize(

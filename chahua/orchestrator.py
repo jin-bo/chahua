@@ -163,6 +163,33 @@ class Orchestrator:
     def guest_names(self) -> tuple[str, ...]:
         return tuple(self._guests)
 
+    # ── 清空 ──────────────────────────────────────────────────────────
+
+    def reset_room(self) -> None:
+        """清空房间公共状态：transcript / 摘要 / 游标 + 自身运行时计数器。
+
+        茶客实例 / agentao session 不动 —— 茶客对用户的人设印象、自有笔记保留，但他们
+        在"房间公共记录"里看不到之前发生过什么；游标归零意味着下一条消息会重新走
+        onboarding 路径（重新介绍房间 + 当前在场）。
+
+        ``_summary_task`` 若在跑就 cancel —— 它读了 clear 前的 transcript 切片，跑完
+        会把陈旧 SummarySpan append 到刚清空的列表里。cancel 不 await（同 _kick_summarize
+        的"摘要不挡路径"原则）；极端竞态下落进一条陈旧 span 也无伤大雅，下次 clear 也能
+        重新覆盖。
+
+        调用语义：server 端 ``_clear_room`` 入口在 ``async for raw in ws`` 串行消费里，
+        与 ``submit_user_message`` 互斥，所以本函数不需要自己加锁。
+        """
+        self.room.clear()
+        self.summarizer.clear()
+        self.cursor.clear()
+        self._consecutive_ai_turns = 0
+        self._rounds_without_user_or_mention = 0
+        self._cooldown.clear()
+        if self._summary_task is not None and not self._summary_task.done():
+            self._summary_task.cancel()
+        self._summary_task = None
+
     # ── 主入口 ─────────────────────────────────────────────────────────
 
     async def submit_user_message(

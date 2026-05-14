@@ -21,6 +21,21 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .sidebar-title { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
 .sidebar-room-name { font-weight: 600; color: #555; }
 .sidebar-room-topic { font-size: 12px; color: #888; margin-top: 2px; }
+/* 「清空聊天」按钮 —— 故意做小、低对比度，把误点门槛抬高（confirm() 在 click 路径
+   兜底，但视觉先劝退）。 */
+.sidebar-action {
+  margin-top: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #888;
+  background: transparent;
+  border: 1px solid #d0c8b4;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.sidebar-action:hover:not(:disabled) { background: #ece5d2; color: #555; }
+.sidebar-action:disabled { color: #bbb; border-color: #e5e0d0; cursor: not-allowed; }
 #guests { list-style: none; margin: 0; padding: 0; }
 #guests li { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
 #guests li .avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
