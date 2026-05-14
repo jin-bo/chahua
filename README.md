@@ -67,7 +67,20 @@ ship 自带的 python 包 + 默认 personas 在 `.app` bundle 内只读，与用
 
 ## 接下来
 
-- **P3.3.2 剩余**：electron-builder 打 macOS .dmg（含 sidecar bundling 策略：依赖系统 uv 或内嵌 python）、
-  SIGTERM / SIGINT 路径补全、sidecar stderr/stdout 落 `app.getPath('logs')`。
+- **P3.3.2 剩余**：(d) SIGTERM / SIGINT 路径补全（顺手改 ws shutdown 帧解 Windows）。
+- **P3.3.3 Windows 发布**：build-python-bundle 跑 win 端 + electron-builder NSIS 出未签名 .exe；接缝（platform 分支、sidecar resolver、build.win 配置）P3.3.2.c 已就位。
 - **P4 打磨 + ACP 异构茶客**：逐茶客 provider/model、isolation=global、`[scoring]`/`[summary]` 分派、
   人格画廊、运行时增删茶客、接第一个非 agentao 的 ACP 茶客。
+
+## 打包发布
+
+```bash
+cd app
+npm install                    # 含 electron-builder devDep（首次 ~150MB）
+npm run build:python           # 把 python + chahua + agentao 烤进 app/python-bundle/（~130MB；idempotent）
+npm run build:mac              # → app/dist/茶话室-<ver>-mac-arm64.dmg（首次约 75s）
+```
+
+未签名 .dmg：用户双击会 Gatekeeper 红屏 "无法验证开发者"；ctrl-click → 打开
+走一次即可。要进 Mac App Store 或脱 Gatekeeper 警告需 Apple Developer ID（$99/年），
+P3.3.2 内未做。Windows .exe 接缝（`build:win`）已配，跑构建需 Windows 主机或 CI matrix。

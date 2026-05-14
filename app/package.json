@@ -6,17 +6,84 @@
   "main": "main/index.js",
   "scripts": {
     "dev": "electron .",
-    "start": "electron ."
+    "start": "electron .",
+    "build:python": "node scripts/build-python-bundle.js",
+    "build:python:force": "FORCE=1 node scripts/build-python-bundle.js",
+    "build:mac": "npm run build:python && electron-builder --mac",
+    "build:mac:arm64": "npm run build:python && electron-builder --mac --arm64",
+    "build:mac:x64": "npm run build:python && electron-builder --mac --x64",
+    "build:win": "npm run build:python && electron-builder --win",
+    "build:dir": "npm run build:python && electron-builder --dir"
   },
   "engines": {
     "node": ">=18.17",
     "npm": ">=9"
   },
   "devDependencies": {
-    "electron": "^32.0.0"
+    "electron": "^32.0.0",
+    "electron-builder": "^25.1.8"
   },
   "dependencies": {
     "dompurify": "^3.4.3",
     "marked": "^18.0.3"
+  },
+  "build": {
+    "appId": "chahua.app",
+    "productName": "茶话室",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main/**/*",
+      "preload/**/*",
+      "renderer/**/*",
+      "templates/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!python-bundle/**/*",
+      "!scripts/**/*",
+      "!dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "python-bundle",
+        "to": "python-bundle",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.social-networking",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ],
+      "artifactName": "茶话室-${version}-mac-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null
+    },
+    "dmg": {
+      "title": "茶话室 ${version}",
+      "writeUpdateInfo": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "茶话室-${version}-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

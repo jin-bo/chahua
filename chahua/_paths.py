@@ -41,13 +41,22 @@ def resolve_under(base: Path, path: Union[str, Path]) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
-def _dev_fallback_root() -> Path:
-    """env 缺时的回退 = 包目录的父（dev 仓库根）。
+def _package_install_root() -> Path:
+    """``chahua/`` 包安装根 ——
 
-    打包后 ``chahua/`` 包在 site-packages / asar 里，``parent.parent`` 不是用户数据 ——
-    所以打包路径上 main 进程**必须**显式 export 两个 env，不能漏。
+    - dev：``chahua/`` 在仓库根下，返 repo 根（与历史 ``_dev_fallback_root`` 同义）。
+    - packaged：``chahua/`` 在 ``site-packages/`` 下，返 ``site-packages/`` —— 这里
+      恰好是 ``chahua/personas/`` 的父级（hatch 把 personas 打进 wheel 作为
+      package_data），所以 :meth:`Paths.find_in_data_then_app` 的第三档兜底能查到。
+
+    打包后 ``CHAHUA_APP_ROOT`` 由 Electron 显式 export 指向 ``.app/Resources/``，
+    跟这里返回的 site-packages 不是同一层 —— 调用方按需自己加 ``chahua/`` 前缀。
     """
     return Path(__file__).resolve().parent.parent
+
+
+# 历史别名 —— 旧代码可能还引用，保留转发避免 surprise import error。
+_dev_fallback_root = _package_install_root
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,11 +82,15 @@ class Paths:
         )
 
     def find_in_data_then_app(self, rel: Union[str, Path]) -> Optional[Path]:
-        """相对路径按 ``user_data_root → app_root`` 顺序搜，首个存在的返回。
+        """相对路径按 ``user_data → app → 包 install 根`` 顺序搜，首个存在的返回。
 
         - 绝对路径：原样返回（仍校验文件存在；不存在返 ``None``）。
         - 相对路径：``user_data_root / rel`` 优先（用户自带 / override），fall through
-          到 ``app_root / rel``（ship 自带）。两个都不存在返 ``None``。
+          到 ``app_root / rel``（ship 自带 asset），再 fall through 到
+          ``_package_install_root() / rel``（chahua python 包 install 根，packaged
+          模式下 ship 自带 personas 在 ``site-packages/chahua/personas/`` —— 第二档
+          ``app_root`` = ``.app/Resources/`` 找不到，靠这一档兜底）。三档都不在返
+          ``None``。dev 模式 三档同源仓库根，效果与之前两档完全一致。
 
         持久化 asset 类（personas / templates）走这里；用户独占数据（transcript /
         cursor / summary）不该走 —— 它们只在 ``user_data_root`` 下生成 + 读写。
@@ -85,7 +98,7 @@ class Paths:
         p = Path(rel)
         if p.is_absolute():
             return p if p.is_file() else None
-        for root in (self.user_data_root, self.app_root):
+        for root in (self.user_data_root, self.app_root, _package_install_root()):
             candidate = root / p
             if candidate.is_file():
                 return candidate

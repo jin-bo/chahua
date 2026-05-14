@@ -24,13 +24,14 @@ const TEMPLATES_DIR = path.join(__dirname, "..", "templates");
 
 function resolvePaths() {
   if (app.isPackaged) {
-    // packaged：python 包路径要等 P3.3.2.c 决定（可能是嵌入 .app/Resources/python/ 或
-    // 依赖系统 uv 指向 .app/Resources/chahua/）。先放占位 ``process.resourcesPath``，
-    // P3.3.2.c 再细化。
+    // packaged：``process.resourcesPath`` = ``.app/Contents/Resources``。
+    // electron-builder extraResources 把 python-bundle/ 搬到这里，与
+    // chahua/personas/ 等 ship 自带 asset 同根。
     return {
       appRoot: process.resourcesPath,
       userDataRoot: app.getPath("userData"),
       templatesDir: TEMPLATES_DIR,
+      isPackaged: true,
     };
   }
   // dev：两根同源仓库根，与 P3.3.2.a 之前的行为 100% 一致。
@@ -38,6 +39,7 @@ function resolvePaths() {
     appRoot: REPO_ROOT,
     userDataRoot: REPO_ROOT,
     templatesDir: TEMPLATES_DIR,
+    isPackaged: false,
   };
 }
 

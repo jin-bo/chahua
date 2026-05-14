@@ -37,6 +37,10 @@ async function copyFileIfMissing(src, dest) {
   return true;
 }
 
+// 手动递归拷而不用 ``fs.cp({recursive:true})`` —— packaged 模式 templates 在
+// asar 虚拟 fs 里，``fs.cp`` 的 readdir + recurse 链在 asar 上会创建空目录然后
+// 静默跳过文件（实测出来 ``rooms/<name>/`` 建了但 ``room.toml`` 没拷）。``copyFile``
+// 对 asar 内文件是可靠的，``readdir`` 也可靠，自己组合即可。
 async function copyDirIfMissing(src, dest) {
   try {
     await fsp.access(dest, fs.constants.F_OK);
@@ -44,8 +48,21 @@ async function copyDirIfMissing(src, dest) {
   } catch {
     /* fall through */
   }
-  await fsp.cp(src, dest, { recursive: true });
+  await copyDirRecursive(src, dest);
   return true;
+}
+
+async function copyDirRecursive(src, dest) {
+  await fsp.mkdir(dest, { recursive: true });
+  for (const entry of await fsp.readdir(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      await copyDirRecursive(s, d);
+    } else {
+      await fsp.copyFile(s, d);
+    }
+  }
 }
 
 // 把 templates → userDataRoot 拷一遍。返回真正拷过的条目数（0 = 全已存在或跳过）。

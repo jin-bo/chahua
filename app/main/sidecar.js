@@ -33,6 +33,30 @@ const STOP_GRACE_MS = 2_000;
 // P3.3+ 加房间选择 UI 后改成参数。
 const DEFAULT_ROOM_REL = "rooms/p3-黄河路";
 
+// dev 与 packaged 的 sidecar 启动命令分派。
+//
+// dev：依赖系统 uv，命令是 ``uv run chahua-server <args>`` —— 装新依赖 / 改源码
+// 立即生效（agentao 也是 editable）。
+//
+// packaged：``app/scripts/build-python-bundle.js`` 把 python-build-standalone +
+// chahua + agentao 烤进 ``<resources>/python-bundle/python/``。运行时**不走** pip
+// 生成的 ``bin/chahua-server`` 入口脚本 —— shebang 是构建时绝对路径，bundle 搬到
+// .app 里立即失效；改走 ``python -m chahua.server`` 绕过 shebang。
+//
+// 平台分支（P3.3.3 Windows 接缝）：python-build-standalone macOS/Linux 把可执行
+// 放在 ``<bundle>/bin/python3``，Windows 直接 ``<bundle>/python.exe``。其他参数
+// （--host / --port / --room）一致。
+function resolveSidecarCommand({ paths }) {
+  if (!paths.isPackaged) {
+    return { cmd: "uv", preArgs: ["run", "chahua-server"] };
+  }
+  const bundleDir = path.join(paths.appRoot, "python-bundle", "python");
+  const pyExe = process.platform === "win32"
+    ? path.join(bundleDir, "python.exe")
+    : path.join(bundleDir, "bin", "python3");
+  return { cmd: pyExe, preArgs: ["-m", "chahua.server"] };
+}
+
 // 打开 sidecar.log 准备 append 写入。失败返回 null，调用方继续启动（日志写不了
 // 不该挡 sidecar 起 —— logsDir 权限问题罕见但不致命）。
 //
@@ -81,11 +105,13 @@ async function startSidecar({ paths, logsDir }) {
   };
   // CHAHUA_APP_ROOT / CHAHUA_USER_DATA 透传给 python 端的 Paths.from_env()：
   // dev 两者同源仓库根（行为不变）；packaged 拆开 —— python 那边按双根搜 persona、
-  // 按 userDataRoot 解 rooms / USER.md。cwd 仍用 appRoot 让 `uv run` 找得到 pyproject。
+  // 按 userDataRoot 解 rooms / USER.md。cwd 仍用 appRoot 让 ``uv run`` 找得到
+  // pyproject（dev）/ 让 python 找得到相对 import（packaged 多余但无害）。
+  const { cmd, preArgs } = resolveSidecarCommand({ paths });
   const child = spawn(
-    "uv",
+    cmd,
     [
-      "run", "chahua-server",
+      ...preArgs,
       "--host", "127.0.0.1",
       "--port", String(port),
       "--room", DEFAULT_ROOM_REL,
