@@ -224,9 +224,17 @@ class Orchestrator:
         # 则用这个 id 补一帧 ``turn_end(next='user')`` 让 UI 收回按钮。None = 无未结链。
         last_open_turn_id: Optional[str] = None
         while self._consecutive_ai_turns < self.config.max_consecutive_ai_turns:
-            pick = await self._pick_next_speaker(
-                respect_at_mention=self._consecutive_ai_turns == 0
-            )
+            # scoring 阶段被 cancel：上一轮已 emit turn_end(next='ai')，UI 守在「停止」
+            # 按钮等下一个 turn_start。不补 fixup 的话 UI 永远收不到链终态。first-iter
+            # （last_open_turn_id=None）UI 还在「发送」状态，无须补。
+            try:
+                pick = await self._pick_next_speaker(
+                    respect_at_mention=self._consecutive_ai_turns == 0
+                )
+            except asyncio.CancelledError:
+                if last_open_turn_id is not None:
+                    self._emit_cancel_fixup(sink, turn_id=last_open_turn_id)
+                raise
             if pick is None:
                 # 没人想接话。两种子情况：
                 #   a) 本回合一上来就 None（用户消息触发，但全员低分 / 全员冷却）——
@@ -260,8 +268,8 @@ class Orchestrator:
             # 不该被 max_consecutive_ai_turns 截断；下一次 outer while 检查时 cap 自然
             # 终止 AI 链续接。
             #
-            # try/except CancelledError 在这里而不是外层 —— 唯一需要补 turn_end 的窗口
-            # 是 turn_start 已 emit 之后。scoring 阶段被 cancel 时 CancelledError 直穿。
+            # 发言阶段被 cancel：本 turn 的 turn_start 已 emit、message_* 可能在流。
+            # scoring 阶段的 cancel 在外层 while 的 try 里独立处理。
             bypass_inner_cap = all(s.kind == ScoreKind.MENTION for s in scores)
             try:
                 for guest_name in winners:
@@ -271,13 +279,7 @@ class Orchestrator:
                     self._consecutive_ai_turns += 1
                     self._rounds_without_user_or_mention += 1
             except asyncio.CancelledError:
-                self._emit_turn(
-                    sink,
-                    turn_id=turn_id,
-                    type=ChahuaEventType.TURN_END,
-                    data={"next": "user"},
-                    status=STATUS_CANCELLED,
-                )
+                self._emit_cancel_fixup(sink, turn_id=turn_id)
                 raise
 
             next_state = (
@@ -457,6 +459,18 @@ class Orchestrator:
                 status=status,
                 data=data,
             ),
+        )
+
+    def _emit_cancel_fixup(self, sink: EnvelopeSink, *, turn_id: str) -> None:
+        """补一帧 turn_end(next='user', cancelled) —— 两条 cancel 路径共用：
+        scoring 阶段 cancel 走 last_open_turn_id；speak 阶段 cancel 走当前 turn_id。
+        """
+        self._emit_turn(
+            sink,
+            turn_id=turn_id,
+            type=ChahuaEventType.TURN_END,
+            data={"next": "user"},
+            status=STATUS_CANCELLED,
         )
 
     def _tick_cooldown(self) -> None:
