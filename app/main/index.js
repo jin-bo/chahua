@@ -4,7 +4,8 @@
 //
 // 流程：
 //   1. 单实例锁 —— 避免两个 main 进程同时拉 sidecar 抢 transcript.jsonl。
-//   2. app 就绪 → 起 sidecar，拿到 wsUrl
+//   2. app 就绪 → 解析 paths（dev = 仓库根；packaged = .app/Resources + userData）
+//      → 首启动 seed templates → userData → 起 sidecar，拿到 wsUrl
 //   3. 建 BrowserWindow，把 wsUrl 通过 additionalArguments 喂给 preload
 //   4. before-quit 优先关 sidecar 再 exit
 //
@@ -14,9 +15,9 @@
 const path = require("node:path");
 const { app, BrowserWindow } = require("electron");
 const { startSidecar } = require("./sidecar");
+const { resolvePaths } = require("./paths");
+const { seedUserData } = require("./seed");
 
-// 仓库根 = app/ 的父目录。sidecar 需要 cwd 在这里才能 `uv run chahua-server`。
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PRELOAD_PATH = path.join(__dirname, "..", "preload", "index.js");
 const RENDERER_HTML = path.join(__dirname, "..", "renderer", "index.html");
 
@@ -48,8 +49,19 @@ async function createWindow(wsUrl) {
 }
 
 app.whenReady().then(async () => {
+  const paths = resolvePaths();
   try {
-    sidecar = await startSidecar({ repoRoot: REPO_ROOT });
+    const copied = await seedUserData(paths);
+    if (copied > 0) {
+      console.log(`[chahua] seeded ${copied} entries → ${paths.userDataRoot}`);
+    }
+  } catch (e) {
+    // seed 失败不致命 —— python 端在 userDataRoot 缺 rooms 时会给清晰报错，
+    // 这里只记 stderr 让用户能溯源；硬塞继续启动反而让现场更难判。
+    console.error("[chahua] seed userData 失败:", e);
+  }
+  try {
+    sidecar = await startSidecar({ paths });
   } catch (e) {
     console.error("[chahua] sidecar 启动失败:", e);
     app.quit();

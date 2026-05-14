@@ -40,8 +40,12 @@ async function findFreePort() {
   });
 }
 
-async function startSidecar({ repoRoot }) {
+async function startSidecar({ paths }) {
+  const { appRoot, userDataRoot } = paths;
   const port = await findFreePort();
+  // CHAHUA_APP_ROOT / CHAHUA_USER_DATA 透传给 python 端的 Paths.from_env()：
+  // dev 两者同源仓库根（行为不变）；packaged 拆开 —— python 那边按双根搜 persona、
+  // 按 userDataRoot 解 rooms / USER.md。cwd 仍用 appRoot 让 `uv run` 找得到 pyproject。
   const child = spawn(
     "uv",
     [
@@ -51,9 +55,14 @@ async function startSidecar({ repoRoot }) {
       "--room", DEFAULT_ROOM_REL,
     ],
     {
-      cwd: repoRoot,
+      cwd: appRoot,
       // PYTHONUNBUFFERED 让 print 立即冲到 stderr，不至于卡在 buffer 等不到 ready 行。
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+        CHAHUA_APP_ROOT: appRoot,
+        CHAHUA_USER_DATA: userDataRoot,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );

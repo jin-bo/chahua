@@ -558,7 +558,7 @@ chahua/
 | **P3.2.2 茶客侧栏 + @ 补全** | `ChahuaEventType.ROOM_INFO` + `ChahuaEnvelope.turn_id` 改 `Optional[str]`（连接级事件 turn_id=None）；`server._emit_room_info` 在 `_serve_one` 起头从 `room_config.guests` 一次性下发：`{room_name, topic, guests:[{name, permission, isolation}], user_display_name}`；renderer 横向 layout（aside#sidebar | ul#messages） + 底 composer；sidebar 列茶客 + permission 徽章（read-only 默认不显眼，workspace-write 黄、full-access 红）+ isolation 徽章占位（hardcode `"room"`，P4 接真值）；@ 正则 `\S*` 与服务端反黑名单对齐，候选靠 guests 名册 `startsWith` 过滤，键盘 ↑↓ Enter/Tab Esc 操作，mousedown 而非 click 抢 input blur，IME composition Enter 守卫不抢拼音回车，submit 时若 dropdown 开着 noop 防误发；composer 等 `room_info` 到达才解锁（避 echo 名跳变窗口）；用户消息 echo 用 `user_display_name`（从 room_info 拿） | sidebar 有人；@ 弹候选含 `-`/`.`/中点茶客名；选中后服务端 `_route` 命中；user echo 名字与 CLI 一致；中文 IME 输入不被前端误抢 |
 | **P3.2.3 ws 重连退避** | renderer `ws.onclose` 退避重连（1s → 2s → 5s → 10s 上限），状态条显示尝试次数；用户主动关窗 / 退出不触发重连（main 进程关 sidecar 前先 webContents.send 一个 "shutting-down" 信号） | sidecar 中途死或 macOS sleep/wake，App 自动恢复 |
 | **P3.3.1 cancel**（✓ 完工） | wire 加 inbound `cancel`；server 改 in-flight task 模型（`asyncio.create_task` 挂 `_inflight_turn_task`，task.cancel() 收 turn），`switch_room` / `clear_room` 走 `_cancel_and_drain_inflight()` 先收净再切；orchestrator `_run_ai_chain` 加 try/except CancelledError emit `turn_end(status=cancelled, next:"user")`；前端 submitBtn 形变「发送 / 停止」按 `currentTurnId` 切，submit handler 双语义路由，断线本地清 `currentTurnId` | turn 跑到一半能停；停止后 next user_message 还能继续；`switch_room` / `clear_room` 在 turn 跑时先 cancel 再操作 |
-| **P3.3.2 打包前置 + 打包 + 主进程兜底**（部分） | (a) ✓ python 拆 `app_root` / `user_data_root`：`Paths` dataclass + `Paths.from_env()` 读 `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`，persona 双根搜，USER.md 只在 user_data；(b) Electron main 进程首启动从 `app/templates/` 拷默认房 + `.env.example` + 空 `USER.md` 到 `app.getPath('userData')`；(c) electron-builder 打 macOS .dmg + sidecar bundling 策略（依赖系统 uv vs. 内嵌 Python）；(d) SIGTERM / SIGINT 路径补全；(e) sidecar stderr/stdout 落盘到 `app.getPath('logs')` | dev `CHAHUA_USER_DATA=/tmp/x` 起 server 验证；.dmg 双击装可用；后台异常发布版本能拿到日志 |
+| **P3.3.2 打包前置 + 打包 + 主进程兜底**（部分） | (a) ✓ python 拆 `app_root` / `user_data_root`：`Paths` dataclass + `Paths.from_env()` 读 `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`，persona 双根搜，USER.md 只在 user_data；(b) ✓ Electron 首启动 seed：`app/main/paths.js` 决定双根（dev 同源仓库根 / packaged 拆 `process.resourcesPath` + `app.getPath('userData')`），`app/main/seed.js` 把 `app/templates/{USER.md, .env.example, rooms/p3-黄河路}` 拷到 `userDataRoot` 并写 `.chahua-seeded` marker（幂等 + dev 同源跳过），spawn sidecar 时显式 export `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`；(c) electron-builder 打 macOS .dmg + sidecar bundling 策略（依赖系统 uv vs. 内嵌 Python）；(d) SIGTERM / SIGINT 路径补全；(e) sidecar stderr/stdout 落盘到 `app.getPath('logs')` | dev `CHAHUA_USER_DATA=/tmp/x` 起 server 验证；.dmg 双击装可用；后台异常发布版本能拿到日志 |
 | **P4 打磨 + ACP 异构茶客** | 房间配置文件完善、人格画廊、运行时增删茶客、可选「主持人」agent、工具权限预设、删除房间/清茶客记忆 UI；**抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip** | 成品；并接入第一个非 agentao 的 ACP 茶客作为验收 |
 
 ## 7. 待定 / 后续
@@ -570,6 +570,36 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-05-14（P3.3.2 第 2 层：Electron 首启动 seed 完工后）** —— Electron 把
+  `app/templates/` 拷进 `userDataRoot` 的落地决策：
+  - **dev 模式同源即跳过** —— `seedUserData` 拿到 `userDataRoot === appRoot` 直接
+    `return 0`，不写 `.chahua-seeded` marker，也不动 repo 里既有的 `USER.md` /
+    `.env.example` / `rooms/p3-黄河路`。dev 改 repo 文件即时生效的工效不丢。
+  - **marker 文件 `.chahua-seeded` 在 userDataRoot 根**——比"逐条目存在性判断"省事：
+    用户删了默认房不会被复活硬塞回来（删 = 用户意愿）；多次启动幂等不浪费 I/O。
+    marker 在所有拷贝**之后**写，拷一半异常 → marker 不留，下次启动重试。
+  - **拷贝粒度：file 走 `copyFileIfMissing` / dir 走 `copyDirIfMissing` 整目录覆盖**——
+    没做"目录内逐文件 merge"，避免 ship 默认房与用户编辑同名文件撞。整目录已存在 =
+    跳过整目录；用户后续手动 sync templates 改动是 P4 范围。
+  - **`app/main/paths.js` 居中解析双根** —— `app.isPackaged ? {process.resourcesPath,
+    app.getPath('userData')} : {REPO_ROOT, REPO_ROOT}`。packaged 路径的 `appRoot` 用
+    `process.resourcesPath` 是占位 —— P3.3.2.c 决定 python 包到底嵌哪儿后再细化，
+    但 wire（env 名 / 调用约定）这一层已经定了。
+  - **sidecar spawn 显式 export 两个 env** —— 之前 `Paths.from_env()` 在 dev 模式
+    走的是 `_dev_fallback_root()`（包目录的父），现在 Electron 总是显式给 env，
+    dev 模式 env 值刚好就等于那个 fallback。两条路径 100% 一致，但显式 env 让
+    spawn 命令行 / 进程环境可读、便于排障。
+  - **`USER.md` 模板带占位指引而非完全空** —— 完全空 `load_user_md` 也能 fall through
+    到 `DEFAULT_DISPLAY_NAME="用户"`，但用户首次打开看到空 USER.md 不知道这是干嘛
+    用的；带占位文字（"茶话室会用这份文件了解你是谁……"）让用户立即明白可以编辑。
+  - **`p3-黄河路` 模板的默认 permission 全 read-only** —— 仓库里的 dev 副本是
+    `宝总 full-access + 汪小姐 / 范总 workspace-write`（演示用），但 shipped 给用户的
+    版本保守起步，read-only 没有"AI 改我电脑文件"的吓人面；想要写权限的用户自己改
+    `room.toml`。
+  - **不动 dev repo 的 .env / .env.example / USER.md** —— 模板文件是 `app/templates/`
+    下的独立副本，不引用 repo 根的同名文件。代价是模板有重复，但避免了"改一份不改
+    另一份"的语义分歧（dev repo 的 USER.md 包含老金真名 + 个人偏好，不该 ship）。
 
 - **2026-05-14（P3.3.2 第 1 层：python 拆 root 完工后）** —— 打包前置的 app_root /
   user_data_root 双根：

@@ -1,0 +1,25 @@
+# 黄河路 —— 默认房间（首启动 seed 到 userData/rooms/p3-黄河路/）。
+# 三人都是《繁花》黄河路上的角色。
+#
+# permission 默认 read-only（更保守，shipped 给用户的版本不预开放写权限）；
+# 想给宝总开 full-access、给汪小姐 / 范总 开 workspace-write，自己改这文件。
+
+[room]
+name  = "黄河路"
+topic = "至真园包厢，随便聊。"
+rules = "保持中文、单条不超过 200 字、不复述别人的话。"
+
+[[guest]]
+name       = "宝总"
+persona    = "chahua/personas/宝总.md"
+permission = "read-only"
+
+[[guest]]
+name       = "汪小姐"
+persona    = "chahua/personas/汪小姐.md"
+permission = "read-only"
+
+[[guest]]
+name       = "范总"
+persona    = "chahua/personas/范总.md"
+permission = "read-only"
