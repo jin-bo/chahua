@@ -125,7 +125,9 @@ async function startSidecar({ paths, logsDir }) {
         CHAHUA_APP_ROOT: appRoot,
         CHAHUA_USER_DATA: userDataRoot,
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      // stdin 改 ``pipe`` —— P3.3.2.d stop() 关 stdin 写端给 python 优雅关停信号。
+      // python 端 _watch_stdin_eof 监 EOF；stdin 是 tty 时不装 watcher 避抢字符。
+      stdio: ["pipe", "pipe", "pipe"],
     },
   );
 
@@ -195,9 +197,20 @@ async function startSidecar({ paths, logsDir }) {
     pid: child.pid,
     async stop() {
       if (child.exitCode !== null) return true;
-      child.kill("SIGINT");
+      // 跨平台优雅关：关 stdin 写端 → python _watch_stdin_eof 读到 EOF →
+      // set stop event → server.serve_forever 返回 → 整套 graceful 关。
+      //
+      // 之前 SIGINT 路径在 Windows 上其实是 TerminateProcess（不 graceful），
+      // 还要 python 端两段式 signal trick 才能接到 —— stdin EOF 一条路径覆盖所有
+      // 平台，且不依赖信号语义。``.end()`` 关写端，python 那侧 read() 返空 bytes。
+      try {
+        child.stdin?.end();
+      } catch {
+        // child 已退 / stdin 已关 → 无所谓，下面 exit 监听仍生效。
+      }
       return await new Promise((res) => {
         const t = setTimeout(() => {
+          // grace 没赶上 = python 卡了 / stdin watcher 没装上 → 硬杀。
           child.kill("SIGKILL");
           res(false);
         }, STOP_GRACE_MS);

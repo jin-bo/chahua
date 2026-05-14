@@ -3,7 +3,7 @@
 多 Agent 群聊「茶话室」桌面 App —— 用户和多个由 [agentao](../agentao) 驱动的 AI「茶客」
 在同一个聊天室里对话（像微信群，可 @、茶客之间也能接话）。完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
-当前进度：**P3.3.2 第 2 层（首启动 seed templates → userData）**。
+当前进度：**P3.3.2 完工（macOS .dmg + 跨平台 graceful shutdown）**。
 底层（P0–P2.3）：三茶客 + 意愿打分调度 + 事件 envelope + transcript/summary/cursor 续聊 + USER.md 角色。
 桌面壳（P3.1–P3.3.2.b）：拉 sidecar / 流式打字机 + 闪烁光标 / **markdown 渲染**（gfm + DOMPurify）/ **气泡复制按钮** / 打分横条 + 徽章 / 茶客侧栏（permission V 标 + 头像 + @ 补全）/ 气泡布局（茶客左 / 用户右镜像）/ 进 Room 显示历史 / **切换房间 + 清空聊天** / **停止按钮**（cancel turn）/ 断线自动重连退避 / 首启动 seed 默认房到 userData。
 P3.3.2 还差：electron-builder 打 .dmg、SIGTERM 路径补全、sidecar 日志落盘。
@@ -67,8 +67,7 @@ ship 自带的 python 包 + 默认 personas 在 `.app` bundle 内只读，与用
 
 ## 接下来
 
-- **P3.3.2 剩余**：(d) SIGTERM / SIGINT 路径补全（顺手改 ws shutdown 帧解 Windows）。
-- **P3.3.3 Windows 发布**：build-python-bundle 跑 win 端 + electron-builder NSIS 出未签名 .exe；接缝（platform 分支、sidecar resolver、build.win 配置）P3.3.2.c 已就位。
+- **P3.3.3 Windows 发布**：build-python-bundle 跑 win 端 + electron-builder NSIS 出未签名 .exe；接缝（platform 分支、sidecar resolver、build.win 配置、stdin EOF 替 SIGINT）P3.3.2.c+.d 已就位，剩 Windows 主机 / CI matrix 端跑。
 - **P4 打磨 + ACP 异构茶客**：逐茶客 provider/model、isolation=global、`[scoring]`/`[summary]` 分派、
   人格画廊、运行时增删茶客、接第一个非 agentao 的 ACP 茶客。
 

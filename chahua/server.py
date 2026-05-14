@@ -479,22 +479,73 @@ async def _serve(args: argparse.Namespace) -> int:
     server = ChahuaServer(session, host=args.host, port=port, paths=paths)
     stop = asyncio.Event()
 
-    # add_signal_handler 在 Windows 不支持 —— 茶话室目前定位 macOS / Linux，
-    # Windows 走 P3 Electron 拉子进程再说。
+    # 三条触发 stop 的路径，覆盖所有"父进程要我停"语义：
+    #
+    # 1. SIGINT / SIGTERM signal handler —— CLI 用户 Ctrl-C / `kill <pid>` 进来，
+    #    asyncio loop 内 add_signal_handler 设 stop。Windows 不支持 add_signal_handler
+    #    （只能通过 ProactorEventLoop + 老 signal 模块的两段式 trick），P3.3.2.d 走
+    #    第 3 条 stdin EOF 路径替代 —— 跨平台一致、还不踩 Windows 信号坑。
+    #
+    # 2. KeyboardInterrupt —— 上层 main() catch，stop 来不及 set 但 asyncio.run
+    #    会 cancel 所有 task。
+    #
+    # 3. stdin EOF watcher —— Electron 关 sidecar 时 child.stdin.end() 关写端，
+    #    Python 这边 sys.stdin 读到 EOF → set stop。stdin 是 tty 时（CLI 交互模式）
+    #    不装这个 watcher，避免乱抢用户敲的字符。
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:
-            # Windows fallback：靠 KeyboardInterrupt 上浮捕获。
             pass
+
+    stdin_watcher_task: Optional[asyncio.Task] = None
+    if not sys.stdin.isatty():
+        stdin_watcher_task = asyncio.create_task(_watch_stdin_eof(stop))
 
     try:
         await server.serve_forever(stop)
     finally:
         # 关 server 持有的当前 session（换房后 self._session 已不是局部 `session`）。
         server.close()
+        if stdin_watcher_task and not stdin_watcher_task.done():
+            stdin_watcher_task.cancel()
     return 0
+
+
+async def _watch_stdin_eof(stop: asyncio.Event) -> None:
+    """监 sys.stdin EOF，作为跨平台 sidecar 优雅关停信号。
+
+    Electron main 进程关 sidecar 前调 ``child.stdin.end()`` 关 stdin pipe 的写端
+    （sidecar.js:stop）；Python 这边读到 EOF 即 set stop，server.serve_forever 返回
+    → 整套 graceful 关。Windows 的 ``child.kill("SIGINT")`` 实际是
+    TerminateProcess（不 graceful），全靠这条路径替代。
+
+    ``connect_read_pipe`` 在 Unix / Windows ProactorEventLoop 都支持；少数边角设置下
+    可能失败（如 dev tty 模式调到这里，但我们已经在调用方 ``isatty()`` 过滤；保留
+    try/except 兜底 OSError / NotImplementedError）。
+    """
+    log = logging.getLogger(__name__)
+    loop = asyncio.get_running_loop()
+    try:
+        reader = asyncio.StreamReader(loop=loop)
+        protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    except (OSError, NotImplementedError) as e:
+        log.debug("stdin watcher disabled: %s", e)
+        return
+
+    # 父进程往 stdin 写东西不该触发关停（保留未来"命令通道"扩展空间，比如 main
+    # 想塞个 ``{"type":"switch_room"}`` 进来）—— 只 EOF（空 bytes）才 set stop。
+    while not stop.is_set():
+        try:
+            data = await reader.read(1024)
+        except asyncio.CancelledError:
+            return
+        if not data:
+            log.info("stdin EOF received; shutting down")
+            stop.set()
+            return
 
 
 def main() -> None:
