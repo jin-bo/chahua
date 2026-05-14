@@ -1,11 +1,13 @@
 [project]
 name = "chahua"
 version = "0.1.0"
-description = "茶话室 —— 多 Agent 群聊桌面 App（P0 骨架）"
+description = "茶话室 —— 多 Agent 群聊桌面 App"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "agentao",
+    "agentao>=0.4.6",
     "python-dotenv>=1.0",
     "websockets>=13",
 ]
@@ -13,9 +15,6 @@ dependencies = [
 [project.scripts]
 chahua = "chahua.cli:main"
 chahua-server = "chahua.server:main"
-
-[tool.uv.sources]
-agentao = { path = "../agentao", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["chahua"]

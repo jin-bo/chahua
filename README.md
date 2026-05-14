@@ -1,6 +1,6 @@
 # 茶话室（chahua）
 
-多 Agent 群聊「茶话室」桌面 App —— 用户和多个由 [agentao](../agentao) 驱动的 AI「茶客」
+多 Agent 群聊「茶话室」桌面 App —— 用户和多个由 [agentao](https://github.com/jin-bo/agentao) 驱动的 AI「茶客」
 在同一个聊天室里对话（像微信群，可 @、茶客之间也能接话）。完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
 当前进度：**P3.3.2 完工（macOS .dmg + 跨平台 graceful shutdown）**。
@@ -11,7 +11,7 @@ P3.3.2 还差：electron-builder 打 .dmg、SIGTERM 路径补全、sidecar 日�
 ## Quick Start
 
 ```bash
-# 1. python 依赖（uv 按 pyproject.toml 把 ../agentao 编辑模式装上）
+# 1. python 依赖（uv 按 pyproject.toml 从 PyPI 拉 agentao ≥0.4.6）
 uv sync
 
 # 2. LLM 凭据（任何 OpenAI-兼容 API 都行）
