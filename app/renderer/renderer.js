@@ -124,21 +124,61 @@ function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
 }
 
 // ── 消息流渲染 ───────────────────────────────────────────────────────
+//
+// 茶客发言（li.msg / li.error）：头像 + 气泡（header: 名字 + 打分徽章 / body: 文字），左对齐。
+// 用户发言（li.user）：单独气泡，右对齐，无头像无名字（自己知道是自己）。
+// turn-banner（li.turn-banner）：不变，meta 行，非气泡。
+
+// 茶客行（speaker bubble + avatar）。streaming=true 时 text span 带 streaming class 闪光标。
+// 返回 li 与 textEl —— 调用方在 textEl 上 append 文本（流式 / 一次性）。
+function makeGuestRow(speaker, { streaming = false } = {}) {
+  const li = document.createElement("li");
+  li.className = "msg";
+  const avatar = makeAvatar(speaker, "msg-avatar");
+  if (avatar) li.appendChild(avatar);
+  const bubble = document.createElement("div");
+  bubble.className = "bubble bubble-guest";
+  const header = document.createElement("div");
+  header.className = "bubble-header";
+  const s = document.createElement("span");
+  s.className = "speaker";
+  s.textContent = speaker;
+  header.appendChild(s);
+  const badge = makeScoreBadge(speaker);
+  if (badge) header.appendChild(badge);
+  bubble.appendChild(header);
+  const textEl = document.createElement("span");
+  textEl.className = streaming ? "text streaming" : "text";
+  bubble.appendChild(textEl);
+  li.appendChild(bubble);
+  return { li, textEl };
+}
+
+// 用户行：右对齐气泡，无头像无名字。
+function makeUserRow(text) {
+  const li = document.createElement("li");
+  li.className = "user";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble bubble-user";
+  const t = document.createElement("span");
+  t.className = "text";
+  t.textContent = text;
+  bubble.appendChild(t);
+  li.appendChild(bubble);
+  return li;
+}
 
 function appendBubble({ speaker, text, kind }) {
   stickToBottom(() => {
-    const li = document.createElement("li");
-    if (kind) li.className = kind;
-    const avatar = makeAvatar(speaker, "msg-avatar");
-    if (avatar) li.appendChild(avatar);
-    const s = document.createElement("span");
-    s.className = "speaker";
-    s.textContent = `${speaker}：`;
-    const t = document.createElement("span");
-    t.className = "text";
-    t.textContent = text;
-    li.appendChild(s);
-    li.appendChild(t);
+    let li;
+    if (kind === "user") {
+      li = makeUserRow(text);
+    } else {
+      const row = makeGuestRow(speaker);
+      row.textEl.textContent = text;
+      if (kind === "error") row.li.classList.add("error");
+      li = row.li;
+    }
     messagesEl.appendChild(li);
   });
 }
@@ -169,21 +209,9 @@ function makeScoreBadge(speaker) {
 function startStreamingMessage(env) {
   stickToBottom(() => {
     const speaker = env.guest_name || "?";
-    const li = document.createElement("li");
-    li.className = "msg";
-    const avatar = makeAvatar(speaker, "msg-avatar");
-    if (avatar) li.appendChild(avatar);
-    const s = document.createElement("span");
-    s.className = "speaker";
-    s.textContent = `${speaker}：`;
-    const badge = makeScoreBadge(speaker);
-    const t = document.createElement("span");
-    t.className = "text streaming";
-    li.appendChild(s);
-    if (badge) li.appendChild(badge);
-    li.appendChild(t);
+    const { li, textEl } = makeGuestRow(speaker, { streaming: true });
     messagesEl.appendChild(li);
-    inFlight.set(env.message_id, { textEl: t, li });
+    inFlight.set(env.message_id, { textEl, li });
   });
 }
 

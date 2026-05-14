@@ -75,19 +75,45 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 }
 
 #messages { flex: 1; list-style: none; margin: 0; padding: 8px 12px; overflow-y: auto; }
-#messages li { padding: 4px 0; line-height: 1.5; word-wrap: break-word; }
-/* 普通发言行才走 flex（头像 + 文字内联）；turn-banner 还是块级，避免 flex 把 ::before 错位。 */
-#messages li.msg, #messages li.user, #messages li.error {
-  display: flex; align-items: flex-start; gap: 8px;
-}
+#messages li { padding: 4px 0; line-height: 1.5; }
+
+/* 茶客行：头像左、气泡右；用户行：气泡靠右。turn-banner 不走 flex（保持块级 + ::before）。 */
+#messages li.msg, #messages li.error { display: flex; align-items: flex-start; gap: 8px; }
+#messages li.user { display: flex; justify-content: flex-end; }
 #messages li .msg-avatar {
-  width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
+  width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
   flex-shrink: 0; margin-top: 2px;
 }
-#messages li .speaker { font-weight: 600; margin-right: 8px; color: #555; flex-shrink: 0; }
-/* flex item 默认 min-width: auto 会让长字符串撑爆 li —— 让 .text 占满剩余空间且能 wrap。 */
-#messages li .text { flex: 1; min-width: 0; }
-#messages li.user .speaker { color: #084; }
+
+/* 气泡通用：圆角、padding、最大宽 75%（短消息自动收缩）。一边角削成 4px 当"尾巴"指方向。 */
+.bubble {
+  max-width: 75%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  word-wrap: break-word;
+  min-width: 0;
+}
+.bubble-guest {
+  background: #fff;
+  border: 1px solid #e8e3d6;
+  border-top-left-radius: 4px;
+}
+.bubble-user {
+  background: #d8ecd8;
+  color: #1a3a1a;
+  border-top-right-radius: 4px;
+}
+.bubble-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.bubble-header .speaker { font-weight: 600; color: #555; }
+
+/* 错误气泡：浅红底 + 红边 + 红字（茶客侧才会触发，用户侧没 error kind）。 */
+#messages li.error .bubble-guest { background: #fdf5f5; border-color: #f5b3b3; }
 #messages li.error .speaker { color: #c00; }
 #messages li.error .text { color: #c00; }
 
@@ -108,16 +134,14 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   font-weight: 600;
 }
 
-/* P3.2.1：speaker 后面紧跟的得分小标签。 */
+/* 得分小标签 —— 在 .bubble-header 里跟 speaker 同行；间距由 header gap 决定。 */
 .score-badge {
   display: inline-block;
   font-size: 10px;
   padding: 1px 5px;
-  margin-right: 6px;
   border-radius: 8px;
   background: #ece5d2;
   color: #888;
-  vertical-align: 1px;
 }
 .score-badge[data-kind="mention"] { background: #d8ecd8; color: #265; }
 .score-badge[data-kind="cooldown"] { background: #e5e5e5; color: #777; }
