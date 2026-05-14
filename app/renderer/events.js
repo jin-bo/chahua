@@ -30,8 +30,7 @@ export const Inbound = Object.freeze({
   USER_MESSAGE: "user_message",
   SWITCH_ROOM: "switch_room",
   CLEAR_ROOM: "clear_room",
-  // CANCEL: "cancel" —— P3.3 加停止按钮时启用，与 chahua/server.py 的
-  // _handle_inbound 同步加路由。
+  CANCEL: "cancel",
 });
 
 // 镜像 chahua/scoring.py::ScoreKind —— turn_start.data.scores[i].kind 取值。

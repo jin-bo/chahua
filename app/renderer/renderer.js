@@ -39,6 +39,10 @@ let connected = false;
 
 // 在途消息：message_id → { textEl, li }。
 const inFlight = new Map();
+// 当前 turn 的 id —— P3.3 cancel 状态机：turn_start 时设、turn_end(next=user) 或
+// status=cancelled 时清；turn_end(next=ai) 不清（下个 turn_start 会刷新）。非 null 即
+// "AI 链在跑"，submit button 切到「停止」语义，submit handler 路由到 cancel 帧。
+let currentTurnId = null;
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
 // 茶客行 → 打分 span 的引用。sidebar 装好后填，turn_start/turn_end 直接改文字，
@@ -85,6 +89,19 @@ function setInputEnabled(enabled) {
   textInput.disabled = !enabled;
   submitBtn.disabled = !enabled;
   clearRoomBtn.disabled = !enabled;
+}
+
+// 按 currentTurnId 切换 submitBtn 的文字 + class —— 同一个按钮承担「发送 / 停止」
+// 双重职责（参照 Claude / ChatGPT 输入框右侧的 send/stop 形变）；颜色由 .stop 类 +
+// style.css 控制。
+function updateSendButton() {
+  if (currentTurnId === null) {
+    submitBtn.textContent = "发送";
+    submitBtn.classList.remove("stop");
+  } else {
+    submitBtn.textContent = "停止";
+    submitBtn.classList.add("stop");
+  }
 }
 
 function stickToBottom(mutate) {
@@ -527,6 +544,8 @@ function handleEnvelope(env) {
       console.debug("[turn_start]", scores);
       scoresByName = new Map(scores.map((r) => [r.guest_name, r]));
       applyScoresToSidebar();
+      currentTurnId = env.turn_id;
+      updateSendButton();
       return;
     }
     case EventType.MESSAGE_START:
@@ -538,10 +557,18 @@ function handleEnvelope(env) {
     case EventType.MESSAGE_END:
       endStreamingMessage(env);
       return;
-    case EventType.TURN_END:
+    case EventType.TURN_END: {
       scoresByName = new Map();
       applyScoresToSidebar();
+      // AI 链终态判定：status != ok（cancelled）或 next==='user'（用户该说话了）→ 收
+      // 「停止」按钮。next==='ai' 时维持，下一个 turn_start 立刻刷新 currentTurnId。
+      const next = env.data?.next;
+      if (env.status !== Status.OK || next === "user") {
+        currentTurnId = null;
+        updateSendButton();
+      }
       return;
+    }
     // guest_thinking / tool_* 暂时静默。
   }
 }
@@ -597,6 +624,9 @@ function connect() {
     connected = false;
     setInputEnabled(false);
     closeInFlightOnDisconnect();
+    // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
+    currentTurnId = null;
+    updateSendButton();
     if (NO_RECONNECT_CODES.has(ev.code)) {
       setStatus("error", `连接断开 (${ev.code} ${ev.reason || ""})`);
       return;
@@ -625,8 +655,17 @@ composer.addEventListener("submit", (ev) => {
     // dropdown 开着时 Enter 已在 keydown 里被消费；这里防御性 noop。
     return;
   }
+  if (!connected) return;
+  // 「停止」分支：currentTurnId 非空表示 AI 链在跑，submit 按钮处于「停止」语义。
+  // 服务端收到后 task.cancel() 当前 turn task，turn_end(status=cancelled) 回来时
+  // 状态机会清掉 currentTurnId，按钮自动复原成「发送」。textInput 内容不动。
+  if (currentTurnId !== null) {
+    ws.send(JSON.stringify({ type: Inbound.CANCEL, turn_id: currentTurnId }));
+    setStatus("", "已请求停止…");
+    return;
+  }
   const text = textInput.value.trim();
-  if (!text || !connected) return;
+  if (!text) return;
   appendBubble({ speaker: userDisplayName, text, kind: "user" });
   ws.send(JSON.stringify({ type: Inbound.USER_MESSAGE, text }));
   textInput.value = "";

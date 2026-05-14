@@ -57,6 +57,7 @@ DEFAULT_HOST = "127.0.0.1"
 INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
 INBOUND_CLEAR_ROOM = "clear_room"
+INBOUND_CANCEL = "cancel"
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -88,6 +89,10 @@ class ChahuaServer:
         self._repo_root = repo_root
         # 当前在线的客户端句柄。``None`` 表示空闲；非 ``None`` 时第二个连接被拒。
         self._active: Optional[ServerConnection] = None
+        # 当前在跑的 turn task —— P3.3 cancel 入口对这个 task 做 ``task.cancel()``。
+        # 单 client + 单 in-flight 策略下（``user_message`` 在 task 未结束前 drop），
+        # 同时只会有一个。
+        self._inflight_turn_task: Optional[asyncio.Task[None]] = None
 
     def close(self) -> None:
         """关停**当前**活动 session。
@@ -169,8 +174,13 @@ class ChahuaServer:
                     return
                 await self._handle_inbound(data, sink)
         finally:
+            # 残留 turn task 必须先收掉再 cancel writer —— turn task 在被 cancel 后还要
+            # 走 ``except CancelledError`` 补 turn_end(cancelled)，那条 envelope 会
+            # ``put_nowait`` 进 outbound queue。先 drain producer 再砍 writer，避免
+            # producer 写已"cancelling"的 writer 拿到的"task exception was never
+            # retrieved"告警（websockets close 本身不依赖这条帧送达）。
+            await self._cancel_and_drain_inflight()
             writer.cancel()
-            # 给 writer 一个机会观察 cancel —— 不阻塞断线流程。
             try:
                 await writer
             except asyncio.CancelledError:
@@ -318,17 +328,77 @@ class ChahuaServer:
         _log.info("clear_room: %r 已清空", self._session.room.name)
         self._emit_room_snapshot(sink)
 
+    # ── cancel / in-flight task 生命周期 ────────────────────────────────
+
+    def _inflight_alive(self) -> bool:
+        return self._inflight_turn_task is not None and not self._inflight_turn_task.done()
+
+    def _cancel_inflight(self) -> None:
+        """通知当前在跑的 turn task 退场，不 await —— cancel 入口要尽快返回让 inbound
+        循环继续消费帧。task 完成由 ``_run_turn.finally`` 清 ``_inflight_turn_task``。
+        """
+        task = self._inflight_turn_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _cancel_and_drain_inflight(self) -> None:
+        """cancel 当前 turn task **并等它收尾**。switch_room / clear_room / 连接断开走这
+        条路径 —— 它们要在 task 完全退出后再继续操作 session，否则 orchestrator 还在写
+        transcript / cursor，新 session 装配会撞上。
+        """
+        task = self._inflight_turn_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # ``_run_turn`` 自己 swallow 了 Cancelled / Exception，正常情况这里 await
+            # 不会再抛；保留 CancelledError 兜底是为 cancel→reraise 极小竞态窗口。
+            pass
+
+    async def _run_turn(self, text: str, sink: EnvelopeSink) -> None:
+        """承载一条 user_message 的整个 AI 链。挂在 ``_inflight_turn_task`` 上让 cancel
+        入口能 ``task.cancel()`` 它。
+
+        - CancelledError：``orchestrator._run_ai_chain`` 在补完 ``turn_end(cancelled)``
+          后 reraise；这里 swallow 让 task 正常完成。
+        - 其它异常：兜底 log + swallow，避免 task 异常逃逸触发 asyncio "Task exception
+          was never retrieved" warning。
+        """
+        try:
+            await self._session.orchestrator.submit_user_message(text, sink=sink)
+        except asyncio.CancelledError:
+            _log.info("turn cancelled by user")
+        except Exception:
+            _log.exception("submit_user_message crashed")
+        finally:
+            self._inflight_turn_task = None
+
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息。"""
         msg_type = data.get("type")
+        if msg_type == INBOUND_CANCEL:
+            # turn_id 由前端塞，服务端只记日志：单 in-flight 模型下当前 task 必定就是
+            # 前端能看到 turn_id 的那个；race 窗口（前一 turn 刚 end / 下一 turn 刚
+            # start 之间）下错杀也只是少说半句话，无 transcript 污染。
+            turn_id = data.get("turn_id")
+            if not self._inflight_alive():
+                _log.info("cancel ignored: no in-flight turn (turn_id=%r)", turn_id)
+                return
+            _log.info("cancel: turn_id=%r", turn_id)
+            self._cancel_inflight()
+            return
         if msg_type == INBOUND_SWITCH_ROOM:
             room_id = data.get("room_id")
             if not isinstance(room_id, str) or not room_id:
                 _log.warning("ignoring switch_room with missing/empty room_id")
                 return
+            await self._cancel_and_drain_inflight()
             self._switch_room(room_id, sink)
             return
         if msg_type == INBOUND_CLEAR_ROOM:
+            await self._cancel_and_drain_inflight()
             self._clear_room(sink)
             return
         if msg_type != INBOUND_USER_MESSAGE:
@@ -340,12 +410,15 @@ class ChahuaServer:
         if not isinstance(text, str) or not text:
             _log.warning("ignoring user_message with missing/empty text")
             return
-        try:
-            await self._session.orchestrator.submit_user_message(text, sink=sink)
-        except Exception:
-            # submit_user_message 内部已对单个茶客失败做了兜底；这里只能是真出意外
-            # （asyncio.Cancelled / 资源问题）。留 stacktrace。
-            _log.exception("submit_user_message crashed")
+        if self._inflight_alive():
+            # 单 in-flight 严格策略：当前 turn 没结束前 drop 后续 user_message。前端
+            # composer 在 turn_start / turn_end 之间禁用，正常情况打不到这条；防御性保护
+            # 老前端 / wscat 直发场景。
+            _log.warning("user_message dropped: previous turn still in flight")
+            return
+        self._inflight_turn_task = asyncio.create_task(
+            self._run_turn(text, sink), name="chahua-turn"
+        )
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────

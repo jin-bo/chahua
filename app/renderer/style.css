@@ -192,6 +192,10 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #text:focus { outline: none; border-color: #888; }
 #composer button { margin-left: 8px; padding: 8px 16px; border: none; border-radius: 4px; background: #444; color: #fff; cursor: pointer; }
 #composer button:disabled { background: #aaa; cursor: not-allowed; }
+/* 「停止」形态 —— turn 进行中按钮文字切「停止」，背景切沉稳的暗红提示"危险"动作（点
+   下去会中断 AI 输出）；不用鲜红是怕跟 status.error 撞 + 视觉刺。 */
+#composer button.stop { background: #a04040; }
+#composer button.stop:hover { background: #b04848; }
 
 /* P3.2.2：@ 补全 dropdown —— 浮在输入框上方，键盘 ↑↓ Enter 选中。 */
 .mention-dropdown {

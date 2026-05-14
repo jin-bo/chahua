@@ -34,6 +34,7 @@ from typing import Optional
 from .cursor import GuestCursor
 from .events import (
     NOOP_SINK,
+    STATUS_CANCELLED,
     STATUS_OK,
     ChahuaEnvelope,
     ChahuaEventType,
@@ -243,13 +244,26 @@ class Orchestrator:
             # @ 路径（单点 / broadcast）绕过本回合的内层 cap —— 用户已显式指定谁该说话，
             # 不该被 max_consecutive_ai_turns 截断；下一次 outer while 检查时 cap 自然
             # 终止 AI 链续接。
+            #
+            # try/except CancelledError 在这里而不是外层 —— 唯一需要补 turn_end 的窗口
+            # 是 turn_start 已 emit 之后。scoring 阶段被 cancel 时 CancelledError 直穿。
             bypass_inner_cap = all(s.kind == ScoreKind.MENTION for s in scores)
-            for guest_name in winners:
-                if not bypass_inner_cap and self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
-                    break
-                await self._let_speak(guest_name, turn_id=turn_id, sink=sink)
-                self._consecutive_ai_turns += 1
-                self._rounds_without_user_or_mention += 1
+            try:
+                for guest_name in winners:
+                    if not bypass_inner_cap and self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
+                        break
+                    await self._let_speak(guest_name, turn_id=turn_id, sink=sink)
+                    self._consecutive_ai_turns += 1
+                    self._rounds_without_user_or_mention += 1
+            except asyncio.CancelledError:
+                self._emit_turn(
+                    sink,
+                    turn_id=turn_id,
+                    type=ChahuaEventType.TURN_END,
+                    data={"next": "user"},
+                    status=STATUS_CANCELLED,
+                )
+                raise
 
             next_state = (
                 "ai"
@@ -409,9 +423,10 @@ class Orchestrator:
         turn_id: str,
         type: ChahuaEventType,
         data: dict,
+        status: str = STATUS_OK,
     ) -> None:
         """合成轮级 envelope（turn_start / turn_end）走 sink。message-级事件经
-        :class:`ChahuaTransport` emit。
+        :class:`ChahuaTransport` emit。``status`` 默认 ok；cancel 路径走 ``cancelled``。
         """
         emit_to_sink(
             sink,
@@ -421,7 +436,7 @@ class Orchestrator:
                 guest_name=None,
                 message_id=None,
                 type=type,
-                status=STATUS_OK,
+                status=status,
                 data=data,
             ),
         )
