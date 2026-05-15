@@ -57,6 +57,38 @@ def test_discover_personas_user_data_overrides_app(paths, tmp_path):
     assert one["avatar_data_uri"] is None
 
 
+def test_discover_personas_uses_sibling_toml_name(paths):
+    """dir-form persona 的 sibling ``<Name>.toml`` ``[guest].name`` 是 picker 显示名。
+
+    回归：picker 默认以 md stem 命名（dir 名），但用户在 toml 里写 ``name = "伊冯"``
+    时 picker 应显示"伊冯"。坏 toml / 缺字段静默退回 stem，不让 persona 在 picker 消失。
+    """
+    base = paths.user_data_root / "chahua" / "personas" / "Yvonne"
+    base.mkdir(parents=True)
+    (base / "Yvonne.md").write_text("# Yvonne soul", encoding="utf-8")
+    (base / "Yvonne.toml").write_text(
+        '[guest]\nname = "伊冯"\npermission = "workspace-write"\n',
+        encoding="utf-8",
+    )
+
+    found = admin.discover_personas(paths)
+    assert any(p["name"] == "伊冯" for p in found)
+    one = next(p for p in found if p["name"] == "伊冯")
+    # persona 字段不变（落盘路径还是按目录名走），只换显示名。
+    assert one["persona"] == "chahua/personas/Yvonne/Yvonne.md"
+
+
+def test_discover_personas_falls_back_when_toml_broken(paths):
+    """toml 解析失败 / 缺 [guest].name → 退到 dir 名兜底，persona 仍在 picker 里。"""
+    base = paths.user_data_root / "chahua" / "personas" / "Broken"
+    base.mkdir(parents=True)
+    (base / "Broken.md").write_text("# soul", encoding="utf-8")
+    (base / "Broken.toml").write_text("not a [valid toml", encoding="utf-8")
+
+    found = admin.discover_personas(paths)
+    assert any(p["name"] == "Broken" for p in found)
+
+
 # ── room CRUD ───────────────────────────────────────────────────────────
 
 

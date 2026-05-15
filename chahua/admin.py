@@ -21,6 +21,7 @@ import binascii
 import logging
 import re
 import shutil
+import tomllib
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -51,15 +52,46 @@ def _search_roots(paths: Paths) -> tuple[Path, Path, Path]:
     return search_roots(paths)
 
 
+def _read_persona_toml_name(md_path: Path) -> Optional[str]:
+    """从 persona md 的 sibling ``<stem>.toml`` 读 ``[guest].name`` —— picker 的"显示
+    用名"来源。缺文件 / 解析失败 / 字段缺失都返 ``None``，调用方走 stem 兜底。
+
+    导入 persona 时（:mod:`chahua.persona_import`）允许带一份 sidecar toml 写明
+    人格的"对外名字"（如目录叫 ``Yvonne``，toml 里 ``name = "伊冯"``），picker / 添加
+    入房间时显示用 toml 名。
+
+    解析失败一律 WARN + 返 None：不让坏 toml 让整个 persona 在 picker 里消失。
+    """
+    toml_path = md_path.with_suffix(".toml")
+    if not toml_path.is_file():
+        return None
+    try:
+        with toml_path.open("rb") as f:
+            data = tomllib.load(f)
+    except (tomllib.TOMLDecodeError, OSError) as e:
+        _log.warning("persona sidecar toml 解析失败，跳过：%s（%s）", toml_path, e)
+        return None
+    guest = data.get("guest")
+    if not isinstance(guest, dict):
+        return None
+    name = guest.get("name")
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    return name or None
+
+
 def discover_personas(paths: Paths) -> list[dict]:
     """扫所有 persona 候选，按 name 升序、user_data 优先 dedup。
 
     返回 `[{persona, name, avatar_data_uri}, ...]`：
 
-    - `persona`：相对路径字符串 `chahua/personas/<name>.md`（flat）或
-      `chahua/personas/<name>/<name>.md`（dir form，import 出来的包），可塞
+    - `persona`：相对路径字符串 `chahua/personas/<dir>.md`（flat）或
+      `chahua/personas/<dir>/<dir>.md`（dir form，import 出来的包），可塞
       `[[guest]].persona` 字段。
-    - `name`：不带后缀的文件名（也就是默认茶客名）。
+    - `name`：picker 显示用 + 加入房间后 `[[guest]].name` 字段值。优先取 sibling
+      `<dir>.toml` 里 `[guest].name`（如 Yvonne.toml 写 ``name = "伊冯"``）；缺
+      sidecar 时退到文件名 stem（同时也是大多数内置 persona 的形态）。
     - `avatar_data_uri`：与 md sibling 同名 `.png`；缺图返 `None`。
 
     给前端 sidebar"添加茶客"picker 用。
@@ -67,7 +99,7 @@ def discover_personas(paths: Paths) -> list[dict]:
     **两种磁盘布局**：flat（`<Name>.md` 直接在 `personas/` 下）+ dir form（`<Name>/<Name>.md`
     在子目录里，sibling 还可能有 `mcp.json` / `skills/`）。dir form 由
     :func:`chahua.persona_import.import_from_folder` / :func:`import_from_github` 写出来；
-    flat 是 ship-with-app 的内置 persona 形态。同名时 user_data 胜。
+    flat 是 ship-with-app 的内置 persona 形态。同名时 user_data 胜（dedup by display name）。
     """
     seen_by_name: dict[str, dict] = {}
     # 后写后覆盖等价 user_data 胜 —— 反序遍历保证 user_data 在 dict 里最后落定。
@@ -77,7 +109,7 @@ def discover_personas(paths: Paths) -> list[dict]:
             continue
         # flat：`<Name>.md`
         for md in sorted(personas_dir.glob("*.md")):
-            name = md.stem
+            name = _read_persona_toml_name(md) or md.stem
             seen_by_name[name] = {
                 "persona": str(PERSONAS_REL_DIR / md.name),
                 "name": name,
@@ -95,7 +127,7 @@ def discover_personas(paths: Paths) -> list[dict]:
                 if len(mds) != 1:
                     continue
                 md = mds[0]
-            name = sub.name
+            name = _read_persona_toml_name(md) or sub.name
             seen_by_name[name] = {
                 "persona": str(PERSONAS_REL_DIR / sub.name / md.name),
                 "name": name,
