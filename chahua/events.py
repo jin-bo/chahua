@@ -71,6 +71,10 @@ class ChahuaEventType(str, Enum):
     # `size`（字节）+ `original`（用户原始文件名，可能含已被洗掉的字符）。
     # 前端拿到后挂入 pendingFiles pill；不挂 turn。
     FILE_UPLOADED = "file_uploaded"
+    # 服务端把整个房间 transcript 拼成 markdown 回吐 —— data 含 `filename`（建议的下载
+    # 文件名）+ `markdown`（utf-8 字符串）。前端走 Blob + a.download 触发浏览器下载，
+    # **不写服务器盘**（导出物只活在用户机器上）。
+    ROOM_EXPORT = "room_export"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

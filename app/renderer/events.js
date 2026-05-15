@@ -21,6 +21,9 @@ export const EventType = Object.freeze({
   NOTICE: "notice",
   // 服务端确认收到一个文件上传：data.rel 是落盘相对路径（share/xxx），前端挂 pending pill。
   FILE_UPLOADED: "file_uploaded",
+  // 服务端把整个房间 transcript 拼成 markdown 回吐：data.filename / data.markdown。
+  // 前端走 Blob + a.download 触发浏览器下载，不写服务器盘。
+  ROOM_EXPORT: "room_export",
 });
 
 export const Status = Object.freeze({
@@ -59,6 +62,8 @@ export const Inbound = Object.freeze({
   // 上传文件到房间共享目录。payload: {filename, content_b64}。
   // 服务端校验后写 share/<safe-name>、回 file_uploaded envelope。
   UPLOAD_FILE: "upload_file",
+  // 导出当前房间为 markdown。无 payload，服务端读 transcript 全量后回 ROOM_EXPORT。
+  EXPORT_ROOM: "export_room",
 });
 
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /

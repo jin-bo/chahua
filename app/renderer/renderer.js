@@ -802,6 +802,24 @@ function handleEnvelope(env) {
     case EventType.FILE_UPLOADED:
       upload.onServerEcho(env.data ?? {});
       return;
+    case EventType.ROOM_EXPORT: {
+      const markdown = env.data?.markdown;
+      const filename = env.data?.filename || "chahua-export.md";
+      if (typeof markdown !== "string") return;
+      // Blob 走 markdown 文本 mime；<a download> 触发浏览器原生下载流程。CSP
+      // 已允许 'self'，blob: URL 在 Chromium 里也通过 default-src 'self'。
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus("ok", `已导出 ${filename}`);
+      return;
+    }
     // guest_thinking / tool_* 暂时静默。
   }
 }
@@ -1042,8 +1060,15 @@ function showRoomActionsPopover(anchor) {
   const roomName = roomNameEl.textContent || "本房间";
   showActionPopover(anchor, `房间「${roomName}」`, [
     { label: "更改房间配置", desc: "直接编辑 room.toml（topic / rules / guests）", onClick: settings.openEditRoomToml },
+    { label: "导出 markdown", desc: "把本房间历史保存为 .md 文件", onClick: exportCurrentRoom },
     { label: "清空聊天", desc: "重置 transcript / 摘要 / 游标，茶客在场", danger: true, onClick: clearCurrentRoom },
   ]);
+}
+
+function exportCurrentRoom() {
+  if (!connected) return;
+  send({ type: Inbound.EXPORT_ROOM });
+  setStatus("", "导出中…");
 }
 
 // preventDefault 压住浏览器默认的 dblclick 选中文本行为，让 popover 弹出时 anchor

@@ -38,7 +38,7 @@ from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from . import admin, persona_import, trust
+from . import admin, exporter, persona_import, trust
 from ._paths import Paths, resolve_under
 from ._persist import write_bytes_atomic
 from .admin import sanitize_fs_name
@@ -91,6 +91,7 @@ INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
+INBOUND_EXPORT_ROOM = "export_room"
 
 # 单文件上限。WS 入站帧 max=4MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
 # 文件极限 ~3MB。设 2MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
@@ -827,6 +828,30 @@ class ChahuaServer:
         self._emit_room_info(sink)
         self._emit_room_history(sink)
 
+    def _export_room(self, sink: EnvelopeSink) -> None:
+        # read-only：不动 session、不写盘。导出物只活在用户的 Downloads/ 里（renderer
+        # 端走 Blob + <a download>），房间目录 transcript.jsonl / summary.jsonl 不动。
+        msgs = self._session.room.messages_since(0)
+        filename, content = exporter.format_room_markdown(
+            self._session.room_config,
+            msgs,
+            self._session.user_config.display_name,
+        )
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=ChahuaEventType.ROOM_EXPORT,
+                data={"filename": filename, "markdown": content},
+            )
+        )
+        _log.info(
+            "export_room: room=%r %d msg → %s (%d bytes)",
+            self._session.room.name, len(msgs), filename, len(content),
+        )
+
     def _clear_room(self, sink: EnvelopeSink) -> None:
         """清空当前房间公共状态 + 重发 room snapshot 让前端复位。
 
@@ -1088,6 +1113,10 @@ class ChahuaServer:
         # 文件落房间共享目录，下一条 user_message 才把它带进上下文。
         self._upload_file(filename=filename, content_b64=content_b64, sink=sink)
 
+    async def _inbound_export_room(self, data: dict, sink: EnvelopeSink) -> None:
+        # read-only：不动 session、不挡 inflight turn。
+        self._export_room(sink)
+
     async def _inbound_user_message(self, data: dict, sink: EnvelopeSink) -> None:
         text = data.get("text")
         if not isinstance(text, str):
@@ -1135,6 +1164,7 @@ _INBOUND_HANDLERS: dict[str, _InboundHandler] = {
     INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
     INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,
     INBOUND_UPLOAD_FILE: ChahuaServer._inbound_upload_file,
+    INBOUND_EXPORT_ROOM: ChahuaServer._inbound_export_room,
     INBOUND_USER_MESSAGE: ChahuaServer._inbound_user_message,
 }
 

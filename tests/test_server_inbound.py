@@ -40,6 +40,7 @@ from chahua.server import (
     INBOUND_UPDATE_USER_AVATAR,
     INBOUND_UPDATE_USER_MD,
     INBOUND_UPLOAD_FILE,
+    INBOUND_EXPORT_ROOM,
     INBOUND_USER_MESSAGE,
 )
 
@@ -136,6 +137,9 @@ class _SpyServer(ChahuaServer):
             "_upload_file",
             {"filename": filename, "content_b64": content_b64},
         ))
+
+    def _export_room(self, sink):  # type: ignore[override]
+        self.calls.append(("_export_room", {}))
 
     def _run_import(self, label, op, sink):  # type: ignore[override]
         # 把 op 留下来，让测试断言它是 partial / lambda 即可，不真跑导入。
@@ -510,6 +514,14 @@ async def test_upload_file_ok(srv: _SpyServer):
 async def test_upload_file_bad_payload(srv: _SpyServer, payload):
     await srv._handle_inbound(payload, _sink)
     assert srv.calls == []
+
+
+async def test_export_room_dispatches(srv: _SpyServer):
+    """EXPORT_ROOM 帧 → _export_room（不带 payload，直接读 server 端 session）。"""
+    await srv._handle_inbound({"type": INBOUND_EXPORT_ROOM}, _sink)
+    assert srv.calls == [("_export_room", {})]
+    # 导出 read-only，不挡 inflight turn。
+    assert srv.cancel_drain_count == 0
 
 
 # ── user_message：text / files / drop while in-flight / 未知 type ────────
