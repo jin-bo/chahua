@@ -36,6 +36,7 @@ import {
 import { createMention } from "./mention.js";
 import { createUpload } from "./upload.js";
 import { renderPersonaPicker, createPersonaImport } from "./persona.js";
+import { createSettings } from "./settings.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -90,6 +91,11 @@ if (!wsUrl) {
 let ws = null;
 let connected = false;
 
+// 闭包读最新 ws —— 重连时 ws 变量会被重赋值，闭包每次调用读到当前绑定。所有
+// feature module（upload / persona / settings）共享同一份 ref，留单点未来加
+// readyState 守卫。
+const send = (payload) => ws.send(JSON.stringify(payload));
+
 // 在途消息：message_id → { textEl, li }。
 const inFlight = new Map();
 // 当前 turn 的 id —— P3.3 cancel 状态机：turn_start 时设、turn_end(next=user) 或
@@ -107,11 +113,6 @@ let userDisplayName = "我";
 let userAvatarDataUri = null;
 // 可用 persona 候选（room_info 来时装）—— "添加茶客" / "新建房间"的 picker 用。
 let personasAvailable = []; // [{persona, name, avatar_data_uri}, ...]
-// USER.md / room.toml 原文 + source 路径（room_info 时装）—— 编辑 modal prefill 用。
-let userMdContent = "";
-let userMdSource = null;
-let roomTomlContent = "";
-let roomTomlSource = null;
 
 // 茶客头像 —— 按名字在 guests 数组里 find；茶客 ≤ 个位数，线性查比维护并行 Map 简单
 // （且任何 guests 变更都自动跟上）。
@@ -557,10 +558,12 @@ function renderSidebar(roomInfo) {
   roomTopicEl.textContent = roomInfo.topic || "";
   userDisplayName = roomInfo.user_display_name || "我";
   userAvatarDataUri = roomInfo.user_avatar_data_uri || null;
-  userMdContent = roomInfo.user_md_content || "";
-  userMdSource = roomInfo.user_md_source || null;
-  roomTomlContent = roomInfo.room_toml_content || "";
-  roomTomlSource = roomInfo.room_toml_source || null;
+  settings.setSnapshot({
+    userMdContent: roomInfo.user_md_content,
+    userMdSource: roomInfo.user_md_source,
+    roomTomlContent: roomInfo.room_toml_content,
+    roomTomlSource: roomInfo.room_toml_source,
+  });
   renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
@@ -933,7 +936,7 @@ createPersonaImport({
   submitBtn: importPersonaSubmitBtn,
   importBtn: importPersonaBtn,
   isConnected: () => connected,
-  send: (payload) => ws.send(JSON.stringify(payload)),
+  send,
   setStatus,
   pickFolder: window.chahua?.pickFolder,
 });
@@ -978,82 +981,23 @@ function renderUserRow() {
   if (img) userAvatarWrapEl.appendChild(img);
 }
 
-function openEditUserMd() {
-  if (!connected) return;
-  userMdTextarea.value = userMdContent;
-  userMdSourceHintEl.textContent = userMdSource
-    ? `当前文件：${userMdSource}`
-    : "尚无 USER.md，保存后会落到 user_data_root/USER.md。";
-  openModal(editUserModal);
-  userMdTextarea.focus();
-}
-
-function pickAvatarFile() {
-  if (!connected) return;
-  // reset 让相同文件再选也能触发 change（浏览器对同名同源文件默认不再 fire）。
-  avatarFileInput.value = "";
-  avatarFileInput.click();
-}
-
-userMdSubmitBtn.addEventListener("click", () => {
-  if (!connected) return;
-  ws.send(JSON.stringify({
-    type: Inbound.UPDATE_USER_MD,
-    content: userMdTextarea.value,
-  }));
-  setStatus("", "保存用户配置…");
-  closeModal(editUserModal);
-});
-
-// 头像上传：浏览器对 PNG / JPEG / WebP / GIF 都能 <img> 原生解码 → 画进 canvas →
-// 一律 toDataURL("image/png") 出去，服务端只认 PNG。也即"用户传 JPG/WebP/GIF，
-// 落盘 PNG"是这里完成的转换。GIF 走 <img> 时 canvas 只能拿到首帧 —— 静态头像
-// 场景下这是符合预期的（动图当头像意义不大、且 PNG 不存动）。中央裁方 + 缩到
-// AVATAR_TARGET_PX 让头像形状一致 + 压缩体积（256×256 PNG 大约 30~80KB）。
-const AVATAR_TARGET_PX = 256;
-// 浏览器 File MIME 走 file.type；accept 已经在 input 上限定，这里再校验一次防御
-// 用户用 drag-drop 等绕路或 type 为空的 corner case。
-const AVATAR_ACCEPTED_MIME = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-]);
-// 用于状态条提示文案 —— 让用户感知到"我传的是 X，落地是 PNG"的转换发生。
-const AVATAR_FORMAT_LABEL = {
-  "image/jpeg": "JPG",
-  "image/webp": "WebP",
-  "image/gif": "GIF",
-};
-
-avatarFileInput.addEventListener("change", () => {
-  const file = avatarFileInput.files?.[0];
-  if (!file) return;
-  if (file.type && !AVATAR_ACCEPTED_MIME.has(file.type)) {
-    window.alert(`不支持的图片格式：${file.type}\n请选 PNG / JPG / WebP / GIF。`);
-    return;
-  }
-  if (file.size > 20 * 1024 * 1024) {
-    window.alert("图片超过 20MB，挑张小一点的吧。");
-    return;
-  }
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    URL.revokeObjectURL(url);
-    const dataUri = cropAndEncodeAvatar(img);
-    ws.send(JSON.stringify({
-      type: Inbound.UPDATE_USER_AVATAR,
-      data_uri: dataUri,
-    }));
-    const label = AVATAR_FORMAT_LABEL[file.type];
-    setStatus("", label ? `上传头像（${label} → PNG）…` : "上传头像…");
-  };
-  img.onerror = () => {
-    URL.revokeObjectURL(url);
-    window.alert("图片解码失败，文件可能损坏或格式不被浏览器支持。");
-  };
-  img.src = url;
+const settings = createSettings({
+  userMd: {
+    modal: editUserModal,
+    textarea: userMdTextarea,
+    hintEl: userMdSourceHintEl,
+    submitBtn: userMdSubmitBtn,
+  },
+  roomToml: {
+    modal: editRoomTomlModal,
+    textarea: roomTomlTextarea,
+    hintEl: roomTomlSourceHintEl,
+    submitBtn: roomTomlSubmitBtn,
+  },
+  avatarFileInput,
+  isConnected: () => connected,
+  send,
+  setStatus,
 });
 
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
@@ -1064,31 +1008,9 @@ const upload = createUpload({
   fileInputEl,
   attachFileBtn,
   isConnected: () => connected,
-  // 闭包读最新 ws —— 重连时 ws 变量会被重赋值。
-  send: (payload) => ws.send(JSON.stringify(payload)),
+  send,
   setStatus,
 });
-
-// 中央裁方 + 等比缩到 AVATAR_TARGET_PX × AVATAR_TARGET_PX。
-// 裁方原因：sidebar / 气泡里的头像 wrapper 都是圆形（border-radius:50%），方形源
-// 截出来的圆刚好居中；矩形源会被 object-fit:cover 切边，不如 server 端就裁齐
-// 让落盘文件本身没浪费像素。原图比目标小则不放大，保留 native 分辨率。
-function cropAndEncodeAvatar(img) {
-  const side = Math.min(img.width, img.height);
-  const sx = Math.floor((img.width - side) / 2);
-  const sy = Math.floor((img.height - side) / 2);
-  const target = Math.min(AVATAR_TARGET_PX, side);
-  const canvas = document.createElement("canvas");
-  canvas.width = target;
-  canvas.height = target;
-  const ctx = canvas.getContext("2d");
-  // 缩放质量 —— 浏览器默认 imageSmoothingQuality 是 "low"，"high" 在缩图时
-  // 视觉差异明显（128px 头像里头发 / 五官清晰度肉眼可辨）。
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(img, sx, sy, side, side, 0, 0, target, target);
-  return canvas.toDataURL("image/png");
-}
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
 const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal, editRoomTomlModal];
@@ -1114,26 +1036,6 @@ function clearCurrentRoom() {
   setStatus("", `清空「${roomName}」…`);
 }
 
-function openEditRoomToml() {
-  if (!connected) return;
-  roomTomlTextarea.value = roomTomlContent;
-  roomTomlSourceHintEl.textContent = roomTomlSource
-    ? `当前文件：${roomTomlSource}`
-    : "";
-  openModal(editRoomTomlModal);
-  roomTomlTextarea.focus();
-}
-
-roomTomlSubmitBtn.addEventListener("click", () => {
-  if (!connected) return;
-  ws.send(JSON.stringify({
-    type: Inbound.UPDATE_ROOM_TOML,
-    content: roomTomlTextarea.value,
-  }));
-  setStatus("", "保存房间配置…");
-  closeModal(editRoomTomlModal);
-});
-
 // 跨 popover 互斥：开 action 前先关 permission（反向不需要 —— 头像 click 与
 // anchor dblclick 物理不冲突）。
 function showActionPopover(anchor, title, items) {
@@ -1144,8 +1046,8 @@ function showActionPopover(anchor, title, items) {
 function showUserActionsPopover(anchor) {
   if (!connected) return;
   showActionPopover(anchor, "我（设置）", [
-    { label: "编辑配置", desc: "改 USER.md（显示名 / 个人偏好）", onClick: openEditUserMd },
-    { label: "换头像", desc: "PNG / JPG / WebP / GIF，自动裁方 + 压到 256px PNG", onClick: pickAvatarFile },
+    { label: "编辑配置", desc: "改 USER.md（显示名 / 个人偏好）", onClick: settings.openEditUserMd },
+    { label: "换头像", desc: "PNG / JPG / WebP / GIF，自动裁方 + 压到 256px PNG", onClick: settings.pickAvatarFile },
   ]);
 }
 
@@ -1153,7 +1055,7 @@ function showRoomActionsPopover(anchor) {
   if (!connected) return;
   const roomName = roomNameEl.textContent || "本房间";
   showActionPopover(anchor, `房间「${roomName}」`, [
-    { label: "更改房间配置", desc: "直接编辑 room.toml（topic / rules / guests）", onClick: openEditRoomToml },
+    { label: "更改房间配置", desc: "直接编辑 room.toml（topic / rules / guests）", onClick: settings.openEditRoomToml },
     { label: "清空聊天", desc: "重置 transcript / 摘要 / 游标，茶客在场", danger: true, onClick: clearCurrentRoom },
   ]);
 }
