@@ -34,10 +34,16 @@ function resolvePaths() {
       isPackaged: true,
     };
   }
-  // dev：两根同源仓库根，与 P3.3.2.a 之前的行为 100% 一致。
+  // dev：默认两根同源仓库根（seed 不触发，保留 dev 直改 repo 文件的工效）。
+  // 但允许显式 ``CHAHUA_USER_DATA`` / ``CHAHUA_APP_ROOT`` env 覆盖 —— packaged
+  // 模式下 user_data_root 在 ~/Library/... 走 seed 流程；dev 想复现同款隔离
+  // 时（比如测 import 不污染 repo、或用一份私有 persona 集），export 即可。
+  // 没设 → 回退到仓库根，与之前行为一致。
+  const envUserData = process.env.CHAHUA_USER_DATA;
+  const envAppRoot = process.env.CHAHUA_APP_ROOT;
   return {
-    appRoot: REPO_ROOT,
-    userDataRoot: REPO_ROOT,
+    appRoot: envAppRoot ? path.resolve(envAppRoot) : REPO_ROOT,
+    userDataRoot: envUserData ? path.resolve(envUserData) : REPO_ROOT,
     templatesDir: TEMPLATES_DIR,
     isPackaged: false,
   };

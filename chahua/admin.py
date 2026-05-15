@@ -37,7 +37,8 @@ _log = logging.getLogger(__name__)
 
 # room.toml 里写法约定就是 `chahua/personas/<name>.md` —— discover 也按这个前缀走，
 # 找到的文件相对路径里 persona_rel 字段直接可塞回 [[guest]].persona。
-_PERSONAS_REL_DIR = Path("chahua/personas")
+# 公开（无下划线）—— chahua.persona_import 也按这个前缀写盘，单点常量避免漂移。
+PERSONAS_REL_DIR = Path("chahua/personas")
 
 
 def _search_roots(paths: Paths) -> tuple[Path, Path, Path]:
@@ -54,22 +55,48 @@ def discover_personas(paths: Paths) -> list[dict]:
 
     返回 `[{persona, name, avatar_data_uri}, ...]`：
 
-    - `persona`：相对路径字符串 `chahua/personas/<name>.md`，可塞 `[[guest]].persona` 字段。
+    - `persona`：相对路径字符串 `chahua/personas/<name>.md`（flat）或
+      `chahua/personas/<name>/<name>.md`（dir form，import 出来的包），可塞
+      `[[guest]].persona` 字段。
     - `name`：不带后缀的文件名（也就是默认茶客名）。
     - `avatar_data_uri`：与 md sibling 同名 `.png`；缺图返 `None`。
 
     给前端 sidebar"添加茶客"picker 用。
+
+    **两种磁盘布局**：flat（`<Name>.md` 直接在 `personas/` 下）+ dir form（`<Name>/<Name>.md`
+    在子目录里，sibling 还可能有 `mcp.json` / `skills/`）。dir form 由
+    :func:`chahua.persona_import.import_from_folder` / :func:`import_from_github` 写出来；
+    flat 是 ship-with-app 的内置 persona 形态。同名时 user_data 胜。
     """
     seen_by_name: dict[str, dict] = {}
     # 后写后覆盖等价 user_data 胜 —— 反序遍历保证 user_data 在 dict 里最后落定。
     for root in reversed(_search_roots(paths)):
-        personas_dir = root / _PERSONAS_REL_DIR
+        personas_dir = root / PERSONAS_REL_DIR
         if not personas_dir.is_dir():
             continue
+        # flat：`<Name>.md`
         for md in sorted(personas_dir.glob("*.md")):
             name = md.stem
             seen_by_name[name] = {
-                "persona": str(_PERSONAS_REL_DIR / md.name),
+                "persona": str(PERSONAS_REL_DIR / md.name),
+                "name": name,
+                "avatar_data_uri": read_avatar_data_uri(md.with_suffix(".png")),
+            }
+        # dir form：`<Name>/<Name>.md`（与目录同名）；找不到同名 md 时退化为目录里
+        # 唯一一份 `*.md`，与 persona_import._derive_name 的兼容口径一致。
+        for sub in sorted(personas_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            md = sub / f"{sub.name}.md"
+            if not md.is_file():
+                # 兼容：目录名 ≠ md 文件名时，取目录里唯一一份 *.md。
+                mds = [p for p in sub.iterdir() if p.is_file() and p.suffix.lower() == ".md"]
+                if len(mds) != 1:
+                    continue
+                md = mds[0]
+            name = sub.name
+            seen_by_name[name] = {
+                "persona": str(PERSONAS_REL_DIR / sub.name / md.name),
                 "name": name,
                 "avatar_data_uri": read_avatar_data_uri(md.with_suffix(".png")),
             }
@@ -81,21 +108,26 @@ def discover_personas(paths: Paths) -> list[dict]:
 
 # 文件系统不友好的字符全部丢掉 / 替换。中文 / 拉丁 / 数字 / 破折号 / 下划线保留。
 # 不允许 `..` / 绝对路径 / 路径分隔符 —— 防止 traversal 写出 rooms/ 目录外。
-_ROOM_ID_FORBIDDEN = re.compile(r"[\x00-\x1f<>:\"/\\|?*]")
-_ROOM_ID_TRIM = re.compile(r"^[.\s]+|[.\s]+$")
+_FS_NAME_FORBIDDEN = re.compile(r"[\x00-\x1f<>:\"/\\|?*]")
+_FS_NAME_TRIM = re.compile(r"^[.\s]+|[.\s]+$")
+
+
+def sanitize_fs_name(raw: str, *, label: str = "name") -> str:
+    """把任意字符串规范成合法目录名。空 / 全点 → ``ValueError``。
+
+    规则：禁用字符 → ``-``；首尾去空白和点；空 / ``.`` / ``..`` → 拒（防 traversal）。
+    room_id 与 persona 名（:mod:`chahua.persona_import`）共用同一套 FS 兼容规则。
+    """
+    s = _FS_NAME_FORBIDDEN.sub("-", raw)
+    s = _FS_NAME_TRIM.sub("", s)
+    if not s or s in (".", ".."):
+        raise ValueError(f"{label} 非法（去掉文件系统禁用字符后为空）：{raw!r}")
+    return s
 
 
 def normalize_room_id(raw: str) -> str:
-    """把任意字符串规范成合法 room_id（目录名）。空 → ValueError。
-
-    规则：去掉 / 替换文件系统禁用字符；首尾去空白和点；丢空 / 全点 → 报错。
-    `..` / `.` 这种"看起来像路径"的输入直接拒（防 traversal）。
-    """
-    s = _ROOM_ID_FORBIDDEN.sub("-", raw)
-    s = _ROOM_ID_TRIM.sub("", s)
-    if not s or s in (".", ".."):
-        raise ValueError(f"room_id 非法（去掉文件系统禁用字符后为空）：{raw!r}")
-    return s
+    """``sanitize_fs_name`` 的 room_id 化身。错误信息走 ``label="room_id"``。"""
+    return sanitize_fs_name(raw, label="room_id")
 
 
 # ── TOML 写 ──────────────────────────────────────────────────────────────

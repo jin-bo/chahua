@@ -22,6 +22,7 @@
       <div class="sidebar-section">
         <div class="sidebar-title">
           <span>茶客</span>
+          <button id="import-persona" type="button" class="sidebar-add" title="导入新 persona（本地目录 / GitHub）" disabled>↓</button>
           <button id="add-guest" type="button" class="sidebar-add" title="添加茶客" disabled>+</button>
         </div>
         <ul id="guests"></ul>
@@ -56,6 +57,47 @@
         </div>
         <div class="modal-body">
           <ul id="add-guest-list" class="persona-picker"></ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导入 persona —— 本地目录或 GitHub。结构参考 examples/personas/Yvonne/：
+         <Name>.md（必）+ <Name>.png（可选）+ <Name>.toml / mcp.json / skills/（保留但
+         运行时尚未消费）。-->
+    <div id="import-persona-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>导入 persona</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">
+            源目录需含 <code>&lt;Name&gt;.md</code>（与目录同名）；可选 <code>&lt;Name&gt;.png</code> 头像、
+            <code>mcp.json</code>、<code>skills/</code>。整包会拷到 <code>chahua/personas/&lt;Name&gt;/</code>。
+          </p>
+          <div class="modal-field">
+            <label class="import-tab">
+              <input type="radio" name="import-source" value="folder" checked>
+              <span>本地文件夹</span>
+            </label>
+            <div class="import-row">
+              <input id="import-folder-path" type="text" placeholder="点「选目录」或直接粘贴绝对路径" readonly>
+              <button id="import-folder-pick" type="button">选目录</button>
+            </div>
+          </div>
+          <div class="modal-field">
+            <label class="import-tab">
+              <input type="radio" name="import-source" value="github">
+              <span>GitHub 链接</span>
+            </label>
+            <div class="import-row">
+              <input id="import-github-url" type="text" placeholder="https://github.com/&lt;owner&gt;/&lt;repo&gt;[/tree/&lt;branch&gt;/&lt;path&gt;]">
+            </div>
+            <div class="modal-hint">公开仓库，匿名 60 次/小时限速。</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="import-persona-submit" type="button" class="primary">导入</button>
         </div>
       </div>
     </div>

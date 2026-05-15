@@ -30,16 +30,22 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from . import admin
+from . import admin, persona_import
 from ._paths import Paths, resolve_under
 from .config import RoomConfigError
-from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink
+from .events import (
+    ChahuaEnvelope,
+    ChahuaEventType,
+    EnvelopeSink,
+    NOTICE_LEVEL_ERROR,
+    NOTICE_LEVEL_INFO,
+)
 from .permissions import DEFAULT_MODE
 from .session import (
     DEFAULT_ROOM_REL,
@@ -72,6 +78,19 @@ INBOUND_CREATE_ROOM = "create_room"
 INBOUND_DELETE_ROOM = "delete_room"
 INBOUND_UPDATE_USER_MD = "update_user_md"
 INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
+INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
+INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
+
+
+def _import_success_text(result: "persona_import.ImportedPersona") -> str:
+    """导入成功的 notice 文案 —— 含 persona 名 + 头像状态 + sidecar 文件数提示。"""
+    parts = [f"已导入 persona「{result.name}」"]
+    parts.append("（含头像）" if result.has_avatar else "（无头像）")
+    if result.extras:
+        parts.append(
+            f"另有 {len(result.extras)} 个 sidecar 文件被保留（mcp.json / skills 等，目前运行时尚未消费）"
+        )
+    return "".join(parts)
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -467,6 +486,55 @@ class ChahuaServer:
         _log.info("update_user_avatar: %d 字节已落盘", len(png_bytes))
         self._emit_room_info(sink)
 
+    def _emit_notice(self, sink: EnvelopeSink, *, level: str, text: str) -> None:
+        """发一条 ``notice`` envelope —— 给 mutator 返回用户可见的成功 / 失败原因。
+
+        不挂房间 turn，前端用 toast / alert 显示完即丢。失败时与 ``_emit_room_info``
+        组合：notice 说明原因 + room_info 让按钮 / picker 状态复位。
+        """
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=ChahuaEventType.NOTICE,
+                data={"level": level, "text": text},
+            )
+        )
+
+    def _run_import(
+        self,
+        label: str,
+        op: Callable[[], "persona_import.ImportedPersona"],
+        sink: EnvelopeSink,
+    ) -> None:
+        """跑一次 persona import + 统一 notice/room_info emit。
+
+        统一三态：``PersonaImportError`` 拿用户可见原因；其它异常吞成"内部错误"避免
+        把 traceback / 路径泄到前端；成功打 success 文案。失败也重发 room_info 让前端
+        modal 状态复位（与 add_guest / create_room 同款）。
+        """
+        try:
+            result = op()
+        except persona_import.PersonaImportError as e:
+            _log.info("%s 失败：%s", label, e)
+            self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
+            self._emit_room_info(sink)
+            return
+        except Exception as e:
+            _log.exception("%s 意外错", label)
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"导入失败（内部错误）：{e}"
+            )
+            self._emit_room_info(sink)
+            return
+        _log.info("%s → %s", label, result.persona_rel)
+        self._emit_notice(
+            sink, level=NOTICE_LEVEL_INFO, text=_import_success_text(result)
+        )
+        self._emit_room_info(sink)
+
     def _delete_room(self, *, room_id: str, sink: EnvelopeSink) -> None:
         """删除一个非当前房间。当前房间在 admin.delete_room 那层硬拒。"""
         current = self._session.room_config.room_dir.name
@@ -649,6 +717,29 @@ class ChahuaServer:
                 return
             await self._cancel_and_drain_inflight()
             self._update_user_md(content=content, sink=sink)
+            return
+        if msg_type == INBOUND_IMPORT_PERSONA_FOLDER:
+            src = data.get("path")
+            if not isinstance(src, str) or not src:
+                _log.warning("ignoring import_persona_folder with missing/empty path")
+                return
+            # 导入不动 session，无需 cancel inflight。
+            self._run_import(
+                f"import_persona_folder src={src!r}",
+                lambda: persona_import.import_from_folder(self._paths, Path(src)),
+                sink,
+            )
+            return
+        if msg_type == INBOUND_IMPORT_PERSONA_GITHUB:
+            url = data.get("url")
+            if not isinstance(url, str) or not url:
+                _log.warning("ignoring import_persona_github with missing/empty url")
+                return
+            self._run_import(
+                f"import_persona_github url={url!r}",
+                lambda: persona_import.import_from_github(self._paths, url),
+                sink,
+            )
             return
         if msg_type == INBOUND_UPDATE_USER_AVATAR:
             data_uri = data.get("data_uri")

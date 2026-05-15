@@ -14,7 +14,7 @@
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
-import { EventType, Status, Inbound, ScoreKind, DEFAULT_PERMISSION } from "./events.js";
+import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION } from "./events.js";
 import { marked } from "../node_modules/marked/lib/marked.esm.js";
 import DOMPurify from "../node_modules/dompurify/dist/purify.es.mjs";
 
@@ -50,15 +50,21 @@ const roomsEl = document.getElementById("rooms");
 const dropdownEl = document.getElementById("mention-dropdown");
 const clearRoomBtn = document.getElementById("clear-room");
 const addGuestBtn = document.getElementById("add-guest");
+const importPersonaBtn = document.getElementById("import-persona");
 const addRoomBtn = document.getElementById("add-room");
 const addGuestModal = document.getElementById("add-guest-modal");
 const addRoomModal = document.getElementById("add-room-modal");
+const importPersonaModal = document.getElementById("import-persona-modal");
 const addGuestListEl = document.getElementById("add-guest-list");
 const newRoomNameEl = document.getElementById("new-room-name");
 const newRoomTopicEl = document.getElementById("new-room-topic");
 const newRoomRulesEl = document.getElementById("new-room-rules");
 const newRoomGuestsEl = document.getElementById("new-room-guests");
 const newRoomSubmitEl = document.getElementById("new-room-submit");
+const importFolderPathEl = document.getElementById("import-folder-path");
+const importFolderPickBtn = document.getElementById("import-folder-pick");
+const importGithubUrlEl = document.getElementById("import-github-url");
+const importPersonaSubmitBtn = document.getElementById("import-persona-submit");
 const editUserMdBtn = document.getElementById("edit-user-md");
 const uploadAvatarBtn = document.getElementById("upload-avatar");
 const avatarFileInput = document.getElementById("avatar-file-input");
@@ -136,6 +142,7 @@ function setInputEnabled(enabled) {
   submitBtn.disabled = !enabled;
   clearRoomBtn.disabled = !enabled;
   addGuestBtn.disabled = !enabled;
+  importPersonaBtn.disabled = !enabled;
   addRoomBtn.disabled = !enabled;
   editUserMdBtn.disabled = !enabled;
   uploadAvatarBtn.disabled = !enabled;
@@ -756,6 +763,20 @@ function handleEnvelope(env) {
       }
       return;
     }
+    case EventType.NOTICE: {
+      // 服务端 mutator 的一次性反馈 —— 目前 persona 导入用。错误强提示 alert，
+      // 让用户立刻看到原因；info 走 status bar 不打断流。
+      const level = env.data?.level || NoticeLevel.INFO;
+      const text = env.data?.text || "";
+      if (!text) return;
+      if (level === NoticeLevel.ERROR) {
+        window.alert(text);
+        setStatus("error", text);
+      } else {
+        setStatus("ok", text);
+      }
+      return;
+    }
     // guest_thinking / tool_* 暂时静默。
   }
 }
@@ -906,6 +927,58 @@ addRoomBtn.addEventListener("click", () => {
   newRoomNameEl.focus();
 });
 
+// ── 导入 persona modal ─────────────────────────────────────────────────────
+
+// 重置 modal 状态 —— 每次打开重置选项 / 输入，避免上次输入残留误导用户。
+function resetImportPersonaModal() {
+  const folderRadio = importPersonaModal.querySelector("input[name='import-source'][value='folder']");
+  if (folderRadio) folderRadio.checked = true;
+  importFolderPathEl.value = "";
+  importGithubUrlEl.value = "";
+}
+
+importPersonaBtn.addEventListener("click", () => {
+  if (!connected) return;
+  resetImportPersonaModal();
+  openModal(importPersonaModal);
+});
+
+importFolderPickBtn.addEventListener("click", async () => {
+  // contextBridge 暴露的 main → dialog.showOpenDialog handle —— 返绝对路径或 null。
+  // 没拿到 chahua.pickFolder 说明 preload 旧版（dev hot-reload corner case），给个降级提示。
+  const pickFolder = window.chahua?.pickFolder;
+  if (typeof pickFolder !== "function") {
+    window.alert("当前 Electron 环境不支持文件夹选择，请直接粘贴绝对路径。");
+    importFolderPathEl.readOnly = false;
+    return;
+  }
+  const picked = await pickFolder();
+  if (picked) importFolderPathEl.value = picked;
+});
+
+importPersonaSubmitBtn.addEventListener("click", () => {
+  if (!connected) return;
+  const source = importPersonaModal.querySelector("input[name='import-source']:checked")?.value;
+  if (source === "github") {
+    const url = importGithubUrlEl.value.trim();
+    if (!url) {
+      importGithubUrlEl.focus();
+      return;
+    }
+    ws.send(JSON.stringify({ type: Inbound.IMPORT_PERSONA_GITHUB, url }));
+    setStatus("", `导入 GitHub persona…`);
+  } else {
+    const path = importFolderPathEl.value.trim();
+    if (!path) {
+      window.alert("先选一个目录，或粘贴绝对路径。");
+      return;
+    }
+    ws.send(JSON.stringify({ type: Inbound.IMPORT_PERSONA_FOLDER, path }));
+    setStatus("", `导入本地 persona…`);
+  }
+  closeModal(importPersonaModal);
+});
+
 newRoomSubmitEl.addEventListener("click", () => {
   if (!connected) return;
   const name = newRoomNameEl.value.trim();
@@ -1046,7 +1119,7 @@ function cropAndEncodeAvatar(img) {
 }
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
-const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal];
+const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal];
 for (const modal of ALL_MODALS) {
   modal.addEventListener("click", (ev) => {
     if (ev.target === modal) closeModal(modal);

@@ -559,6 +559,40 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   line-height: 1.4;
 }
 
+/* 导入 persona modal：radio + 输入框 + (本地)选目录按钮 横向排版。 */
+.import-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #444;
+}
+.import-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.import-row input[type="text"] {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.import-row input[type="text"]:focus { outline: none; border-color: #888; }
+.import-row button {
+  padding: 6px 12px;
+  border: 1px solid #d0c8b4;
+  background: #f5efe0;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.import-row button:hover { background: #ece5d2; }
+
 /* persona picker —— 单选模式（添加茶客）click 即 dispatch；
    多选模式（.multi，新建房间）click 切 .selected。 */
 .persona-picker { list-style: none; margin: 0; padding: 0; }

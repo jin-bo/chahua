@@ -62,12 +62,20 @@ class ChahuaEventType(str, Enum):
     GUEST_THINKING = "guest_thinking"
     TOOL_START = "tool_start"
     TOOL_COMPLETE = "tool_complete"
+    # 服务端 → 前端的一次性短消息（含 level=info/error 与 text）。给 persona 导入这类
+    # mutator 用 —— 失败原因要让用户看见，成功也想报 sidecar 文件数。不挂房间 turn，
+    # turn_id / message_id / guest_name 都为 None。
+    NOTICE = "notice"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
+
+# NOTICE envelope 的 data.level 取值。前端按 info / error 决定 toast 还是 alert。
+NOTICE_LEVEL_INFO = "info"
+NOTICE_LEVEL_ERROR = "error"
 
 
 def _new_id(prefix: str, n_bytes: int = 10) -> str:

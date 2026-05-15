@@ -1,12 +1,16 @@
 "use strict";
 
-// preload（P3.1）：在 sandbox 渲染进程里跑，唯一职责是把 main 传过来的 wsUrl
-// 通过 contextBridge 安全暴露给 renderer。
+// preload（P3.1）：在 sandbox 渲染进程里跑，把 main 端的安全能力通过 contextBridge
+// 暴露给 renderer。
 //
-// 走 additionalArguments（main/index.js webPreferences）而不是 IPC handshake：
-// renderer 一加载就能拿到 wsUrl，省一次往返 + 不引入 ipcRenderer 表面。
+// 暴露面：
+// - wsUrl：sidecar 的 ws://...，通过 additionalArguments（main/index.js webPreferences）
+//   塞进 process.argv，省一次 IPC 往返。
+// - pickFolder()：唤起系统文件夹选择器，给 persona import 用。走 ipcRenderer.invoke
+//   而不是 dialog 直连，因为 dialog API 只能 main 端调；sandbox=true 下 preload 仍可用
+//   ipcRenderer.invoke。
 
-const { contextBridge } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 
 function parseFlag(name) {
   const prefix = `--${name}=`;
@@ -18,4 +22,6 @@ function parseFlag(name) {
 
 contextBridge.exposeInMainWorld("chahua", {
   wsUrl: parseFlag("chahua-ws-url"),
+  // 返回选中的绝对路径字符串；用户取消 → null。
+  pickFolder: () => ipcRenderer.invoke("chahua:pick-folder"),
 });

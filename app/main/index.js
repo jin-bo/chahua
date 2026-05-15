@@ -13,7 +13,7 @@
 // renderer 只能通过 contextBridge 拿到 wsUrl，其余一概不暴露。
 
 const path = require("node:path");
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { startSidecar } = require("./sidecar");
 const { resolvePaths } = require("./paths");
 const { seedUserData } = require("./seed");
@@ -73,6 +73,24 @@ async function createWindow(wsUrl) {
   });
   await win.loadFile(RENDERER_HTML);
 }
+
+// IPC：renderer 通过 preload chahua.pickFolder() 唤起系统文件夹选择器，给 persona
+// import 用。返回字符串绝对路径或 null（用户取消 / 关闭对话框）。dialog API 只能在
+// main 端调，所以这里 handle，preload 端 invoke 转发。
+ipcMain.handle("chahua:pick-folder", async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const result = win
+    ? await dialog.showOpenDialog(win, {
+        title: "选 persona 目录（含 <Name>.md）",
+        properties: ["openDirectory"],
+      })
+    : await dialog.showOpenDialog({
+        title: "选 persona 目录（含 <Name>.md）",
+        properties: ["openDirectory"],
+      });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
 
 app.whenReady().then(async () => {
   const paths = resolvePaths();

@@ -1,0 +1,4 @@
+[guest]
+name       = "唐三藏"
+sex        = "male"
+permission = "workspace-write"
