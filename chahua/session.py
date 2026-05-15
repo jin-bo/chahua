@@ -49,6 +49,9 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
 }
 
+# 闲聊场景调高，比 agentao 自带的 0.2 暖；可被 ``LLM_TEMPERATURE`` 覆盖。
+_DEFAULT_TEMPERATURE: float = 1.0
+
 
 def load_env_files(paths: Paths) -> None:
     """凭码查找顺序（高 → 低）：shell export > ``user_data_root/.env`` > ``~/.env``。
@@ -94,7 +97,26 @@ def _make_llm_client() -> tuple[LLMClient, str]:
             f"其它 provider 可用，但 BASE_URL 必须显式给。"
         )
 
-    return LLMClient(api_key=api_key, base_url=base_url, model=model), provider
+    raw_temp = (os.environ.get("LLM_TEMPERATURE") or "").strip()
+    if raw_temp:
+        try:
+            temperature = float(raw_temp)
+        except ValueError as exc:
+            raise SystemExit(
+                f"LLM_TEMPERATURE={raw_temp!r} 解析失败：必须是浮点数（如 0.7）。"
+            ) from exc
+    else:
+        temperature = _DEFAULT_TEMPERATURE
+
+    return (
+        LLMClient(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+        ),
+        provider,
+    )
 
 
 # 房间共享子目录名。room.toml 不可改 —— 所有茶客 cwd 下都靠这个软链名访问。
