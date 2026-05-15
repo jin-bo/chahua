@@ -71,7 +71,15 @@ class _ScriptedScorer(IntentScorer):
         self._gate = asyncio.Event()  # 永不 set —— 测试只 cancel
         self._calls = 0
 
-    async def score(self, *, guest_name, persona, transcript_text, user_config):
+    async def score(
+        self,
+        *,
+        guest_name,
+        persona,
+        transcript_text,
+        user_config,
+        subject_mention_count=0,
+    ):
         self._calls += 1
         if self._calls <= 2:
             return ScoreResult(
@@ -163,7 +171,15 @@ async def test_cancel_during_first_round_scoring_no_fixup():
         def __init__(self) -> None:
             self._gate = asyncio.Event()
 
-        async def score(self, *, guest_name, persona, transcript_text, user_config):
+        async def score(
+            self,
+            *,
+            guest_name,
+            persona,
+            transcript_text,
+            user_config,
+            subject_mention_count=0,
+        ):
             first_round_started.set()
             await self._gate.wait()
             return ScoreResult(guest_name=guest_name, score=0.0, kind=ScoreKind.SCORED)

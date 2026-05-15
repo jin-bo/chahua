@@ -27,9 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 from .cursor import GuestCursor
 from .events import (
@@ -95,13 +94,65 @@ class OrchestratorConfig:
 # ── @ 路由 ───────────────────────────────────────────────────────────────────
 
 
-# 匹配 ``@<name>``，``<name>`` 为非空白且非中英标点字符串。**故意宽匹配**
-# —— ``@email@x.com`` 也会捕到 ``email``，但下游 ``name in self._guests`` 过滤掉
-# 非茶客名。把"什么算合法名字"的责任放到注册表里，比在正则里硬编更稳。
-_AT_PATTERN = re.compile(r"@([^\s，。！？,!?；;：:]+)")
 _BROADCAST_TOKENS: frozenset[str] = frozenset(
     {"all", "everyone", "大家", "各位", "所有人"}
 )
+
+# 短语边界标点 —— ``@`` 提及的左右两侧用 ``str.isspace()`` + 这个集合。规则：必须是
+# **短语级别**分隔（空白 / 句末标点 / 开闭括号引号），不是**词内**衔接字符（``-``
+# ``_`` ``/`` 等）。
+#
+# 用白名单而非 "isalnum 取反" 是为了过滤：
+#   - URL：``https://x.com/@Elon/status``（``@`` 左边是 ``/`` → 不起匹配）
+#   - 复合词：``@all-hands``（``-`` 不是边界 → 不算 broadcast）
+#   - email：``support@all.com``（``@`` 左边是字母 → 不起匹配）
+#
+# 空白单独走 ``str.isspace()`` 以覆盖全 Unicode 空白（CJK 全角空格 ``　``、
+# nbsp ``\xa0`` 等），不必手工补 codepoint。
+_PHRASE_BOUNDARY_PUNCT: frozenset[str] = frozenset(
+    "，。！？、；：…"  # 中文句末
+    ",.!?;:"  # 英文句末
+    "（）「」『』【】《》"  # 中文括号
+    "()[]{}"  # 英文括号
+    "\"'“”‘’"  # 引号
+    "~～"  # tilde
+)
+
+
+def _is_phrase_boundary_char(ch: str) -> bool:
+    return ch.isspace() or ch in _PHRASE_BOUNDARY_PUNCT
+
+
+def _is_phrase_boundary(text: str, idx: int) -> bool:
+    """``text[idx]`` 是不是短语边界（end-of-string 或空白 / 句末标点 / 括号引号）。"""
+    if idx >= len(text):
+        return True
+    return _is_phrase_boundary_char(text[idx])
+
+
+def _iter_at_positions(text: str) -> Iterator[int]:
+    """yield ``text`` 里**作为提及起点**的 ``@`` 下标。
+
+    要求 ``@`` 左边是字符串起点或短语边界字符，过滤 email / URL 里 ``@`` 紧跟字母或
+    路径符的情况（``foo@x.com``、``https://x.com/@Elon`` 都不算提及）。
+    """
+    i = text.find("@")
+    while i >= 0:
+        if i == 0 or _is_phrase_boundary_char(text[i - 1]):
+            yield i
+        i = text.find("@", i + 1)
+
+
+def _matches_at(text: str, start: int, token: str, *, case_insensitive: bool = False) -> bool:
+    """``text[start:]`` 是否以 ``token`` 起头且后面是名字边界。``case_insensitive``
+    给 broadcast token 用（``@ALL`` 也算）；茶客名走默认大小写敏感。"""
+    end = start + len(token)
+    slice_ = text[start:end]
+    if case_insensitive:
+        slice_ = slice_.lower()
+    if slice_ != token:
+        return False
+    return _is_phrase_boundary(text, end)
 
 
 # ── 茶客注册项 ───────────────────────────────────────────────────────────────
@@ -345,10 +396,13 @@ class Orchestrator:
         if not scorables:
             return None
 
-        transcript_text = self._render_transcript_for_scoring()
+        transcript_text, recent = self._scoring_transcript()
         results: list[ScoreResult] = list(
             await asyncio.gather(
-                *(self._score_one(name, transcript_text) for name in scorables)
+                *(
+                    self._score_one(name, transcript_text, recent)
+                    for name in scorables
+                )
             )
         )
 
@@ -375,47 +429,86 @@ class Orchestrator:
         return winners, results
 
     async def _score_one(
-        self, guest_name: str, transcript_text: str
+        self,
+        guest_name: str,
+        transcript_text: str,
+        recent: list[Message],
     ) -> ScoreResult:
         entry = self._guests[guest_name]
+        mention_count = self._count_self_mentions(guest_name, recent)
         return await self.scorer.score(
             guest_name=guest_name,
             persona=entry.persona_md,
             transcript_text=transcript_text,
             user_config=self.user_config,
+            subject_mention_count=mention_count,
         )
+
+    def _count_self_mentions(
+        self, guest_name: str, recent: list[Message]
+    ) -> int:
+        """统计 ``recent`` 窗口里 ``guest_name`` 被**其他人**提到的次数。
+
+        给打分 prompt 注入 ``<context_hint>`` 用：名字出现在最近发言里是"话题在讨论你"
+        的 deterministic 信号，弥补单靠 LLM 评分时把"被讨论但没 @"判低分的问题。
+
+        排除 ``m.speaker_id == guest_name`` 的自我消息——茶客自己复读自己名字不算被讨论。
+        包含 ``@guest_name`` 形式的出现（调用方语义里 @ 走的是确定性路由，能到这里说明
+        本轮没 @，但更早的 @ 仍是有效的"刚被讨论"信号）。
+
+        简单子串匹配；接受名字是别人字符串子串的极少数误命中（"Elon" 撞到 "Elonomics"），
+        因为它只是 soft hint，不是硬规则。
+        """
+        count = 0
+        for m in recent:
+            if m.speaker_id == guest_name:
+                continue
+            if guest_name in m.text:
+                count += 1
+        return count
 
     def _find_user_mention(self) -> Optional[str]:
         """扫 transcript 最后一条消息里的 @ 提及；返回首个匹配的在场茶客名。
 
-        @broadcast（@all / @所有人 等）不在这里处理 —— 由 :meth:`_find_user_broadcast`
-        独立检查，调用方在该方法前查 broadcast，因此这里遇到 broadcast token 时
-        ``continue`` 看后续是否有具体茶客名（同条消息里 ``@all @宝总`` 的极少数情况
-        broadcast 优先，调用方不会走到 @ 单点路由）。
+        对每个 ``@`` 位置按**注册名长度倒序**做最长前缀匹配 + 词边界校验，所以含空格的
+        名字（``Elon Musk``）也能命中——把"什么算合法名字"完全交给注册表。
+
+        @broadcast（@all / @所有人 等）由 :meth:`_find_user_broadcast` 独立检查，
+        调用方先查 broadcast，因此这里遇到 broadcast token 时跳过当前 ``@``——避免
+        ``@all @宝总`` 极少数情况下被当成单点提及。
         """
         last = self.room.last_message()
         if last is None or last.speaker_id != USER_SPEAKER_ID:
             # 只承认用户消息里的 @；AI 互相 @ 不走确定性路由（见 _run_ai_chain 注释）。
             return None
-        for m in _AT_PATTERN.finditer(last.text):
-            name = m.group(1).strip()
-            if name.lower() in _BROADCAST_TOKENS:
+        text = last.text
+        # 注册名按长度倒序：``Elon Musk`` 排在 ``Elon`` 之前，最长前缀优先。
+        names_by_length = sorted(self._guests, key=len, reverse=True)
+        for at_idx in _iter_at_positions(text):
+            start = at_idx + 1
+            # 此 @ 是个 broadcast token？跳过（broadcast 由调用方独立判定）。
+            if any(_matches_at(text, start, tok, case_insensitive=True) for tok in _BROADCAST_TOKENS):
                 continue
-            if name in self._guests:
-                return name
+            for name in names_by_length:
+                if _matches_at(text, start, name):
+                    return name
         return None
 
     def _find_user_broadcast(self) -> bool:
         """扫 transcript 最后一条消息里有没有 @broadcast 词（all / everyone / 大家 /
         各位 / 所有人 —— 见 :data:`_BROADCAST_TOKENS`，英文大小写无关）。
 
+        匹配带词边界 —— ``@allies`` 不会被当成 ``@all``，因为 ``e`` 不是名字边界。
+
         broadcast 走"全员发言一次"路径，独立于 :meth:`_find_user_mention` 的 @ 单点路由。
         """
         last = self.room.last_message()
         if last is None or last.speaker_id != USER_SPEAKER_ID:
             return False
-        for m in _AT_PATTERN.finditer(last.text):
-            if m.group(1).strip().lower() in _BROADCAST_TOKENS:
+        text = last.text
+        for at_idx in _iter_at_positions(text):
+            start = at_idx + 1
+            if any(_matches_at(text, start, tok, case_insensitive=True) for tok in _BROADCAST_TOKENS):
                 return True
         return False
 
@@ -542,12 +635,17 @@ class Orchestrator:
             f"不要复述别人的话，不要加引号或前缀。）"
         )
 
-    def _render_transcript_for_scoring(self) -> str:
-        """打分 prompt 里塞的 transcript 段。取最近 K 条。"""
+    def _scoring_transcript(self) -> tuple[str, list[Message]]:
+        """打分用的 transcript 切片，返回 ``(格式化文本, 原始 Message 列表)``。
+
+        文本喂打分 prompt；list 给 :meth:`_count_self_mentions` 用——后者要按
+        ``speaker_id`` 排除"茶客自己之前发言里出现自己名字"的伪计数，所以不能只看
+        格式化文本。
+        """
         latest = self.room.latest_seq
         last_seen = max(0, latest - self.config.scoring_transcript_recent)
         recent = self.room.messages_since(last_seen)
-        return format_messages(recent, self._display_map())
+        return format_messages(recent, self._display_map()), recent
 
     def _display_map(self) -> dict[str, str]:
         """``speaker_id → display_name`` 映射。缓存：只随 register/user_config 变。"""

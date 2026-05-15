@@ -77,13 +77,18 @@ _SCORING_PROMPT_TEMPLATE = """\
 <transcript>
 {transcript}
 </transcript>
-
+{subject_hint_block}
 请评估"你（{guest_name}）现在有多想接话"，返回**严格单行 JSON**：
 {{"score": <0 到 1 之间的小数>, "reason": "<不超过一句话>"}}
 
 只输出这一行 JSON，不要包裹代码块、不要多余文字。
-0 = 完全不想接（话题与你无关、刚说过、被冷落但不在意），
-1 = 非常想说（被 @、有强观点、对方踩到你的兴趣点）。
+
+打分参考（按强度递增）：
+- 0.0-0.2：话题与你无关 / 刚说过没新意 / 被冷落但不在意。
+- 0.3-0.5：话题边缘相关，可接可不接。
+- 0.6-0.8：**话题就在讨论你**——别人在安排你的行程、转述或评价你说过的话、做关于你的决定。
+  即使没被 @，也应当出声确认 / 修正 / 补充。
+- 0.9-1.0：被 @、有强观点要表达、对方踩到你的兴趣点或核心立场。
 """
 
 _USER_BLOCK_TEMPLATE = """
@@ -92,6 +97,16 @@ _USER_BLOCK_TEMPLATE = """
 <user_intro>
 {user_block}
 </user_intro>
+"""
+
+# 和 prompt 里的"话题就在讨论你"档位对齐：给模型一个 deterministic 计数信号，但不硬抬分
+# ——"提到 Elon"也可能只是闲聊引述，让模型综合 transcript 判断。
+_SUBJECT_HINT_TEMPLATE = """
+<context_hint>
+最近的发言记录里，「{guest_name}」（也就是你）的名字被**其他人**提到了 {count} 次。
+如果当前对话在围绕你的安排、决定、行程，或在转述 / 评价你说过的话，即使没被 @，也属于"话题在讨论你"那一档（建议 ≥ 0.6）。
+反之只是路过引述（"我看到 X 也聊过这个"），不必强行抬分。
+</context_hint>
 """
 
 # 抠出第一段含 "score" 字段的 JSON 对象。匹配最浅一层 { ... }，
@@ -134,10 +149,18 @@ def _render_prompt(
     persona: str,
     transcript_text: str,
     user_config: UserConfig,
+    subject_mention_count: int = 0,
 ) -> str:
     user_block = (
         _USER_BLOCK_TEMPLATE.format(user_block=user_config.preferences_block)
         if user_config.preferences_block
+        else ""
+    )
+    subject_hint_block = (
+        _SUBJECT_HINT_TEMPLATE.format(
+            guest_name=guest_name, count=subject_mention_count
+        )
+        if subject_mention_count > 0
         else ""
     )
     return _SCORING_PROMPT_TEMPLATE.format(
@@ -145,6 +168,7 @@ def _render_prompt(
         persona=persona,
         transcript=transcript_text or "（房间还没有发言）",
         user_block=user_block,
+        subject_hint_block=subject_hint_block,
     )
 
 
@@ -167,12 +191,14 @@ class IntentScorer:
         persona: str,
         transcript_text: str,
         user_config: UserConfig,
+        subject_mention_count: int = 0,
     ) -> ScoreResult:
         prompt = _render_prompt(
             guest_name=guest_name,
             persona=persona,
             transcript_text=transcript_text,
             user_config=user_config,
+            subject_mention_count=subject_mention_count,
         )
         raw = await chat_oneshot(
             self._llm,
