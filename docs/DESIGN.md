@@ -528,6 +528,49 @@ server `_upload_file` 走五步：sanitize filename → b64 decode → size chec
 - **pending pill 仅前端内存**：切房 / submit / 断线重连后清空。pill 清了不代表文件被删 —— 文件在 share 目录里，下次想发再添加引用即可（目前没"复用旧文件"的 UI 直接入口，需要重新上传同名文件触发 server 覆盖 + 重发 pill）。
 - **重名直接覆盖**：用户主动选了同名文件意味着想替换，比"自动加 (1)"明确。前端 pill 按 rel 去重，避免 pending 区出现两条同名条目。
 
+### 3.11 设置入口：双击 anchor 弹 action popover
+
+P3.x 起 sidebar 上有「清空聊天 / 编辑配置 / 换头像」三个常驻按钮 —— 视觉显眼又怕误点。2026-05-15 把这条入口挪到 **双击 anchor 弹 popover**：
+
+- **双击房间名（`#room-name`）** → 弹「更改房间配置 / 清空聊天」两项。清空聊天复用既有 `clear_room` 帧；更改房间配置打开 modal，textarea 直编当前房间 `room.toml` 全文，保存走 inbound `update_room_toml`（payload `{content: str}`），服务端 `admin.update_room_toml` 校验失败回滚旧字节 + emit `notice(level=error)`。
+- **双击用户头像 / 显示名（`#user-avatar-wrap` / `#user-name`）** → 弹「编辑配置 / 换头像」两项。编辑配置打开 USER.md 编辑 modal；换头像触发隐藏 `<input type=file>`。
+
+action popover 与既有 `permission popover`（点茶客头像设权限）共用骨架：
+
+- CSS：`.popover` 是底座（背景 / 边框 / 阴影 / 宽度 / z-index），`.permission-popover` / `.action-popover` 是内容修饰类（左侧色点、danger 红 hover）。renderer 端两套 popover 互斥（开一个关另一个）。
+- JS：`positionPopoverByAnchor(pop, anchor)` 单点处理「贴 anchor 右侧 → 右边不够退到下方」；`attachPopoverDismissHandlers(pop, onClose)` 单点处理「点外面关 / Esc 关」，返回 detach 函数。
+
+为什么是双击而不是右键菜单：
+
+- 双击在桌面 App 里有"打开 / 编辑"的肌肉记忆（文件夹双击进、文件名双击改名）。
+- 右键菜单受 Electron 默认行为干扰（contextmenu 事件会被 webContents 拦），跨 macOS / Windows 行为不完全一致。
+- 右键还要承载将来「复制 / 粘贴 / 检查元素」之类的真·上下文菜单，挪占这个位置语义会冲突。
+
+room.toml 的 raw textarea 编辑路径 vs 「新建房间」modal 的结构化字段：
+
+- 「新建房间」是只接受合法路径的安全 wizard，不让用户碰 toml 语法。
+- 「更改房间配置」是 power-user 入口 —— 改 topic / rules、批量调 permission、改 persona 路径，结构化 UI 表达不了的都走这。
+- 两者共享 `admin._rewrite_and_validate` 的「写 toml + load 校验 + 失败回滚」契约：结构化 mutator 从 dict snapshot 回滚，raw editor 从 bytes snapshot 回滚。snapshot 类型不同但语义一致。
+
+#### 3.11.1 room.toml 编辑器的回滚契约
+
+```
+admin.update_room_toml(room_dir, content, *, paths):
+    1. 检查 size ≤ 64KB（防误粘整文档）
+    2. 读旧 bytes（FileNotFoundError → None，防御 toml 不存在的极端情形）
+    3. write_text_atomic(toml_path, content)
+    4. try load_room_config(...) → 返 RoomConfig
+       except RoomConfigError:
+           回滚（写旧 bytes / unlink），raise
+```
+
+服务端 `_update_room_toml` 在校验失败时双管齐下：emit `notice(level=error, text=...)` 让用户看到具体哪段不合法（"未知字段 X"、"persona 文件不存在 Y"），同时 `_emit_room_snapshot` 让 UI 复位（保存按钮 loading 态消除）。校验通过则走 `_replace_session` 重装 session + 重发 snapshot —— 与 add_guest / update_guest_permission 同口径。
+
+`room_info` envelope 顺便携带两个字段供前端 modal prefill：
+
+- `room_toml_content`：当前 `room.toml` 原文（utf-8 string）。
+- `room_toml_source`：磁盘绝对路径，modal 底部提示用。
+
 ## 4. 房间配置文件
 
 ```toml
@@ -637,6 +680,65 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-05-15（双击 popover + raw room.toml 编辑器 + Gemini thinking 兜底）** ——
+  P4 打磨阶段第一拨，落地决策：
+  - **设置入口从 sidebar 按钮挪到双击 popover** —— sidebar 之前常驻「清空聊天 /
+    编辑配置 / 换头像」三个按钮，视觉抢戏 + 误点风险（清空聊天虽有 native confirm，
+    但按钮存在感本身就是干扰）。挪到双击触发 + popover 提供具体动作，sidebar 视觉
+    安静许多；dblclick 比 click 多一道门槛，配合 popover 上动作 hover 描述，误触
+    几乎归零。
+  - **room.toml raw textarea 编辑而非结构化向导** —— 「新建房间」modal 是只接受
+    合法路径的安全 wizard；「更改房间配置」做相反方向 —— 给 power user 直编 toml
+    的入口，让 topic / rules 改写、批量调 permission、改 persona 路径都能在 UI 里
+    完成。共享 `_rewrite_and_validate` 的「写 + 校验 + 回滚」契约，只是 snapshot
+    类型不同（dict vs raw bytes）。详见 §3.11.1。
+  - **popover 重构：抽出 `positionPopoverByAnchor` + `attachPopoverDismissHandlers`** ——
+    permission popover 与新的 action popover 之前各自一份「贴右侧 / 右边不够退下方」+
+    「outside click + Esc 关」的实现，~30 行字面重复。抽两个 helper 后，新加第三个
+    popover（比如未来 isolation / cooldown 设置）零额外代码。CSS 改 `.popover` 底座 +
+    `.permission-popover` / `.action-popover` 修饰类，去掉之前 `className =
+    "action-popover permission-popover"` 双类样式借用的尴尬。
+  - **`scoring._MAX_TOKENS` 128 → 1024；`summarizer._MAX_TOKENS` 512 → 2048** ——
+    Gemini 2.5 Flash 系列把 thinking budget 算进 `max_tokens` 里，旧值在 Gemini 上
+    会让 visible output 在 `{"score":` 处被 length 截断（Finish Reason: length,
+    Completion Tokens: 4，Assistant Response 10 chars）。agentao `LLMClient.chat`
+    只透传 `max_tokens` 到 OpenAI 兼容层，没暴露 Gemini 的 thinking budget 控制 ——
+    唯一兜底是在调用方留出富余。对 OpenAI / Claude / DeepSeek 等非 thinking 模型
+    不增加实际 token 消耗（输出长度由 prompt 决定，上限只是顶）。
+  - **TOCTOU 兜底**：`admin.update_room_toml` 读旧 bytes 时用 try/except `FileNotFoundError`
+    替代 `if exists(): read_bytes()`。一次 syscall 而非两次，且消除 exists() 与
+    read_bytes() 之间文件被删的极端窗口。
+
+- **2026-05-15（persona MCP & skills 装载 + MCP 信任门）** ——
+  persona 目录允许塞 sibling `mcp.json` + `skills/`，落地决策：
+  - **MCP 必须用户显式勾选信任才装载** —— MCP server 本质是茶客 cwd 下要启动的外部
+    进程（`command` + `args`），与 read-only / workspace-write 权限正交：read-only
+    管"茶客自己的工具能不能写文件"，MCP trust 管"要不要把这位 persona 描述的外部
+    服务接入"。两条门控不能合并。trust 记录走 `user_data_root/.chahua/persona-trust.json`
+    （按 persona_rel 索引），跨房间持久化 —— 用户对宝总的 MCP 一旦信任，下次开新
+    房带宝总进来就不再问。
+  - **skills 无信任门** —— skills 是 prompt 形态的 instructions（markdown），通过软链
+    挂进茶客 cwd 给 agentao 找到，无运行时风险，直接装。trust 表面积只覆盖会启动外部
+    进程的 MCP。
+  - **room_info envelope 携带 mcp 摘要 + skills_available** —— popover 上要让用户在
+    勾选信任前看清这位 persona 想跑啥（命令名 + args），但不附 env / cwd 等 corner-case
+    字段（完整内容仍看 mcp.json）。
+  - **新模块 `chahua/persona_assets.py` + `chahua/trust.py`** —— persona_assets 单点
+    定义 persona 目录约定（sibling .png / .toml / mcp.json / skills/），admin /
+    persona_import / session 三处共用；trust 单点定义信任表读写 + atomic update。
+
+- **2026-05-15（「话题讨论你」打分加档）** ——
+  scoring 阶段除了 `@` 走确定性路由以外，transcript 文本里"宝总你怎么看"这种
+  指名提及之前不被打分系统识别，被提及的茶客可能因冷却 / 阈值不够错过接话时机。
+  落地决策：
+  - **在 scoring prompt 里塞 subject_mention_count** —— scorer 算一份 transcript 里
+    第三方对当前 guest 的提及次数（用 orchestrator 的最长前缀匹配口径，与 `@`
+    路由同源），喂给 LLM 当 "subject_hint" 字段。LLM 自由决定加多少分，但有了
+    explicit signal 比让 LLM 自己从全文里捞要稳得多。
+  - **不走确定性路由（不像 `@` 那样直接发言）** —— 文本里提名字是软信号，可能是
+    "宝总是上海宁啊"这种泛指，也可能是真问宝总，留 LLM 自己判断；@ 是用户主动发出
+    路由指令，强制命中。
 
 - **2026-05-14（P3.3.2 第 5 层：sidecar 优雅关停跨平台完工后）** —— stdin EOF
   替 SIGINT 当跨平台 shutdown 信号的落地决策：

@@ -46,9 +46,13 @@ transcript / cursor / summary 持久化保留。
 - packaged 模式（`.dmg`）：用户数据根 = `~/Library/Application Support/chahua/`，
   首启动写 `.chahua-seeded` marker 做幂等
 
-可用快捷动作：发言 / 停止当前 turn（同一按钮形变）/ `@<茶客名>` 直接路由 / sidebar 切换房间 /
-sidebar 清空当前房间历史 / 多行输入（Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px
-切滚动）/ 附件上传（composer 左侧 `+`，文件落到房间共享目录，跟下一条消息一起进上下文）。
+可用快捷动作：
+
+- 发言 / 停止当前 turn（同一按钮形变）；`@<茶客名>` 直接路由（含空格的名字也能命中）。
+- 多行输入：Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px 切滚动。
+- 附件上传：composer 左侧 `+`，文件落房间共享目录，随下一条消息一起进上下文。
+- sidebar：切换房间 / 加茶客 / 导入 persona（本地目录或 GitHub）；点茶客头像设权限、勾选信任其 MCP。
+- **双击房间名** 弹「更改房间配置（直接编辑 room.toml）/ 清空聊天」；**双击用户头像或显示名** 弹「编辑配置（USER.md）/ 换头像（PNG / JPG / WebP / GIF）」。
 
 ## 数据位置（本地明文，无云端，无加密）
 
