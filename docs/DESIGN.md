@@ -304,6 +304,7 @@ App 首次启动 / README / "关于" 页面要明文说清楚：所有聊天数�
 |---|---|---|
 | `rooms/<room>/transcript.jsonl` | 房间公共发言记录 | 跟着房间走 |
 | `rooms/<room>/summary.jsonl` | 房间近期摘要 | 跟着房间走 |
+| `rooms/<room>/share/` | 房间共享文件（UI 上传落这里，所有茶客 `<work_dir>/share` 软链到此） | 跟着房间走 |
 | `rooms/<room>/guests/<name>/.agentao/memory.db` | `isolation=room` 茶客的私有长期记忆 | 跟着房间走 |
 | `rooms/<room>/guests/<name>/.agentao/sessions/` | 该茶客在该房间的 agentao 会话历史 | 跟着房间走 |
 | `rooms/<room>/guests/<name>/.agentao/mcp.json` | 该茶客在该房间连哪些 MCP server（手编，agentao 默认读这） | 跟着房间走 |
@@ -460,6 +461,72 @@ UI 上对 ACP 茶客显示一个"协议接入"图标 + tooltip 说明上述退�
 - **P0–P3 完全不实现 ACP**。所有代码默认走 embed，TeaGuest 内部不留 backend 分支也无所谓 —— 简单优先。
 - **P4 加 ACP backend**：抽出 `TeaGuest` 接口、新增 `AcpBackend` 实现、`config.py` 识别 `transport = "acp"`、UI 加协议接入图标。
 - 接入第一个非 agentao 的 ACP 茶客（比如 claude-code 的 ACP shim、或别人写的 demo runtime）作为 P4 的验收用例。
+
+### 3.10 房间共享文件（share/）
+
+茶客之间常需要协同分析同一份资料（PDF、表格、代码片段、截图）。茶话室把它做成"房间桌面"模型，而不是给每位茶客单独发一份拷贝。
+
+#### 3.10.1 磁盘布局
+
+```
+rooms/<room>/
+├── share/                          ← 房间共享根，UI 上传落这里
+└── guests/<name>/
+    └── share → ../../share         ← 软链，每位茶客 cwd 下都用 ./share/... 引用
+```
+
+为什么是软链而不是每位茶客一份拷贝：
+
+- agentao 的工具受 `working_directory` 约束 —— 茶客只能读自己 cwd 子树。share 必须挂在 cwd 内才能被工具看到。
+- 拷贝会让"上传新文件后茶客读到旧目录"成为常态 bug；软链双向实时同步。
+- Windows 普通用户没 `SeCreateSymbolicLinkPrivilege` 时 `os.symlink` 抛 OSError —— 这条路径走 WARN + 跳过（茶客看不到房间共享文件，但启动不崩）。不退到 copytree，是因为"快照"比"完全看不到"更误导。
+
+share 软链建立的单点入口：`session._build_guests` 装配时调 `_link_guest_share`（委托 `_fs.link_dir_idempotent`）。target 已正确指向 source → 早退；target 是真目录/文件 → WARN 跳过（保护用户手建的同名目录）。
+
+#### 3.10.2 上传 wire（前端 → server）
+
+线协议加一对帧：
+
+- **上行 `upload_file`**：`{type, filename, content_b64}`。前端读 File → `FileReader.readAsDataURL` 拿 base64 → ws 发文本帧。**单文件上限 2MB**（与 ws 入站帧 max 4MB 留 base64 4/3 膨胀 + JSON 字段开销 head room）。
+- **下行 `file_uploaded`**：`{rel, name, size, original}`。`rel` 是落盘相对路径（如 `share/合同.pdf`），`name` 是经 `sanitize_fs_name` 洗过的文件名，`original` 是用户原文件名（pill 显示用，name ≠ original 时挂 title 让用户看到对应关系）。
+
+server `_upload_file` 走五步：sanitize filename → b64 decode → size check → `write_bytes_atomic` 落盘 → emit `file_uploaded`。任何一步失败走 `notice(level=error)` 给用户看见原因，与 persona 导入失败口径一致。
+
+为什么走文本 base64 而不是 ws 二进制帧：2MB 上限内 base64 ~33% 膨胀 + 一次 decode 是小钱；二进制帧需要在 `_handle_inbound` 前置一个 metadata 文本帧 + 拆掉 `UNSUPPORTED_DATA` close，复杂度不值。上限若拉到 ≥10MB 再重审。
+
+#### 3.10.3 文件引用注入消息
+
+上传成功后文件**不立即进上下文** —— 在 pending pill 上等。用户下一条 `user_message` 时前端把 `files: ["share/xxx.pdf", ...]` 一起带上，server 端 `_attach_files_to_text` 把每个 ref 拼成 `<./share/xxx.pdf>` 单独一行追加到 text 后：
+
+```
+我看看这两份合同有什么不一样
+<./share/合同 A.pdf>
+<./share/合同 B.pdf>
+```
+
+整段进 transcript（用户消息只此一条，不拆），自然进 onboarding/增量喂养。茶客在自己 cwd 下用 Read tool 走 `./share/合同 A.pdf` 即可（share 软链兜底）。
+
+为什么用 `<./...>` 而不是 markdown 链接：
+
+- user 气泡走 `textContent`（不过 markdown），保留原文给茶客的 prompt 看到的就是字面值。
+- `<./...>` 不会与 marked.parse 的合法 HTML tag 名碰撞（`.` 在 tag 名首位不合法，被当文本输出）。
+- 与"agentao Read tool 路径参数"语义一致 —— 茶客看到这种格式直觉就是"去读这个文件"。
+
+#### 3.10.4 路径校验
+
+`_attach_files_to_text` 视 `files` 数组里的元素为**完全不可信**（理论上前端 / 任何 ws 客户端都能伪造）：
+
+- 拒绝绝对路径（`/etc/passwd` 等）—— 用 `str.startswith("/")` / `startswith("\\")` 双拒。
+- 拒绝 `..` 段 —— 先 `replace("\\", "/")` 归一斜杠再 split，挡 `share\..\boom` 这种 Windows 转义。
+- 不存在性校验**不做**：客户端如果传了 `share/不存在.txt`，茶客的 Read 会失败，但 transcript 不会被污染到 share 之外。
+
+`sanitize_fs_name` 在 upload 入口就把禁用字符 → `-`、首尾空白/点剥掉、空名 / `.` / `..` 直接拒。share 目录下的任何 ENTRY 都是这个函数的产物，不会出现奇形路径。
+
+#### 3.10.5 生命周期 / 清理
+
+- **share 文件随房间走**：删房间（`delete_room`）走 `rmtree(rooms/<room>/)` 一并清。`clear_room` 只清 transcript/summary/cursor 三件套，不动 share —— 文件是用户主动放的资产，不该被"清空聊天"误伤。
+- **pending pill 仅前端内存**：切房 / submit / 断线重连后清空。pill 清了不代表文件被删 —— 文件在 share 目录里，下次想发再添加引用即可（目前没"复用旧文件"的 UI 直接入口，需要重新上传同名文件触发 server 覆盖 + 重发 pill）。
+- **重名直接覆盖**：用户主动选了同名文件意味着想替换，比"自动加 (1)"明确。前端 pill 按 rel 去重，避免 pending 区出现两条同名条目。
 
 ## 4. 房间配置文件
 

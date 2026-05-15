@@ -47,7 +47,8 @@ transcript / cursor / summary 持久化保留。
   首启动写 `.chahua-seeded` marker 做幂等
 
 可用快捷动作：发言 / 停止当前 turn（同一按钮形变）/ `@<茶客名>` 直接路由 / sidebar 切换房间 /
-sidebar 清空当前房间历史。
+sidebar 清空当前房间历史 / 多行输入（Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px
+切滚动）/ 附件上传（composer 左侧 `+`，文件落到房间共享目录，跟下一条消息一起进上下文）。
 
 ## 数据位置（本地明文，无云端，无加密）
 
@@ -56,6 +57,7 @@ sidebar 清空当前房间历史。
 - `rooms/<room>/transcript.jsonl` —— 房间公开记录（append-only）
 - `rooms/<room>/summary.jsonl` —— onboarding 摘要历史
 - `rooms/<room>/cursor.json` —— 每位茶客的喂养游标
+- `rooms/<room>/share/` —— 房间共享文件目录；UI 上传落这里，每位茶客的 `<guest_workdir>/share` 软链到它
 - `rooms/<room>/guests/<name>/.agentao/` —— 茶客的私有 memory.db / sessions
 - `rooms/<room>/guests/<name>/agentao.log` —— agentao 日志
 - `USER.md` —— 你的角色卡，每轮 reload

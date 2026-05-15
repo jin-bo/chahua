@@ -19,6 +19,7 @@ from typing import Optional
 from agentao.llm import LLMClient
 from dotenv import load_dotenv
 
+from ._fs import link_dir_idempotent
 from ._paths import Paths
 from .config import RoomConfig, load_room_config
 from .cursor import GuestCursor
@@ -96,6 +97,36 @@ def _make_llm_client() -> tuple[LLMClient, str]:
     return LLMClient(api_key=api_key, base_url=base_url, model=model), provider
 
 
+# 房间共享子目录名。room.toml 不可改 —— 所有茶客 cwd 下都靠这个软链名访问。
+ROOM_SHARE_DIRNAME = "share"
+
+
+def ensure_room_share_dir(room_dir: Path) -> Path:
+    """房间共享目录 ``<room_dir>/share/``。茶客 ``work_dir/share`` 都链到这里，
+    UI 上传的文件也落这里 —— 房间的"公共桌面"。
+
+    单点 helper：server upload 入口与 session 装配各调一次，``mkdir(exist_ok=True)``
+    幂等。
+    """
+    share = room_dir / ROOM_SHARE_DIRNAME
+    share.mkdir(parents=True, exist_ok=True)
+    return share
+
+
+def _link_guest_share(guest_workdir: Path, room_share: Path) -> None:
+    """``<guest_workdir>/share`` → ``room_share`` 软链。
+
+    Windows 普通用户没 ``SeCreateSymbolicLinkPrivilege`` 时静默 WARN —— 茶客看不到
+    房间共享文件。**不** copytree 兜底：share/ 必须双向实时同步，"快照"反而误导。
+    """
+    link_dir_idempotent(
+        guest_workdir / ROOM_SHARE_DIRNAME,
+        room_share,
+        wipe_real_target=False,
+        label=f"guest {guest_workdir.name} share",
+    )
+
+
 def _build_guests(
     room_config: RoomConfig,
     llm_client: LLMClient,
@@ -105,7 +136,9 @@ def _build_guests(
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
     每位茶客的 ``working_directory`` 走 :meth:`GuestConfig.workspace_in`（约定
-    ``<room_dir>/guests/<name>/``）。
+    ``<room_dir>/guests/<name>/``）。同时把 ``work_dir/share`` 链到房间共享目录
+    ``<room_dir>/share/`` —— 用户上传的文件落房间根，茶客在自己 cwd 下用 ``./share/xxx``
+    就能 Read（agentao 工具受 working_directory 约束，share 必须挂在 cwd 子树）。
 
     persona sibling 的 ``mcp.json`` / ``skills/`` 走两套不同的信任策略：
 
@@ -117,6 +150,7 @@ def _build_guests(
       Agentao —— mcp.json 里的 ``command`` + ``args`` 是任意可执行，未经用户判断
       不该自动启动。
     """
+    room_share = ensure_room_share_dir(room_config.room_dir)
     out: list[tuple[TeaGuest, str]] = []
     for gc in room_config.guests:
         persona_md = gc.read_persona()
@@ -140,6 +174,8 @@ def _build_guests(
             permission=gc.permission,
             assets=assets,
         )
+        # TeaGuest.__init__ 已经 mkdir 了 working_directory，share 软链放这里安全。
+        _link_guest_share(guest.working_directory, room_share)
         out.append((guest, persona_md))
     return out
 

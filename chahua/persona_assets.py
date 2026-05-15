@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from ._fs import link_dir_idempotent
 from ._paths import Paths, _package_install_root
 
 _log = logging.getLogger(__name__)
@@ -170,36 +171,28 @@ def _materialize(working_directory: Path, persona_skills_dir: Optional[Path]) ->
     target = working_directory / ".agentao" / "skills"
     source = persona_skills_dir.resolve() if persona_skills_dir is not None else None
 
-    if source is not None and target.is_symlink():
-        try:
-            if Path(target.readlink()) == source:
-                return
-        except OSError:
-            pass
-
-    # 清旧 target（symlink / 文件 / 目录都可能存在，含 broken symlink）。
-    if target.is_symlink() or target.is_file():
-        try:
-            target.unlink()
-        except OSError as e:
-            _log.warning("清理旧 skills 链 / 文件失败 %s：%s", target, e)
-            return
-    elif target.is_dir():
-        try:
-            shutil.rmtree(target)
-        except OSError as e:
-            _log.warning("清理旧 skills 目录失败 %s：%s", target, e)
-            return
-
     if source is None:
+        # 无 skills sibling：清掉 target 残留（``remove_guest`` 保留工作区，老 persona
+        # 残留会被新 persona 继承）—— ``link_dir_idempotent`` 不覆盖"无 source"语义，
+        # 单独走 unlink/rmtree。
+        if target.is_symlink() or target.is_file():
+            try:
+                target.unlink()
+            except OSError as e:
+                _log.warning("清理旧 skills 链 / 文件失败 %s：%s", target, e)
+        elif target.is_dir():
+            try:
+                shutil.rmtree(target)
+            except OSError as e:
+                _log.warning("清理旧 skills 目录失败 %s：%s", target, e)
         return
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        target.symlink_to(source, target_is_directory=True)
+    if link_dir_idempotent(
+        target, source, wipe_real_target=True, label="persona skills"
+    ):
         return
-    except (OSError, NotImplementedError) as e:
-        _log.info("symlink %s → %s 失败（%s），退到 copytree", target, source, e)
+    # 链失败（Windows 普通用户无权限）退到 copytree —— skills 是 prompt 资产，拷一份
+    # 静态副本也能工作（agentao SkillManager 只读取 SKILL.md）。
     try:
         shutil.copytree(source, target)
     except OSError as e:

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import ctypes
 import json
 import logging
@@ -38,6 +40,8 @@ from websockets.exceptions import ConnectionClosed
 
 from . import admin, persona_import, trust
 from ._paths import Paths, resolve_under
+from ._persist import write_bytes_atomic
+from .admin import sanitize_fs_name
 from .config import RoomConfigError
 from .events import (
     ChahuaEnvelope,
@@ -50,9 +54,11 @@ from .permissions import DEFAULT_MODE
 from .persona_assets import discover_assets, persona_relative
 from .session import (
     DEFAULT_ROOM_REL,
+    ROOM_SHARE_DIRNAME,
     RoomSession,
     build_room_session,
     discover_rooms,
+    ensure_room_share_dir,
     load_env_files,
 )
 
@@ -83,6 +89,40 @@ INBOUND_UPDATE_USER_MD = "update_user_md"
 INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
+INBOUND_UPLOAD_FILE = "upload_file"
+
+# 单文件上限。WS 入站帧 max=4MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
+# 文件极限 ~3MB。设 2MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
+_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _attach_files_to_text(text: str, files: object) -> str:
+    """把 ``user_message.files`` 列表里的相对路径附到文本末尾。
+
+    每个文件渲染成单独一行 ``<./xxx>`` —— 用户友好可读（保留在 transcript），同时
+    给茶客一个明显的"这里挂了文件，去自己 cwd 下 ``./share/...`` 读"信号。
+
+    防御：``files`` 不是 list / 元素不是 str → 忽略；空串元素跳过；不允许绝对路径
+    或 ``..`` —— ``share/`` 之外的路径不该被一条用户消息暗中塞进上下文。
+    """
+    if not isinstance(files, list):
+        return text
+    refs: list[str] = []
+    for f in files:
+        if not isinstance(f, str):
+            continue
+        s = f.strip()
+        # 同时拒 `/` 和 `\` —— 后者在 Windows 上也是路径分隔符，``s.split("/")`` 单
+        # 拆 forward slash 会让 ``share\..\boom`` 漏过去。
+        parts = s.replace("\\", "/").split("/")
+        if not s or s.startswith("/") or s.startswith("\\") or ".." in parts:
+            _log.warning("user_message: 跳过非法文件引用 %r", f)
+            continue
+        refs.append(f"<./{s}>")
+    if not refs:
+        return text
+    appendix = "\n".join(refs)
+    return f"{text}\n{appendix}" if text else appendix
 
 
 def _import_success_text(result: "persona_import.ImportedPersona") -> str:
@@ -573,6 +613,74 @@ class ChahuaServer:
         _log.info("update_user_avatar: %d 字节已落盘", len(png_bytes))
         self._emit_room_info(sink)
 
+    def _upload_file(
+        self, *, filename: str, content_b64: str, sink: EnvelopeSink
+    ) -> None:
+        """把前端传上来的文件落到房间共享目录 ``<room_dir>/share/``。
+
+        - 文件名经 :func:`sanitize_fs_name` 洗一遍（防 ``../`` traversal 写到 share 外）。
+          洗完为空 / 全点 → 拒。
+        - base64 解码失败 / 超 :data:`_UPLOAD_MAX_BYTES` → 拒。
+        - 重名直接覆盖 —— 用户主动选了同名文件意味着想替换，比"自动加 (1)"明确。
+        - 写盘走 :func:`write_bytes_atomic` —— tmp+rename，写一半被 kill 不留残骸。
+
+        成功 → emit ``file_uploaded`` envelope，data 含 ``rel`` (``share/xxx``)
+        / ``name`` (洗过的文件名) / ``size`` / ``original`` (用户原文件名)。
+        前端拿 ``rel`` 挂 pending pill，下一条 user_message 的 ``files`` 里带上。
+
+        失败 → emit ``notice(level=error)`` 让用户看见原因 —— 与 persona 导入失败的
+        反馈口径一致。
+        """
+        original = filename
+        try:
+            safe_name = sanitize_fs_name(filename, label="filename")
+        except ValueError as e:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"文件名非法：{e}"
+            )
+            return
+        try:
+            data = base64.b64decode(content_b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"上传失败（base64 解码）：{e}"
+            )
+            return
+        if len(data) > _UPLOAD_MAX_BYTES:
+            self._emit_notice(
+                sink,
+                level=NOTICE_LEVEL_ERROR,
+                text=f"文件太大（{len(data)} bytes，上限 {_UPLOAD_MAX_BYTES}）",
+            )
+            return
+        try:
+            share_dir = ensure_room_share_dir(self._session.room_config.room_dir)
+            target = share_dir / safe_name
+            write_bytes_atomic(target, data)
+        except Exception as e:
+            _log.exception("upload_file: 写盘失败 name=%r", safe_name)
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"上传失败：{e}"
+            )
+            return
+        rel = f"{ROOM_SHARE_DIRNAME}/{safe_name}"
+        _log.info("upload_file: %s (%d bytes)", rel, len(data))
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=ChahuaEventType.FILE_UPLOADED,
+                data={
+                    "rel": rel,
+                    "name": safe_name,
+                    "size": len(data),
+                    "original": original,
+                },
+            )
+        )
+
     def _emit_notice(self, sink: EnvelopeSink, *, level: str, text: str) -> None:
         """发一条 ``notice`` envelope —— 给 mutator 返回用户可见的成功 / 失败原因。
 
@@ -864,6 +972,19 @@ class ChahuaServer:
                 sink,
             )
             return
+        if msg_type == INBOUND_UPLOAD_FILE:
+            filename = data.get("filename")
+            content_b64 = data.get("content_b64")
+            if not isinstance(filename, str) or not filename:
+                _log.warning("ignoring upload_file with missing/empty filename")
+                return
+            if not isinstance(content_b64, str) or not content_b64:
+                _log.warning("ignoring upload_file with missing/empty content_b64")
+                return
+            # 上传不动 session、不挡 inflight turn —— 让正在跑的 turn 自然结束；
+            # 文件落房间共享目录，下一条 user_message 才把它带进上下文。
+            self._upload_file(filename=filename, content_b64=content_b64, sink=sink)
+            return
         if msg_type == INBOUND_UPDATE_USER_AVATAR:
             data_uri = data.get("data_uri")
             if not isinstance(data_uri, str) or not data_uri:
@@ -878,8 +999,14 @@ class ChahuaServer:
             _log.warning("ignoring inbound message of unknown type=%r", msg_type)
             return
         text = data.get("text")
-        if not isinstance(text, str) or not text:
-            _log.warning("ignoring user_message with missing/empty text")
+        if not isinstance(text, str):
+            _log.warning("ignoring user_message with missing/non-string text")
+            return
+        files = data.get("files")
+        text = _attach_files_to_text(text, files)
+        if not text:
+            # 用户既没打字也没附文件 —— 没东西可投。
+            _log.warning("ignoring user_message with empty text and no files")
             return
         if self._inflight_alive():
             # 单 in-flight 严格策略：当前 turn 没结束前 drop 后续 user_message。前端

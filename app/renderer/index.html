@@ -154,8 +154,12 @@
     <ul id="messages" aria-live="polite"></ul>
   </div>
   <form id="composer">
+    <button type="button" id="attach-file" class="composer-attach" title="上传文件到房间共享目录（茶客可在 ./share/ 下读取）" disabled>+</button>
+    <input id="file-input" type="file" multiple hidden>
     <div id="composer-wrap">
-      <input id="text" type="text" placeholder="说点什么…  (@ 茶客名 直接点)" autocomplete="off" autofocus>
+      <!-- 已上传待发送的文件 pill 列表。上传成功后挂入；submit 时清空。 -->
+      <ul id="pending-files" class="pending-files" hidden></ul>
+      <textarea id="text" rows="1" placeholder="说点什么…  (@ 茶客名 直接点；Shift+Enter 换行)" autocomplete="off" autofocus></textarea>
       <ul id="mention-dropdown" class="mention-dropdown" hidden></ul>
     </div>
     <button type="submit">发送</button>

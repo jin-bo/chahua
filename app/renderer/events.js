@@ -19,6 +19,8 @@ export const EventType = Object.freeze({
   TOOL_START: "tool_start",
   TOOL_COMPLETE: "tool_complete",
   NOTICE: "notice",
+  // 服务端确认收到一个文件上传：data.rel 是落盘相对路径（share/xxx），前端挂 pending pill。
+  FILE_UPLOADED: "file_uploaded",
 });
 
 export const Status = Object.freeze({
@@ -52,6 +54,9 @@ export const Inbound = Object.freeze({
   // 成功 / 失败都走 NOTICE envelope 回报；前端再用 alert / status 显示。
   IMPORT_PERSONA_FOLDER: "import_persona_folder",
   IMPORT_PERSONA_GITHUB: "import_persona_github",
+  // 上传文件到房间共享目录。payload: {filename, content_b64}。
+  // 服务端校验后写 share/<safe-name>、回 file_uploaded envelope。
+  UPLOAD_FILE: "upload_file",
 });
 
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /

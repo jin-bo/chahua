@@ -66,6 +66,11 @@ class ChahuaEventType(str, Enum):
     # mutator 用 —— 失败原因要让用户看见，成功也想报 sidecar 文件数。不挂房间 turn，
     # turn_id / message_id / guest_name 都为 None。
     NOTICE = "notice"
+    # 服务端确认收到一个文件上传后回吐 —— data 含 `rel`（落盘相对路径，前端
+    # 拼下一条 user_message.files）+ `name`（落盘文件名，去过非法字符）+
+    # `size`（字节）+ `original`（用户原始文件名，可能含已被洗掉的字符）。
+    # 前端拿到后挂入 pendingFiles pill；不挂 turn。
+    FILE_UPLOADED = "file_uploaded"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

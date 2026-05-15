@@ -347,6 +347,9 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   color: #1a3a1a;
   border-top-right-radius: 4px;
 }
+/* 用户气泡走 textContent（不过 markdown），多行 textarea 输入里的 \n 默认会被
+   CSS 折叠成空格 —— pre-wrap 保留换行 + 仍按宽度自动换行。 */
+.bubble-user .text { white-space: pre-wrap; }
 .bubble-header {
   display: flex;
   align-items: center;
@@ -502,16 +505,118 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 }
 #messages li.error .bubble .status-tail { color: #c66; }
 
-#composer { display: flex; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
+#composer { display: flex; align-items: flex-end; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
 #composer-wrap { position: relative; flex: 1; }
-#text { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+
+/* 附件按钮 —— 与发送按钮 / textarea 同尺寸（36px 高），透明底 + 边框，低对比度直到 hover。
+   inline-flex 居中"+"字符：单靠 height + line-height 在不同浏览器对齐有 1~2px 偏差。 */
+.composer-attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin-right: 8px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+  color: #888;
+  background: transparent;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.composer-attach:hover:not(:disabled) { background: #f5f1e6; color: #555; border-color: #999; }
+.composer-attach:disabled { color: #ccc; border-color: #e5e5e5; cursor: not-allowed; }
+
+/* 待发文件 pills —— 浮在输入框上方一行；每个 pill 是文件名 + 右侧 ×。
+   样式参考 mention-dropdown 的 list + 圆角 chip 风。 */
+.pending-files {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pending-files[hidden] { display: none; }
+.pending-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 8px;
+  background: #f5f1e6;
+  border: 1px solid #d0c8b4;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #444;
+  max-width: 220px;
+}
+.pending-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-file-remove {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: #888;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-family: inherit;
+}
+.pending-file-remove:hover { background: #ece5d2; color: #c66; }
+
+/* 多行输入：rows="1" 起步，autoResizeTextarea 撑开到 200px 后切滚动。
+   resize:none 关掉拐角拖动手柄（手动 + 自动两套尺寸源会打架）。
+   高度算式（与发送 / 附件按钮一致到 36px）：
+     padding 7+7 + border 1+1 + line-height 20 = 36
+   line-height 用 px 而非 1.x 倍率，避免不同浏览器对 normal 的解释差出 1~2px。 */
+#text {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font: inherit;
+  line-height: 20px;
+  min-height: 36px;
+  max-height: 200px;
+  resize: none;
+  overflow-y: hidden;
+  display: block;
+}
 #text:focus { outline: none; border-color: #888; }
-#composer button { margin-left: 8px; padding: 8px 16px; border: none; border-radius: 4px; background: #444; color: #fff; cursor: pointer; }
-#composer button:disabled { background: #aaa; cursor: not-allowed; }
+/* 发送按钮 —— 显式 [type="submit"]，避免和 .composer-attach（type="button"）的
+   class 选择器撞 specificity（#composer button 是 (1,0,1)，会盖掉 .composer-attach
+   的 background/padding/border，让附件按钮被错染成发送按钮的深底）。
+   flex-shrink:0 防止"发送"在窄窗下被压成 1 字宽。
+   height:36px + inline-flex 居中 —— 与附件按钮 / textarea 单行视图三者顶 / 底对齐。 */
+#composer button[type="submit"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  height: 36px;
+  margin-left: 8px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 4px;
+  background: #444;
+  color: #fff;
+  cursor: pointer;
+}
+#composer button[type="submit"]:disabled { background: #aaa; cursor: not-allowed; }
 /* 「停止」形态 —— turn 进行中按钮文字切「停止」，背景切沉稳的暗红提示"危险"动作（点
    下去会中断 AI 输出）；不用鲜红是怕跟 status.error 撞 + 视觉刺。 */
-#composer button.stop { background: #a04040; }
-#composer button.stop:hover { background: #b04848; }
+#composer button[type="submit"].stop { background: #a04040; }
+#composer button[type="submit"].stop:hover { background: #b04848; }
 
 /* P3.2.2：@ 补全 dropdown —— 浮在输入框上方，键盘 ↑↓ Enter 选中。 */
 .mention-dropdown {
