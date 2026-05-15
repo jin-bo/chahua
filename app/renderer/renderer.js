@@ -35,6 +35,7 @@ import {
 } from "./chat_view.js";
 import { createMention } from "./mention.js";
 import { createUpload } from "./upload.js";
+import { renderPersonaPicker, createPersonaImport } from "./persona.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -889,51 +890,11 @@ function closeModal(modal) {
   modal.hidden = true;
 }
 
-// 渲染 persona picker：单选 onPick(persona)；多选给 li 加 .selected toggle 状态。
-// excludeNames：当前房间已在场茶客名（添加时禁掉重复项；新建房不传，所有候选都可选）。
-function renderPersonaPicker(rootEl, { multi, excludeNames, onPick }) {
-  rootEl.replaceChildren();
-  if (personasAvailable.length === 0) {
-    const empty = document.createElement("li");
-    empty.className = "persona-empty";
-    empty.textContent = "没有可用的人设。可在 chahua/personas/ 下放置 <name>.md（可选 <name>.png 头像）。";
-    rootEl.appendChild(empty);
-    return;
-  }
-  for (const p of personasAvailable) {
-    const li = document.createElement("li");
-    li.className = "persona-item";
-    li.dataset.persona = p.persona;
-    li.dataset.name = p.name;
-    const img = makeAvatarImg(p.avatar_data_uri, "persona-avatar", p.name);
-    if (img) li.appendChild(img);
-    const name = document.createElement("span");
-    name.className = "persona-name";
-    name.textContent = p.name;
-    li.appendChild(name);
-    if (excludeNames && excludeNames.has(p.name)) {
-      li.classList.add("disabled");
-      const tag = document.createElement("span");
-      tag.className = "persona-hint";
-      tag.textContent = "已在场";
-      li.appendChild(tag);
-    } else {
-      li.addEventListener("click", () => {
-        if (multi) {
-          li.classList.toggle("selected");
-          return;
-        }
-        onPick(p);
-      });
-    }
-    rootEl.appendChild(li);
-  }
-}
-
 addGuestBtn.addEventListener("click", () => {
   if (!connected) return;
   const inRoom = new Set(guests.map((g) => g.name));
   renderPersonaPicker(addGuestListEl, {
+    personas: personasAvailable,
     multi: false,
     excludeNames: inRoom,
     onPick: (p) => {
@@ -955,61 +916,26 @@ addRoomBtn.addEventListener("click", () => {
   newRoomNameEl.value = "";
   newRoomTopicEl.value = "";
   newRoomRulesEl.value = "";
-  renderPersonaPicker(newRoomGuestsEl, { multi: true, excludeNames: null });
+  renderPersonaPicker(newRoomGuestsEl, {
+    personas: personasAvailable,
+    multi: true,
+    excludeNames: null,
+  });
   openModal(addRoomModal);
   newRoomNameEl.focus();
 });
 
-// ── 导入 persona modal ─────────────────────────────────────────────────────
-
-// 重置 modal 状态 —— 每次打开重置选项 / 输入，避免上次输入残留误导用户。
-function resetImportPersonaModal() {
-  const folderRadio = importPersonaModal.querySelector("input[name='import-source'][value='folder']");
-  if (folderRadio) folderRadio.checked = true;
-  importFolderPathEl.value = "";
-  importGithubUrlEl.value = "";
-}
-
-importPersonaBtn.addEventListener("click", () => {
-  if (!connected) return;
-  resetImportPersonaModal();
-  openModal(importPersonaModal);
-});
-
-importFolderPickBtn.addEventListener("click", async () => {
-  // contextBridge 暴露的 main → dialog.showOpenDialog handle —— 返绝对路径或 null。
-  // 没拿到 chahua.pickFolder 说明 preload 旧版（dev hot-reload corner case），给个降级提示。
-  const pickFolder = window.chahua?.pickFolder;
-  if (typeof pickFolder !== "function") {
-    window.alert("当前 Electron 环境不支持文件夹选择，请直接粘贴绝对路径。");
-    importFolderPathEl.readOnly = false;
-    return;
-  }
-  const picked = await pickFolder();
-  if (picked) importFolderPathEl.value = picked;
-});
-
-importPersonaSubmitBtn.addEventListener("click", () => {
-  if (!connected) return;
-  const source = importPersonaModal.querySelector("input[name='import-source']:checked")?.value;
-  if (source === "github") {
-    const url = importGithubUrlEl.value.trim();
-    if (!url) {
-      importGithubUrlEl.focus();
-      return;
-    }
-    ws.send(JSON.stringify({ type: Inbound.IMPORT_PERSONA_GITHUB, url }));
-    setStatus("", `导入 GitHub persona…`);
-  } else {
-    const path = importFolderPathEl.value.trim();
-    if (!path) {
-      window.alert("先选一个目录，或粘贴绝对路径。");
-      return;
-    }
-    ws.send(JSON.stringify({ type: Inbound.IMPORT_PERSONA_FOLDER, path }));
-    setStatus("", `导入本地 persona…`);
-  }
-  closeModal(importPersonaModal);
+createPersonaImport({
+  modal: importPersonaModal,
+  folderPathEl: importFolderPathEl,
+  folderPickBtn: importFolderPickBtn,
+  githubUrlEl: importGithubUrlEl,
+  submitBtn: importPersonaSubmitBtn,
+  importBtn: importPersonaBtn,
+  isConnected: () => connected,
+  send: (payload) => ws.send(JSON.stringify(payload)),
+  setStatus,
+  pickFolder: window.chahua?.pickFolder,
 });
 
 newRoomSubmitEl.addEventListener("click", () => {
