@@ -31,7 +31,19 @@ export const Inbound = Object.freeze({
   SWITCH_ROOM: "switch_room",
   CLEAR_ROOM: "clear_room",
   CANCEL: "cancel",
+  // 茶客 / 房间 增删 —— 镜像 chahua/server.py:INBOUND_*。服务端处理后会重发
+  // room_info(+ history)；前端不做乐观更新，等回环。
+  ADD_GUEST: "add_guest",
+  REMOVE_GUEST: "remove_guest",
+  CREATE_ROOM: "create_room",
+  DELETE_ROOM: "delete_room",
+  UPDATE_USER_MD: "update_user_md",
+  UPDATE_USER_AVATAR: "update_user_avatar",
 });
+
+// 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /
+// "新建房间"提交时给的兜底值，以及"是否显示 V 标"的判定基准（≠ DEFAULT 才显示）。
+export const DEFAULT_PERMISSION = "read-only";
 
 // 镜像 chahua/scoring.py::ScoreKind —— turn_start.data.scores[i].kind 取值。
 // 与 EventType / Status 同性质：wire 协议常量，不是 presentation。

@@ -28,6 +28,9 @@ _MODE_MAP: dict[str, PermissionMode] = {
 
 VALID_MODES: tuple[str, ...] = tuple(_MODE_MAP)
 
+# 默认权限：read-only —— admin / config / server / 前端 picker 共用同一字面量。
+DEFAULT_MODE: str = PermissionMode.READ_ONLY.value
+
 
 def is_valid_mode(mode: str) -> bool:
     """字符串是否是茶话室暴露的合法权限模式。

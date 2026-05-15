@@ -20,14 +20,95 @@
         <button id="clear-room" type="button" class="sidebar-action" disabled>清空聊天</button>
       </div>
       <div class="sidebar-section">
-        <div class="sidebar-title">茶客</div>
+        <div class="sidebar-title">
+          <span>茶客</span>
+          <button id="add-guest" type="button" class="sidebar-add" title="添加茶客" disabled>+</button>
+        </div>
         <ul id="guests"></ul>
       </div>
       <div class="sidebar-section">
-        <div class="sidebar-title">切换房间</div>
+        <div class="sidebar-title">
+          <span>切换房间</span>
+          <button id="add-room" type="button" class="sidebar-add" title="新建房间" disabled>+</button>
+        </div>
         <ul id="rooms"></ul>
       </div>
+      <div class="sidebar-section" id="user-section">
+        <div class="sidebar-title">我</div>
+        <div class="user-row">
+          <span class="user-avatar-wrap" id="user-avatar-wrap"></span>
+          <span class="user-name" id="user-name">—</span>
+        </div>
+        <div class="user-actions">
+          <button id="edit-user-md" type="button" class="sidebar-action" disabled>编辑配置</button>
+          <button id="upload-avatar" type="button" class="sidebar-action" disabled title="支持 PNG / JPG / WebP / GIF（GIF 取首帧），自动居中裁方 + 压到 256px PNG">换头像</button>
+        </div>
+        <input id="avatar-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+      </div>
     </aside>
+
+    <!-- 添加茶客 / 新建房间 modal。click .modal-backdrop 关闭；ESC 也关。-->
+    <div id="add-guest-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>添加茶客</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <ul id="add-guest-list" class="persona-picker"></ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="edit-user-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>编辑用户配置（USER.md）</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">
+            ## 显示名 段下的第一行决定 sidebar / transcript 上"我"的称呼。
+            其它 ## 段会作为偏好喂给茶客打分用。
+          </p>
+          <textarea id="user-md-textarea" class="modal-textarea" spellcheck="false" rows="18"></textarea>
+          <div class="modal-hint" id="user-md-source-hint"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="user-md-submit" type="button" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="add-room-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>新建房间</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <label class="modal-field">
+            <span>房间名</span>
+            <input id="new-room-name" type="text" placeholder="例如：客厅" maxlength="60">
+          </label>
+          <label class="modal-field">
+            <span>话题（可选）</span>
+            <input id="new-room-topic" type="text" placeholder="例如：周末闲聊" maxlength="120">
+          </label>
+          <label class="modal-field">
+            <span>房间规则（可选）</span>
+            <input id="new-room-rules" type="text" placeholder="例如：保持中文、单条不超过 200 字" maxlength="200">
+          </label>
+          <div class="modal-field">
+            <span>选茶客（至少 1 位，多选）</span>
+            <ul id="new-room-guests" class="persona-picker multi"></ul>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="new-room-submit" type="button" class="primary">创建</button>
+        </div>
+      </div>
+    </div>
     <ul id="messages" aria-live="polite"></ul>
   </div>
   <form id="composer">

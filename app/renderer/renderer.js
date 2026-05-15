@@ -14,7 +14,7 @@
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
-import { EventType, Status, Inbound, ScoreKind } from "./events.js";
+import { EventType, Status, Inbound, ScoreKind, DEFAULT_PERMISSION } from "./events.js";
 import { marked } from "../node_modules/marked/lib/marked.esm.js";
 import DOMPurify from "../node_modules/dompurify/dist/purify.es.mjs";
 
@@ -49,6 +49,25 @@ const guestsEl = document.getElementById("guests");
 const roomsEl = document.getElementById("rooms");
 const dropdownEl = document.getElementById("mention-dropdown");
 const clearRoomBtn = document.getElementById("clear-room");
+const addGuestBtn = document.getElementById("add-guest");
+const addRoomBtn = document.getElementById("add-room");
+const addGuestModal = document.getElementById("add-guest-modal");
+const addRoomModal = document.getElementById("add-room-modal");
+const addGuestListEl = document.getElementById("add-guest-list");
+const newRoomNameEl = document.getElementById("new-room-name");
+const newRoomTopicEl = document.getElementById("new-room-topic");
+const newRoomRulesEl = document.getElementById("new-room-rules");
+const newRoomGuestsEl = document.getElementById("new-room-guests");
+const newRoomSubmitEl = document.getElementById("new-room-submit");
+const editUserMdBtn = document.getElementById("edit-user-md");
+const uploadAvatarBtn = document.getElementById("upload-avatar");
+const avatarFileInput = document.getElementById("avatar-file-input");
+const editUserModal = document.getElementById("edit-user-modal");
+const userMdTextarea = document.getElementById("user-md-textarea");
+const userMdSourceHintEl = document.getElementById("user-md-source-hint");
+const userMdSubmitBtn = document.getElementById("user-md-submit");
+const userAvatarWrapEl = document.getElementById("user-avatar-wrap");
+const userNameEl = document.getElementById("user-name");
 
 const wsUrl = window.chahua?.wsUrl;
 if (!wsUrl) {
@@ -74,6 +93,11 @@ const scoreSpansByName = new Map();
 let guests = []; // [{name, permission, isolation, avatar_data_uri}, ...]
 let userDisplayName = "我";
 let userAvatarDataUri = null;
+// 可用 persona 候选（room_info 来时装）—— "添加茶客" / "新建房间"的 picker 用。
+let personasAvailable = []; // [{persona, name, avatar_data_uri}, ...]
+// 用户 USER.md 当前内容 + source 路径（room_info 时装）—— "编辑配置"modal prefill 用。
+let userMdContent = "";
+let userMdSource = null;
 
 // 头像 <img> 通用工厂：dataUri 缺 → 返 null（调用方按"无头像"降级）。
 function makeAvatarImg(dataUri, className, alt) {
@@ -111,6 +135,10 @@ function setInputEnabled(enabled) {
   textInput.disabled = !enabled;
   submitBtn.disabled = !enabled;
   clearRoomBtn.disabled = !enabled;
+  addGuestBtn.disabled = !enabled;
+  addRoomBtn.disabled = !enabled;
+  editUserMdBtn.disabled = !enabled;
+  uploadAvatarBtn.disabled = !enabled;
 }
 
 // 按 currentTurnId 切换 submitBtn 的文字 + class —— 同一个按钮承担「发送 / 停止」
@@ -171,7 +199,7 @@ function makePermissionBadge(permission, className) {
 function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
   const img = makeAvatar(g.name, avatarClassName);
   if (!img) return null;
-  const showBadge = g.permission && g.permission !== "read-only";
+  const showBadge = g.permission && g.permission !== DEFAULT_PERMISSION;
   if (!showBadge) return img;
   const wrap = document.createElement("span");
   wrap.className = "avatar-wrap";
@@ -434,12 +462,19 @@ function renderSidebar(roomInfo) {
   roomTopicEl.textContent = roomInfo.topic || "";
   userDisplayName = roomInfo.user_display_name || "我";
   userAvatarDataUri = roomInfo.user_avatar_data_uri || null;
+  userMdContent = roomInfo.user_md_content || "";
+  userMdSource = roomInfo.user_md_source || null;
+  renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
+  personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
   guestsEl.replaceChildren();
+  // 最后一位茶客不能删（与 server 端 admin.remove_guest 硬约束一致）—— 前端禁用按钮，
+  // 用户少踩一次"提交后才发现不行"的坑。
+  const lastGuestLock = guests.length <= 1;
   for (const g of guests) {
     const li = document.createElement("li");
     // V 标默认浮在头像右上角；缺头像（罕见）时回退到名字后 inline，避免丢失权限提示。
-    const showBadge = g.permission && g.permission !== "read-only";
+    const showBadge = g.permission && g.permission !== DEFAULT_PERMISSION;
     const node = makeAvatarWithPermission(g, "avatar", "permission-badge");
     if (node) li.appendChild(node);
     li.appendChild(makeBadge("guest-name", null, g.name));
@@ -455,6 +490,23 @@ function renderSidebar(roomInfo) {
     score.className = "guest-score";
     li.appendChild(score);
     scoreSpansByName.set(g.name, score);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "row-remove";
+    remove.textContent = "×";
+    if (lastGuestLock) {
+      remove.disabled = true;
+      remove.title = "至少要保留一位茶客";
+    } else {
+      remove.title = `请离 ${g.name}`;
+      remove.addEventListener("click", () => {
+        if (!connected) return;
+        if (!window.confirm(`请离茶客「${g.name}」？\n房间历史不动，guests/${g.name}/ 工作目录也不会被删，但不会再参与对话。`)) return;
+        ws.send(JSON.stringify({ type: Inbound.REMOVE_GUEST, name: g.name }));
+        setStatus("", `请离 ${g.name}…`);
+      });
+    }
+    li.appendChild(remove);
     guestsEl.appendChild(li);
   }
   renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
@@ -465,7 +517,7 @@ function renderSidebar(roomInfo) {
 }
 
 // 切换房间列表 —— 列其它房间（含当前），click 非 current 项发 switch_room frame。
-// 当前房间高亮、不可点；其它房间显示 name + topic 一句话预览。
+// 当前房间高亮、不可点；其它房间显示 name + topic 一句话预览，hover 出现"删除"按钮。
 function renderRoomsList(roomsAvailable, currentRoomId) {
   roomsEl.replaceChildren();
   const rooms = Array.isArray(roomsAvailable) ? roomsAvailable : [];
@@ -473,22 +525,40 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
     const li = document.createElement("li");
     li.dataset.roomId = r.room_id;
     if (r.room_id === currentRoomId) li.classList.add("current");
+    // text 块外裹 .room-meta，方便 row-remove 用 margin-left:auto 推到右侧。
+    const meta = document.createElement("div");
+    meta.className = "room-meta";
     const name = document.createElement("div");
     name.className = "room-name";
     name.textContent = r.name || r.room_id;
-    li.appendChild(name);
+    meta.appendChild(name);
     if (r.topic) {
       const topic = document.createElement("div");
       topic.className = "room-topic";
       topic.textContent = r.topic;
-      li.appendChild(topic);
+      meta.appendChild(topic);
     }
+    li.appendChild(meta);
     if (r.room_id !== currentRoomId) {
       li.addEventListener("click", () => {
         if (!connected) return;
         ws.send(JSON.stringify({ type: Inbound.SWITCH_ROOM, room_id: r.room_id }));
         setStatus("", `切换到 ${r.name || r.room_id}…`);
       });
+      // 删除房间按钮 —— 只对非当前房显示。当前房不能删（先切走再删，与 server 端约束一致）。
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "row-remove";
+      remove.textContent = "×";
+      remove.title = `删除房间 ${r.name || r.room_id}`;
+      remove.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (!connected) return;
+        if (!window.confirm(`删除房间「${r.name || r.room_id}」？\n房间目录及其全部历史 / 摘要 / 茶客工作区会被永久删除，无法撤销。`)) return;
+        ws.send(JSON.stringify({ type: Inbound.DELETE_ROOM, room_id: r.room_id }));
+        setStatus("", `删除 ${r.name || r.room_id}…`);
+      });
+      li.appendChild(remove);
     }
     roomsEl.appendChild(li);
   }
@@ -545,7 +615,7 @@ function showMentionDropdown(candidates, match) {
     if (g.broadcast) li.classList.add("broadcast");
     li.appendChild(makeBadge("mention-name", null, g.name));
     // broadcast 项不显示 permission 徽章；只茶客有 permission 概念。
-    if (!g.broadcast && g.permission && g.permission !== "read-only") {
+    if (!g.broadcast && g.permission && g.permission !== DEFAULT_PERMISSION) {
       li.appendChild(makePermissionBadge(g.permission, "mention-permission"));
     }
     if (g.broadcast) {
@@ -754,6 +824,239 @@ function connect() {
     console.error("ws error", ev);
   });
 }
+
+// ── 添加茶客 / 新建房间 modal ─────────────────────────────────────────
+
+function openModal(modal) {
+  modal.hidden = false;
+}
+
+function closeModal(modal) {
+  modal.hidden = true;
+}
+
+// 渲染 persona picker：单选 onPick(persona)；多选给 li 加 .selected toggle 状态。
+// excludeNames：当前房间已在场茶客名（添加时禁掉重复项；新建房不传，所有候选都可选）。
+function renderPersonaPicker(rootEl, { multi, excludeNames, onPick }) {
+  rootEl.replaceChildren();
+  if (personasAvailable.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "persona-empty";
+    empty.textContent = "没有可用的人设。可在 chahua/personas/ 下放置 <name>.md（可选 <name>.png 头像）。";
+    rootEl.appendChild(empty);
+    return;
+  }
+  for (const p of personasAvailable) {
+    const li = document.createElement("li");
+    li.className = "persona-item";
+    li.dataset.persona = p.persona;
+    li.dataset.name = p.name;
+    const img = makeAvatarImg(p.avatar_data_uri, "persona-avatar", p.name);
+    if (img) li.appendChild(img);
+    const name = document.createElement("span");
+    name.className = "persona-name";
+    name.textContent = p.name;
+    li.appendChild(name);
+    if (excludeNames && excludeNames.has(p.name)) {
+      li.classList.add("disabled");
+      const tag = document.createElement("span");
+      tag.className = "persona-hint";
+      tag.textContent = "已在场";
+      li.appendChild(tag);
+    } else {
+      li.addEventListener("click", () => {
+        if (multi) {
+          li.classList.toggle("selected");
+          return;
+        }
+        onPick(p);
+      });
+    }
+    rootEl.appendChild(li);
+  }
+}
+
+addGuestBtn.addEventListener("click", () => {
+  if (!connected) return;
+  const inRoom = new Set(guests.map((g) => g.name));
+  renderPersonaPicker(addGuestListEl, {
+    multi: false,
+    excludeNames: inRoom,
+    onPick: (p) => {
+      ws.send(JSON.stringify({
+        type: Inbound.ADD_GUEST,
+        persona: p.persona,
+        name: p.name,
+        permission: DEFAULT_PERMISSION,
+      }));
+      setStatus("", `添加茶客 ${p.name}…`);
+      closeModal(addGuestModal);
+    },
+  });
+  openModal(addGuestModal);
+});
+
+addRoomBtn.addEventListener("click", () => {
+  if (!connected) return;
+  newRoomNameEl.value = "";
+  newRoomTopicEl.value = "";
+  newRoomRulesEl.value = "";
+  renderPersonaPicker(newRoomGuestsEl, { multi: true, excludeNames: null });
+  openModal(addRoomModal);
+  newRoomNameEl.focus();
+});
+
+newRoomSubmitEl.addEventListener("click", () => {
+  if (!connected) return;
+  const name = newRoomNameEl.value.trim();
+  if (!name) {
+    newRoomNameEl.focus();
+    return;
+  }
+  const selected = Array.from(newRoomGuestsEl.querySelectorAll("li.persona-item.selected"));
+  if (selected.length === 0) {
+    window.alert("至少选 1 位茶客");
+    return;
+  }
+  const guestsPayload = selected.map((li) => ({
+    persona: li.dataset.persona,
+    name: li.dataset.name,
+    permission: DEFAULT_PERMISSION,
+  }));
+  // room_id 用 name 直接当目录名 —— server 端 normalize_room_id 会再洗一遍非法字符；
+  // 暴露独立 id 字段会增加 UI 复杂度（用户难以理解 id vs name 的区别）。
+  ws.send(JSON.stringify({
+    type: Inbound.CREATE_ROOM,
+    room_id: name,
+    name,
+    topic: newRoomTopicEl.value.trim(),
+    rules: newRoomRulesEl.value.trim(),
+    guests: guestsPayload,
+  }));
+  setStatus("", `新建房间 ${name}…`);
+  closeModal(addRoomModal);
+});
+
+// ── 我（USER.md / 头像）─────────────────────────────────────────────
+
+function renderUserRow() {
+  userNameEl.textContent = userDisplayName;
+  userAvatarWrapEl.replaceChildren();
+  const img = makeAvatarImg(userAvatarDataUri, "user-avatar", userDisplayName);
+  if (img) userAvatarWrapEl.appendChild(img);
+}
+
+editUserMdBtn.addEventListener("click", () => {
+  if (!connected) return;
+  userMdTextarea.value = userMdContent;
+  userMdSourceHintEl.textContent = userMdSource
+    ? `当前文件：${userMdSource}`
+    : "尚无 USER.md，保存后会落到 user_data_root/USER.md。";
+  openModal(editUserModal);
+  userMdTextarea.focus();
+});
+
+userMdSubmitBtn.addEventListener("click", () => {
+  if (!connected) return;
+  ws.send(JSON.stringify({
+    type: Inbound.UPDATE_USER_MD,
+    content: userMdTextarea.value,
+  }));
+  setStatus("", "保存用户配置…");
+  closeModal(editUserModal);
+});
+
+uploadAvatarBtn.addEventListener("click", () => {
+  if (!connected) return;
+  // reset 让相同文件再选也能触发 change（浏览器对同名同源文件默认不再 fire）。
+  avatarFileInput.value = "";
+  avatarFileInput.click();
+});
+
+// 头像上传：浏览器对 PNG / JPEG / WebP / GIF 都能 <img> 原生解码 → 画进 canvas →
+// 一律 toDataURL("image/png") 出去，服务端只认 PNG。也即"用户传 JPG/WebP/GIF，
+// 落盘 PNG"是这里完成的转换。GIF 走 <img> 时 canvas 只能拿到首帧 —— 静态头像
+// 场景下这是符合预期的（动图当头像意义不大、且 PNG 不存动）。中央裁方 + 缩到
+// AVATAR_TARGET_PX 让头像形状一致 + 压缩体积（256×256 PNG 大约 30~80KB）。
+const AVATAR_TARGET_PX = 256;
+// 浏览器 File MIME 走 file.type；accept 已经在 input 上限定，这里再校验一次防御
+// 用户用 drag-drop 等绕路或 type 为空的 corner case。
+const AVATAR_ACCEPTED_MIME = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
+// 用于状态条提示文案 —— 让用户感知到"我传的是 X，落地是 PNG"的转换发生。
+const AVATAR_FORMAT_LABEL = {
+  "image/jpeg": "JPG",
+  "image/webp": "WebP",
+  "image/gif": "GIF",
+};
+
+avatarFileInput.addEventListener("change", () => {
+  const file = avatarFileInput.files?.[0];
+  if (!file) return;
+  if (file.type && !AVATAR_ACCEPTED_MIME.has(file.type)) {
+    window.alert(`不支持的图片格式：${file.type}\n请选 PNG / JPG / WebP / GIF。`);
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    window.alert("图片超过 20MB，挑张小一点的吧。");
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    const dataUri = cropAndEncodeAvatar(img);
+    ws.send(JSON.stringify({
+      type: Inbound.UPDATE_USER_AVATAR,
+      data_uri: dataUri,
+    }));
+    const label = AVATAR_FORMAT_LABEL[file.type];
+    setStatus("", label ? `上传头像（${label} → PNG）…` : "上传头像…");
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    window.alert("图片解码失败，文件可能损坏或格式不被浏览器支持。");
+  };
+  img.src = url;
+});
+
+// 中央裁方 + 等比缩到 AVATAR_TARGET_PX × AVATAR_TARGET_PX。
+// 裁方原因：sidebar / 气泡里的头像 wrapper 都是圆形（border-radius:50%），方形源
+// 截出来的圆刚好居中；矩形源会被 object-fit:cover 切边，不如 server 端就裁齐
+// 让落盘文件本身没浪费像素。原图比目标小则不放大，保留 native 分辨率。
+function cropAndEncodeAvatar(img) {
+  const side = Math.min(img.width, img.height);
+  const sx = Math.floor((img.width - side) / 2);
+  const sy = Math.floor((img.height - side) / 2);
+  const target = Math.min(AVATAR_TARGET_PX, side);
+  const canvas = document.createElement("canvas");
+  canvas.width = target;
+  canvas.height = target;
+  const ctx = canvas.getContext("2d");
+  // 缩放质量 —— 浏览器默认 imageSmoothingQuality 是 "low"，"high" 在缩图时
+  // 视觉差异明显（128px 头像里头发 / 五官清晰度肉眼可辨）。
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, sx, sy, side, side, 0, 0, target, target);
+  return canvas.toDataURL("image/png");
+}
+
+// modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
+const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal];
+for (const modal of ALL_MODALS) {
+  modal.addEventListener("click", (ev) => {
+    if (ev.target === modal) closeModal(modal);
+    if (ev.target.matches("[data-close]")) closeModal(modal);
+  });
+}
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  for (const m of ALL_MODALS) if (!m.hidden) closeModal(m);
+});
 
 // 清空聊天：本地不抢先清 DOM，让回环一致 —— 服务端清完会重发 room_info +
 // room_history(空)，renderSidebar 一帧 messagesEl.replaceChildren；失败 / 服务端拒收

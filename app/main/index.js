@@ -34,6 +34,27 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 let sidecar = null;
+let shutdownPromise = null;
+
+// 单一关停入口：normal quit（before-quit）/ SIGINT / SIGTERM 都汇到这里。
+// shutdownPromise 单例化保证 stop() 只跑一遍 —— Ctrl+C 后 Electron 自己也会
+// emit before-quit，二次 entry 直接复用同一个 Promise 不重复 stop。
+async function shutdownAndExit(exitCode = 0) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const runningSidecar = sidecar;
+    sidecar = null;
+    if (runningSidecar) {
+      try {
+        await runningSidecar.stop();
+      } catch (err) {
+        console.error("[chahua] sidecar 关停异常:", err);
+      }
+    }
+    app.exit(exitCode);
+  })();
+  return shutdownPromise;
+}
 
 async function createWindow(wsUrl) {
   // Electron 内部维持 BrowserWindow 引用，模块级 mainWindow 不必要（避免 P3.3+
@@ -81,14 +102,17 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
-let quitting = false;
 app.on("before-quit", (e) => {
-  if (quitting || !sidecar) return;
-  quitting = true;
+  if (shutdownPromise || !sidecar) return;
   e.preventDefault();
-  const s = sidecar;
-  sidecar = null;
-  s.stop()
-    .catch((err) => console.error("[chahua] sidecar 关停异常:", err))
-    .finally(() => app.exit(0));
+  shutdownAndExit(0);
 });
+
+// PowerShell Ctrl+C 在 Windows 上把 SIGINT 直接发到 electron.exe，可能不走
+// before-quit；POSIX 上终端 Ctrl+C 在 dev `npm run dev` 链路里也直接砸到 Node。
+// 显式接 SIGINT/SIGTERM → shutdownAndExit，避免 sidecar 留孤儿。
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    shutdownAndExit(0);
+  });
+}

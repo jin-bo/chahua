@@ -18,7 +18,32 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   overflow-y: auto;
 }
 .sidebar-section { margin-bottom: 16px; }
-.sidebar-title { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.sidebar-title {
+  font-size: 11px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+/* sidebar 标题右侧的"+"按钮 —— 添加茶客 / 新建房间。低对比度，但比 row-remove 略显眼。 */
+.sidebar-add {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: #888;
+  background: transparent;
+  border: 1px solid #d0c8b4;
+  border-radius: 50%;
+  cursor: pointer;
+  font-family: inherit;
+}
+.sidebar-add:hover:not(:disabled) { background: #ece5d2; color: #555; }
+.sidebar-add:disabled { color: #ccc; border-color: #e5e0d0; cursor: not-allowed; }
 .sidebar-room-name { font-weight: 600; color: #555; }
 .sidebar-room-topic { font-size: 12px; color: #888; margin-top: 2px; }
 /* 「清空聊天」按钮 —— 故意做小、低对比度，把误点门槛抬高（confirm() 在 click 路径
@@ -114,6 +139,34 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 行内"删除"按钮 —— hover 行时浮现。茶客行 / 房间行共用：圆角小红 ×。
+   disabled（最后一位茶客）灰色不响应。 */
+.row-remove {
+  margin-left: 6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: #c66;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+  font-family: inherit;
+}
+#guests li:hover .row-remove,
+#rooms li:hover .row-remove,
+.row-remove:focus { opacity: 1; }
+.row-remove:hover:not(:disabled) { background: #fbe6e6; border-color: #f5b3b3; }
+.row-remove:disabled { color: #ccc; cursor: not-allowed; opacity: 0; }
+
+/* 房间行：左侧 meta 块（name + topic），右侧 row-remove。 */
+#rooms li { display: flex; align-items: center; }
+#rooms li .room-meta { flex: 1; min-width: 0; }
 
 /* isolation 占位徽章 —— P4 接真值时这里读 data-isolation 区分 room / global。 */
 #guests li .isolation-badge {
@@ -362,4 +415,196 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   font-size: 10px;
   color: #a07a3a;
   letter-spacing: 0.5px;
+}
+
+/* "我"section —— sidebar 底部，头像 + 显示名 + 编辑配置 / 换头像。 */
+#user-section .user-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+#user-section .user-avatar-wrap {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #e8e3d6;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+#user-section .user-avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+#user-section .user-name {
+  color: #444;
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#user-section .user-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+#user-section .user-actions .sidebar-action { margin-top: 0; }
+
+/* modal —— 添加茶客 / 新建房间 / 编辑用户配置 共用样式。
+   backdrop 全屏半透明；.modal 居中卡片。点 backdrop 自身 / × 按钮 / ESC 都能关。 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-backdrop[hidden] { display: none; }
+.modal {
+  background: #fbf8f1;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  min-width: 360px;
+  max-width: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e8e3d6;
+  font-weight: 600;
+  color: #555;
+}
+.modal-close {
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  color: #888;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  font-family: inherit;
+}
+.modal-close:hover { color: #333; }
+.modal-body {
+  padding: 12px 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+.modal-footer {
+  padding: 10px 16px;
+  border-top: 1px solid #e8e3d6;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.modal-footer button.primary {
+  padding: 6px 16px;
+  background: #6b4f2a;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.modal-footer button.primary:hover { background: #7a5a32; }
+.modal-field {
+  display: block;
+  margin-bottom: 12px;
+}
+.modal-field > span {
+  display: block;
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 4px;
+}
+.modal-field input[type="text"] {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.modal-field input[type="text"]:focus { outline: none; border-color: #888; }
+
+/* 编辑 USER.md 用 —— 等宽字体（用户在写半结构化 markdown） + 较大默认高度。 */
+.modal-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #fff;
+  resize: vertical;
+  min-height: 240px;
+}
+.modal-textarea:focus { outline: none; border-color: #888; }
+.modal-hint {
+  font-size: 11px;
+  color: #888;
+  margin: 4px 0 8px;
+  line-height: 1.4;
+}
+
+/* persona picker —— 单选模式（添加茶客）click 即 dispatch；
+   多选模式（.multi，新建房间）click 切 .selected。 */
+.persona-picker { list-style: none; margin: 0; padding: 0; }
+.persona-picker .persona-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #444;
+}
+.persona-picker .persona-item:hover:not(.disabled) { background: #ece5d2; }
+.persona-picker .persona-item.disabled { color: #aaa; cursor: not-allowed; }
+.persona-picker .persona-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.persona-picker .persona-name { flex: 1; }
+.persona-picker .persona-hint {
+  font-size: 11px;
+  color: #aaa;
+}
+/* 多选模式选中态 —— 左侧实心圆点替代 checkbox，避免新引入控件。 */
+.persona-picker.multi .persona-item.selected {
+  background: #d8c9a3;
+  color: #2a200f;
+}
+.persona-picker.multi .persona-item.selected::before {
+  content: "✓";
+  color: #6b4f2a;
+  font-weight: bold;
+  width: 14px;
+  text-align: center;
+}
+.persona-picker.multi .persona-item:not(.selected)::before {
+  content: "";
+  width: 14px;
+}
+.persona-picker .persona-empty {
+  padding: 12px;
+  color: #888;
+  font-size: 12px;
+  font-style: italic;
 }

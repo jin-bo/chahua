@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -35,9 +36,11 @@ from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+from . import admin
 from ._paths import Paths, resolve_under
 from .config import RoomConfigError
 from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink
+from .permissions import DEFAULT_MODE
 from .session import (
     DEFAULT_ROOM_REL,
     RoomSession,
@@ -52,11 +55,23 @@ _log = logging.getLogger(__name__)
 DEFAULT_PORT = 7860
 DEFAULT_HOST = "127.0.0.1"
 
+# 入站帧上限。``websockets`` 默认 1MB —— 头像 PNG 上限 1.5MB（admin._AVATAR_MAX_BYTES）
+# × 4/3 base64 ≈ 2MB，再加 JSON quoting 必爆默认。设 4MB 给上传留头：用户传 1.5MB
+# 上限的 PNG 不会被默默断线（websockets 会发 1009 + close 链接，sidecar 看上去是
+# 中途挂掉，排查噩梦）。
+_WS_MAX_INBOUND_BYTES = 4 * 1024 * 1024
+
 # 客户端 → 服务端 message type 字段值。
 INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
 INBOUND_CLEAR_ROOM = "clear_room"
 INBOUND_CANCEL = "cancel"
+INBOUND_ADD_GUEST = "add_guest"
+INBOUND_REMOVE_GUEST = "remove_guest"
+INBOUND_CREATE_ROOM = "create_room"
+INBOUND_DELETE_ROOM = "delete_room"
+INBOUND_UPDATE_USER_MD = "update_user_md"
+INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -106,7 +121,9 @@ class ChahuaServer:
         """起 ws server，跑到 ``stop`` 被 set。关闭由 :func:`serve` 的 ``__aexit__``
         兜底（停 accept + 等已连接客户端处理完）。
         """
-        async with serve(self._handle, self._host, self._port):
+        async with serve(
+            self._handle, self._host, self._port, max_size=_WS_MAX_INBOUND_BYTES
+        ):
             # 这行 "监听 ws://" 措辞被 app/main/sidecar.js 的 SIDECAR_READY_RE
             # 字符串匹配 —— 改文案时同步那边的正则。
             print(
@@ -240,8 +257,20 @@ class ChahuaServer:
                     "guests": guests,
                     "user_display_name": self._session.user_config.display_name,
                     "user_avatar_data_uri": self._session.user_config.read_avatar_data_uri(),
+                    # 完整 USER.md 原文 + source 路径 —— 前端"编辑配置"modal 拿来 prefill
+                    # textarea。无 USER.md（user_config.full_md=None）→ 空串 + source=null，
+                    # 编辑器从空白起步，保存时 server 落到 user_data_root/USER.md。
+                    "user_md_content": self._session.user_config.full_md or "",
+                    "user_md_source": (
+                        str(self._session.user_config.source)
+                        if self._session.user_config.source is not None
+                        else None
+                    ),
                     "current_room_id": rc.room_dir.name,
                     "rooms_available": discover_rooms(self._paths),
+                    # 已在场茶客的 name 也在 personas_available 里 —— 前端按
+                    # guests[].name 去重显示，避免 picker 列出重复人选。
+                    "personas_available": admin.discover_personas(self._paths),
                 },
             )
         )
@@ -290,20 +319,168 @@ class ChahuaServer:
             _log.warning("switch_room: room_id=%r 目录不存在：%s", room_id, new_room_dir)
             self._emit_room_info(sink)
             return
+        if not self._replace_session(new_room_dir, sink, label=f"switch_room→{room_id!r}"):
+            return
+        _log.info("switch_room: → %r", room_id)
+        self._emit_room_snapshot(sink)
+
+    def _replace_session(
+        self, new_room_dir: Path, sink: EnvelopeSink, *, label: str
+    ) -> bool:
+        """共用：装配 `new_room_dir` 的新 session 替换 `self._session`，旧 session close。
+
+        失败 → WARN + emit 当前 room_info（让前端 UI 状态复位）+ 返回 ``False``，
+        调用方自行决定后续动作。
+
+        三处调用：换房（`_switch_room`）、加/删茶客（`_add_guest`/`_remove_guest`，
+        房间路径不变 但要重建 agentao instances）、新建房 + 切换（`_create_room`）。
+        """
         try:
             new_session = build_room_session(new_room_dir, paths=self._paths)
         except Exception:
-            _log.exception("switch_room: build_room_session 失败 room_id=%r", room_id)
+            _log.exception("%s: build_room_session 失败", label)
             self._emit_room_info(sink)
-            return
+            return False
         old = self._session
         self._session = new_session
         try:
             old.close()
         except Exception:
-            _log.exception("switch_room: 旧 session close 出错（已切换，忽略）")
-        _log.info("switch_room: → %r", room_id)
+            _log.exception("%s: 旧 session close 出错（已切换，忽略）", label)
+        return True
+
+    def _add_guest(
+        self,
+        *,
+        persona: str,
+        name: Optional[str],
+        permission: str,
+        sink: EnvelopeSink,
+    ) -> None:
+        """往当前房间加一位茶客：改 room.toml + 重装 session + 重发 snapshot。"""
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.add_guest(
+                paths=self._paths,
+                room_dir=room_dir,
+                persona=persona,
+                name=name,
+                permission=permission,
+            )
+        except Exception:
+            _log.exception("add_guest: persona=%r name=%r 失败", persona, name)
+            # 写 toml 失败 / 校验失败：room.toml 已被回滚到 snapshot，session 还是旧的。
+            # 重发 snapshot 让前端 UI 复位（添加按钮的 loading 等状态消除）。
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="add_guest"):
+            return
+        _log.info("add_guest: %r 加入 room=%r", name or persona, room_dir.name)
         self._emit_room_snapshot(sink)
+
+    def _remove_guest(self, *, name: str, sink: EnvelopeSink) -> None:
+        """从当前房间移除一位茶客：改 room.toml + 重装 session + 重发 snapshot。"""
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.remove_guest(paths=self._paths, room_dir=room_dir, name=name)
+        except Exception:
+            _log.exception("remove_guest: name=%r 失败", name)
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="remove_guest"):
+            return
+        _log.info("remove_guest: %r 离开 room=%r", name, room_dir.name)
+        self._emit_room_snapshot(sink)
+
+    def _create_room(
+        self,
+        *,
+        room_id: str,
+        name: str,
+        topic: str,
+        rules: str,
+        guests: list,
+        sink: EnvelopeSink,
+    ) -> None:
+        """新建房间 + 切换到它：mkdir + 写 toml + load 校验 + replace session + emit snapshot。"""
+        try:
+            rc = admin.create_room(
+                paths=self._paths,
+                room_id=room_id,
+                name=name,
+                topic=topic,
+                rules=rules,
+                guests=guests,
+            )
+        except Exception:
+            _log.exception("create_room: room_id=%r 失败", room_id)
+            # 创建失败：磁盘已 rmtree 回滚（admin.create_room 内部）；前端没切走，重发当
+            # 前 snapshot 让"创建中…"按钮态归位。
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(rc.room_dir, sink, label=f"create_room→{rc.room_dir.name!r}"):
+            return
+        _log.info("create_room: → %r", rc.room_dir.name)
+        self._emit_room_snapshot(sink)
+
+    def _update_user_md(self, *, content: str, sink: EnvelopeSink) -> None:
+        """覆盖 USER.md + 原地 reload user_config（不重装整个 session）+ 重发 snapshot。
+
+        优先沿用 user_config.source（若用户用了 room 级 USER.md 或 explicit override，
+        编辑就改那个；不偷偷新建 user_data_root/USER.md 让两份并存）。
+
+        在 ``reload_user_config`` 之前不需要 cancel inflight —— ``_handle_inbound`` 已经
+        cancel 过了，且 user_config 是纯数据 swap，没有"半个茶客"的中间态。
+        """
+        try:
+            admin.update_user_md(
+                self._paths,
+                content,
+                source=self._session.user_config.source,
+            )
+        except Exception:
+            _log.exception("update_user_md 失败")
+            self._emit_room_snapshot(sink)
+            return
+        self._session.reload_user_config(self._paths)
+        _log.info("update_user_md: %d 字节已落盘", len(content))
+        self._emit_room_snapshot(sink)
+
+    def _update_user_avatar(self, *, data_uri: str, sink: EnvelopeSink) -> None:
+        """覆盖 USER.png；不重装 session（avatar 不是 UserConfig 字段，靠 sidebar 重发即可）。
+
+        admin 层 cache_clear 已让下次 read_avatar_data_uri 拿到新文件；这里只发 room_info
+        让前端拿到新 user_avatar_data_uri，transcript 不动 —— 用 _emit_room_info 而非全
+        snapshot，省一次历史回放。
+        """
+        try:
+            png_bytes = admin.parse_png_data_uri(data_uri)
+            admin.update_user_avatar(
+                self._paths,
+                png_bytes,
+                source=self._session.user_config.source,
+            )
+        except Exception:
+            _log.exception("update_user_avatar 失败")
+            self._emit_room_info(sink)
+            return
+        _log.info("update_user_avatar: %d 字节已落盘", len(png_bytes))
+        self._emit_room_info(sink)
+
+    def _delete_room(self, *, room_id: str, sink: EnvelopeSink) -> None:
+        """删除一个非当前房间。当前房间在 admin.delete_room 那层硬拒。"""
+        current = self._session.room_config.room_dir.name
+        try:
+            admin.delete_room(
+                paths=self._paths, room_id=room_id, current_room_id=current
+            )
+        except Exception:
+            _log.exception("delete_room: room_id=%r 失败", room_id)
+            self._emit_room_snapshot(sink)
+            return
+        _log.info("delete_room: %r 已删", room_id)
+        # 房间没动当前 session —— 只重发 room_info 让 sidebar 列表更新（rooms_available 少一项）。
+        self._emit_room_info(sink)
 
     def _emit_room_snapshot(self, sink: EnvelopeSink) -> None:
         """下发 room_info + room_history —— 前端拿来全量复位 sidebar + 消息区。
@@ -399,6 +576,87 @@ class ChahuaServer:
         if msg_type == INBOUND_CLEAR_ROOM:
             await self._cancel_and_drain_inflight()
             self._clear_room(sink)
+            return
+        if msg_type == INBOUND_ADD_GUEST:
+            persona = data.get("persona")
+            if not isinstance(persona, str) or not persona:
+                _log.warning("ignoring add_guest with missing/empty persona")
+                return
+            name = data.get("name")
+            if name is not None and not isinstance(name, str):
+                _log.warning("add_guest.name 必须是字符串或 null，收到 %r", type(name))
+                return
+            permission = data.get("permission") or DEFAULT_MODE
+            if not isinstance(permission, str):
+                _log.warning("add_guest.permission 必须是字符串")
+                return
+            await self._cancel_and_drain_inflight()
+            self._add_guest(
+                persona=persona, name=name, permission=permission, sink=sink
+            )
+            return
+        if msg_type == INBOUND_REMOVE_GUEST:
+            name = data.get("name")
+            if not isinstance(name, str) or not name:
+                _log.warning("ignoring remove_guest with missing/empty name")
+                return
+            await self._cancel_and_drain_inflight()
+            self._remove_guest(name=name, sink=sink)
+            return
+        if msg_type == INBOUND_CREATE_ROOM:
+            room_id = data.get("room_id")
+            name = data.get("name")
+            if not isinstance(room_id, str) or not room_id:
+                _log.warning("ignoring create_room with missing/empty room_id")
+                return
+            if not isinstance(name, str) or not name:
+                _log.warning("ignoring create_room with missing/empty name")
+                return
+            topic = data.get("topic") or ""
+            rules = data.get("rules") or ""
+            guests = data.get("guests")
+            if not isinstance(guests, list) or not guests:
+                _log.warning("ignoring create_room with missing/empty guests")
+                return
+            # 防御：guests 每项至少要 persona 字段 —— admin.create_room 也校验，这里
+            # 早一步报"前端协议不对"而不是被动等到 KeyError。
+            if not all(isinstance(g, dict) and isinstance(g.get("persona"), str) and g["persona"]
+                       for g in guests):
+                _log.warning("create_room.guests 每项必须含 persona:str")
+                return
+            await self._cancel_and_drain_inflight()
+            self._create_room(
+                room_id=room_id,
+                name=name,
+                topic=topic if isinstance(topic, str) else "",
+                rules=rules if isinstance(rules, str) else "",
+                guests=guests,
+                sink=sink,
+            )
+            return
+        if msg_type == INBOUND_DELETE_ROOM:
+            room_id = data.get("room_id")
+            if not isinstance(room_id, str) or not room_id:
+                _log.warning("ignoring delete_room with missing/empty room_id")
+                return
+            await self._cancel_and_drain_inflight()
+            self._delete_room(room_id=room_id, sink=sink)
+            return
+        if msg_type == INBOUND_UPDATE_USER_MD:
+            content = data.get("content")
+            if not isinstance(content, str):
+                _log.warning("ignoring update_user_md with non-string content")
+                return
+            await self._cancel_and_drain_inflight()
+            self._update_user_md(content=content, sink=sink)
+            return
+        if msg_type == INBOUND_UPDATE_USER_AVATAR:
+            data_uri = data.get("data_uri")
+            if not isinstance(data_uri, str) or not data_uri:
+                _log.warning("ignoring update_user_avatar with missing/empty data_uri")
+                return
+            # 头像写不动 session，无需 cancel inflight —— 让正在跑的 turn 自然结束。
+            self._update_user_avatar(data_uri=data_uri, sink=sink)
             return
         if msg_type != INBOUND_USER_MESSAGE:
             # 友好容忍：未知 type 不断连，仅 WARN。前端在协议升级期发新 type 时
@@ -499,9 +757,19 @@ async def _serve(args: argparse.Namespace) -> int:
         except NotImplementedError:
             pass
 
+    # 平台分流：POSIX 走 stdin EOF（child.stdin.end() → 收 EOF → set stop）；Windows
+    # ProactorEventLoop 上 connect_read_pipe(sys.stdin) 拿 WinError 6 静默挂掉，stdin
+    # 路径形同虚设，改走 OpenProcess + WaitForSingleObject 监 Electron owner PID。
     stdin_watcher_task: Optional[asyncio.Task] = None
-    if not sys.stdin.isatty():
+    if os.name != "nt" and not sys.stdin.isatty():
         stdin_watcher_task = asyncio.create_task(_watch_stdin_eof(stop))
+    parent_watcher_task: Optional[asyncio.Task] = None
+    if os.name == "nt":
+        owner_pid = _owner_pid_from_env()
+        if owner_pid > 0:
+            parent_watcher_task = asyncio.create_task(
+                _watch_parent_process(stop, owner_pid)
+            )
 
     try:
         await server.serve_forever(stop)
@@ -510,6 +778,8 @@ async def _serve(args: argparse.Namespace) -> int:
         server.close()
         if stdin_watcher_task and not stdin_watcher_task.done():
             stdin_watcher_task.cancel()
+        if parent_watcher_task and not parent_watcher_task.done():
+            parent_watcher_task.cancel()
     return 0
 
 
@@ -546,6 +816,80 @@ async def _watch_stdin_eof(stop: asyncio.Event) -> None:
             log.info("stdin EOF received; shutting down")
             stop.set()
             return
+
+
+def _owner_pid_from_env() -> int:
+    """Electron 通过 ``CHAHUA_PARENT_PID`` 显式喂自己的 PID 给 sidecar 用作 owner。
+
+    返回 0 = 没有可监控的 owner（独立跑 ``uv run chahua-server`` 时常态）。**不**回退
+    到 ``os.getppid()`` —— dev 模式 ppid 指向 wrapper（``uv.exe`` / shell），监它退出
+    会让 sidecar 在不该退的时刻退（比如 PowerShell 关掉但 Electron 还活着）。
+    """
+    raw = os.environ.get("CHAHUA_PARENT_PID")
+    if not raw:
+        return 0
+    try:
+        pid = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).debug("invalid CHAHUA_PARENT_PID=%r", raw)
+        return 0
+    return pid if pid > 0 else 0
+
+
+async def _watch_parent_process(stop: asyncio.Event, parent_pid: int) -> None:
+    """Windows 下监 owner 进程退出 → set stop。
+
+    OpenProcess + WaitForSingleObject 的同步阻塞调用走 ``asyncio.to_thread`` 丢到
+    执行线程，await 完成后回到事件循环主线程继续 set stop —— 不必走
+    ``call_soon_threadsafe``。task 在 ``_serve.finally`` 里 cancel；CancelledError
+    silent return，避免进程正常退出时这边补 ERROR 日志。
+    """
+    log = logging.getLogger(__name__)
+    try:
+        await asyncio.to_thread(_wait_for_parent_exit_windows, parent_pid)
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        log.debug("parent watcher disabled: %s", e)
+        return
+    if not stop.is_set():
+        log.info("parent process exited; shutting down")
+        stop.set()
+
+
+def _wait_for_parent_exit_windows(parent_pid: int) -> None:
+    """阻塞等待 Windows owner 进程退出。仅由 :func:`_watch_parent_process` via to_thread 调用。
+
+    ctypes argtypes / restype 必须显式声明：64 位 Windows 上 ``HANDLE`` 是指针
+    （8 字节），ctypes 默认按 C ``int``（4 字节）截断，handle 高位被砍后
+    ``WaitForSingleObject`` 拿到坏 handle 立刻返 ``WAIT_FAILED`` 让 sidecar 启动
+    秒退。这是隐性 bug，不写 argtypes 在小 PID 下偶然能跑、handle 高位非零时翻车。
+    """
+    if parent_pid <= 0:
+        return
+
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+
+    SYNCHRONIZE = 0x00100000
+    INFINITE = 0xFFFFFFFF
+
+    handle = k32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+    if not handle:
+        # PID 不存在 / 权限不足 —— 没法监控就不监，不当 ERROR（owner 已经死了
+        # 也走这条路径，调用方靠 stop 没被 set 来推断）。
+        return
+    try:
+        k32.WaitForSingleObject(handle, INFINITE)
+    finally:
+        k32.CloseHandle(handle)
 
 
 def main() -> None:

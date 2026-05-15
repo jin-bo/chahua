@@ -77,6 +77,27 @@ def write_json_atomic(path: Path, data: object) -> None:
     os.replace(tmp, path)
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """原子写整段文本（UTF-8）。``room.toml`` / ``USER.md`` 等小文件共用，避免写一半
+    被 kill 留下半截内容。父目录不存在时自动创建（这些目标 mutator 入口才有，没有
+    "构造期一次性 mkdir"的承诺）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """原子写整段二进制。头像 PNG 走这里 —— 同 :func:`write_text_atomic`，
+    内容是字节而非 UTF-8 文本。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 def read_json_or_none(path: Path) -> object | None:
     """读整个 JSON 文件；不存在 / 解析失败 → ``None`` + WARN。
 

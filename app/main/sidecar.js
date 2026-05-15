@@ -124,6 +124,10 @@ async function startSidecar({ paths, logsDir }) {
         PYTHONUNBUFFERED: "1",
         CHAHUA_APP_ROOT: appRoot,
         CHAHUA_USER_DATA: userDataRoot,
+        // Windows 下 sidecar 用这个 PID 走 OpenProcess(SYNCHRONIZE) +
+        // WaitForSingleObject 监 owner 退出，绕开 Ctrl+C 不走 before-quit 的孤儿
+        // 路径。POSIX 不读这个 env，仍走 stdin EOF watcher。
+        CHAHUA_PARENT_PID: String(process.pid),
       },
       // stdin 改 ``pipe`` —— P3.3.2.d stop() 关 stdin 写端给 python 优雅关停信号。
       // python 端 _watch_stdin_eof 监 EOF；stdin 是 tty 时不装 watcher 避抢字符。

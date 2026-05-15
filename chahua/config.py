@@ -23,11 +23,28 @@ from __future__ import annotations
 import base64
 import tomllib
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from ._paths import Paths, resolve_under
-from .permissions import VALID_MODES, is_valid_mode
+from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
+
+
+@lru_cache(maxsize=128)
+def read_avatar_data_uri(persona_path: Path) -> Optional[str]:
+    """与 persona md sibling 同名的 ``.png`` → ``data:image/png;base64,...``；缺图返 ``None``。
+
+    本函数被 sidebar 渲染（每次 ``room_info``）和 :func:`chahua.admin.discover_personas`
+    （每次 ``room_info``）共调，每次都会读 PNG + base64 编码 5 次 30KB ≈ 150KB 的 CPU /
+    内存浪费。``@lru_cache`` 按 absolute path key 一次性记住编码结果；persona 文件极少
+    被替换，cache stale 的概率几乎为 0；如真要换图，重启 sidecar 即可。
+    """
+    try:
+        data = persona_path.read_bytes()
+    except FileNotFoundError:
+        return None
+    return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
 
 # [room] 段允许的键。P1.5 故意保持小。
 _ALLOWED_ROOM_KEYS: frozenset[str] = frozenset(
@@ -74,16 +91,12 @@ class GuestConfig:
     def read_avatar_data_uri(self) -> Optional[str]:
         """头像约定：与 persona md sibling 同名只换 ``.png``（``chahua/personas/宝总.png``）。
 
-        返回 ``data:image/png;base64,...`` data URI；找不到文件返 ``None``，前端按缺省渲染
-        （不挂 ``<img>``）。压缩到 128px PNG 时一张 ~30KB，5 茶客约 150KB on wire 单帧塞得下；
-        将来加更大的人头或更多茶客时（>1MB room_info）再改成按需懒拉。
+        缺图返 ``None``，前端按缺省渲染（不挂 ``<img>``）。压缩到 128px PNG 时一张
+        ~30KB，5 茶客约 150KB on wire 单帧塞得下；将来加更大的人头或更多茶客时
+        （>1MB room_info）再改成按需懒拉。结果由模块级 :func:`read_avatar_data_uri`
+        memoize（cache 命中跨 sidebar / picker 共享）。
         """
-        avatar = self.persona_path.with_suffix(".png")
-        try:
-            data = avatar.read_bytes()
-        except FileNotFoundError:
-            return None
-        return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+        return read_avatar_data_uri(self.persona_path.with_suffix(".png"))
 
     def workspace_in(self, room_dir: Path) -> Path:
         """茶客的 ``working_directory`` 约定 = ``<room_dir>/guests/<name>/``。
@@ -238,7 +251,7 @@ def _build_guests(
         persona_path = hit.resolve()
 
         permission_raw = _as_str(
-            g.get("permission") or "read-only",
+            g.get("permission") or DEFAULT_MODE,
             label=f"[[guest]] {name!r} permission",
             toml_path=toml_path,
         )

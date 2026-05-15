@@ -140,6 +140,27 @@ class RoomSession:
                 # 一位关失败不该阻止其他茶客清理 —— 但要留痕。
                 _log.exception("guest %s close failed", guest.name)
 
+    def reload_user_config(self, paths: Paths) -> None:
+        """重 load USER.md，原地替换 session + orchestrator 上的 user_config。
+
+        ``RoomSession`` 整体 ``frozen=True`` 是为了挡 orchestrator / room / guests 这些
+        持 in-flight 状态的句柄被外部 rebind；``user_config`` 是纯数据（display_name /
+        preferences_block / full_md），换它不会让 LLM client / transcript 文件指针错位。
+        所以这里走 ``object.__setattr__`` 受控 bypass，比"为了改一字段重建 5 个 Agentao
+        实例 + 重 load 整本 transcript"省得多。
+
+        调用者：``server._update_user_md`` —— 用户在 UI 编辑了 USER.md 之后。
+        """
+        new_uc = load_user_md(
+            user_data_root=paths.user_data_root,
+            room_dir=self.room_config.room_dir,
+            explicit=self.room_config.user_md_override,
+        )
+        object.__setattr__(self, "user_config", new_uc)
+        self.orchestrator.user_config = new_uc
+        # _display_map 缓存了 USER_SPEAKER_ID → display_name；改名要清缓存才生效。
+        self.orchestrator._display_for = None
+
 
 def discover_rooms(paths: Paths) -> list[dict]:
     """扫 ``user_data_root/rooms/*/room.toml``，返回 ``[{room_id, name, topic}, ...]``，
