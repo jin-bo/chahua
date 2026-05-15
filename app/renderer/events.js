@@ -42,6 +42,7 @@ export const Inbound = Object.freeze({
   // room_info(+ history)；前端不做乐观更新，等回环。
   ADD_GUEST: "add_guest",
   REMOVE_GUEST: "remove_guest",
+  UPDATE_GUEST_PERMISSION: "update_guest_permission",
   CREATE_ROOM: "create_room",
   DELETE_ROOM: "delete_room",
   UPDATE_USER_MD: "update_user_md",

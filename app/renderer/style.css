@@ -116,6 +116,85 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   border: 1.5px solid #f5f1e6;
   box-sizing: content-box;
 }
+/* 权限 popover 入口 —— sidebar 头像 / 名字 可点改权限。hover 时给点视觉反馈，
+   光标变 pointer 提示可交互。 */
+#guests li .permission-anchor { cursor: pointer; }
+#guests li .avatar.permission-anchor:hover,
+#guests li .avatar-wrap.permission-anchor:hover { opacity: 0.85; }
+#guests li .guest-name.permission-anchor:hover { color: #6b4f2a; text-decoration: underline; }
+
+/* 权限 popover 卡片 —— fixed 定位由 renderer.js 计算（贴 anchor 右侧）。
+   宽度限定区间，避免短描述时太窄/长描述时撑爆。z-index 高于 modal-backdrop（100），
+   保证从 modal 里触发的 popover 也可见（虽然当前没这条路径，留余地）。 */
+.permission-popover {
+  background: #fff;
+  border: 1px solid #d0c8b4;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  padding: 6px;
+  z-index: 200;
+  min-width: 240px;
+  max-width: 300px;
+  font-family: inherit;
+}
+.permission-popover-title {
+  font-size: 11px;
+  color: #888;
+  padding: 4px 6px 6px;
+  border-bottom: 1px solid #f0ebe0;
+  margin-bottom: 4px;
+}
+.permission-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  color: #444;
+}
+.permission-option:hover:not(.current) { background: #f5f1e6; }
+.permission-option.current { background: #ece5d2; cursor: default; }
+/* 左侧小色点 —— 与 .permission-badge 同 [data-permission] 配色，read-only 中性灰。
+   不复用 .permission-badge（V 标）—— popover 里的 ✓ 字符会混淆"已选"语义。 */
+.permission-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  background: #bbb;
+}
+.permission-swatch[data-permission="workspace-write"] { background: #4a90e2; }
+.permission-swatch[data-permission="full-access"] { background: #d05050; }
+.permission-option-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.permission-option-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+}
+.permission-option-current {
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: normal;
+  color: #888;
+}
+.permission-option-desc {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.35;
+}
+
 /* 切换房间列表。当前高亮 + cursor default；其它项可点。 */
 #rooms { list-style: none; margin: 0; padding: 0; }
 #rooms li {

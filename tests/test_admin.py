@@ -188,6 +188,45 @@ def test_remove_last_guest_refused(paths):
         admin.remove_guest(paths=paths, room_dir=rc.room_dir, name="宝总")
 
 
+def test_update_guest_permission_persists(paths):
+    rc = _seed_room(
+        paths,
+        with_guests=[
+            {"persona": "chahua/personas/宝总.md", "permission": "read-only"},
+            {"persona": "chahua/personas/汪小姐.md", "permission": "read-only"},
+        ],
+    )
+    rc2 = admin.update_guest_permission(
+        paths=paths, room_dir=rc.room_dir, name="宝总", permission="full-access"
+    )
+    perms = {g.name: g.permission for g in rc2.guests}
+    assert perms == {"宝总": "full-access", "汪小姐": "read-only"}
+    # 重 load 也看到 —— 写盘真生效。
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.guests[0].permission == "full-access"
+
+
+def test_update_guest_permission_rejects_invalid(paths):
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    with pytest.raises(ValueError, match="permission"):
+        admin.update_guest_permission(
+            paths=paths, room_dir=rc.room_dir, name="宝总", permission="god-mode"
+        )
+    # PLAN 是 agentao 内部模式，茶话室不暴露 —— 也拒。
+    with pytest.raises(ValueError, match="permission"):
+        admin.update_guest_permission(
+            paths=paths, room_dir=rc.room_dir, name="宝总", permission="plan"
+        )
+
+
+def test_update_guest_permission_unknown_name(paths):
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    with pytest.raises(ValueError, match="不在房间"):
+        admin.update_guest_permission(
+            paths=paths, room_dir=rc.room_dir, name="不在场", permission="workspace-write"
+        )
+
+
 def test_remove_unknown_guest_refused(paths):
     rc = _seed_room(
         paths,

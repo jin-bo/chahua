@@ -27,7 +27,7 @@ from typing import Optional, Sequence
 from ._paths import Paths, _package_install_root
 from ._persist import write_bytes_atomic, write_text_atomic
 from .config import RoomConfig, RoomConfigError, load_room_config, read_avatar_data_uri
-from .permissions import DEFAULT_MODE
+from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 
 _log = logging.getLogger(__name__)
 
@@ -343,6 +343,33 @@ def remove_guest(*, paths: Paths, room_dir: Path, name: str) -> RoomConfig:
         raise ValueError(f"茶客 {name!r} 不在房间里")
     if not new_guests:
         raise ValueError("不能移除最后一位茶客（房间至少要有 1 人）")
+    return _rewrite_and_validate(room_dir, snapshot, new_guests, paths)
+
+
+def update_guest_permission(
+    *, paths: Paths, room_dir: Path, name: str, permission: str
+) -> RoomConfig:
+    """改一位茶客的 permission，返回新的 ``RoomConfig``。
+
+    ``permission`` 必须在 :data:`chahua.permissions.VALID_MODES` 内（PLAN 等隐藏模式拒）；
+    名字不在册 → ValueError。改完即 reload —— 单点在写盘到生效之间不存在"半个状态"。
+
+    本函数只动 ``room.toml``。session 重装让新 permission 真正生效（茶客 close + 重建
+    agentao instance）是调用方的事（server._update_guest_permission 走 _replace_session）。
+    """
+    if not is_valid_mode(permission):
+        raise ValueError(f"permission={permission!r} 不在 {VALID_MODES} 内")
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    new_guests: list[dict] = []
+    found = False
+    for g in snapshot["guests"]:
+        if g["name"] == name:
+            new_guests.append({**g, "permission": permission})
+            found = True
+        else:
+            new_guests.append(g)
+    if not found:
+        raise ValueError(f"茶客 {name!r} 不在房间里")
     return _rewrite_and_validate(room_dir, snapshot, new_guests, paths)
 
 

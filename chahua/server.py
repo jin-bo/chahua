@@ -74,6 +74,7 @@ INBOUND_CLEAR_ROOM = "clear_room"
 INBOUND_CANCEL = "cancel"
 INBOUND_ADD_GUEST = "add_guest"
 INBOUND_REMOVE_GUEST = "remove_guest"
+INBOUND_UPDATE_GUEST_PERMISSION = "update_guest_permission"
 INBOUND_CREATE_ROOM = "create_room"
 INBOUND_DELETE_ROOM = "delete_room"
 INBOUND_UPDATE_USER_MD = "update_user_md"
@@ -397,6 +398,32 @@ class ChahuaServer:
         _log.info("add_guest: %r 加入 room=%r", name or persona, room_dir.name)
         self._emit_room_snapshot(sink)
 
+    def _update_guest_permission(
+        self, *, name: str, permission: str, sink: EnvelopeSink
+    ) -> None:
+        """改一位茶客 permission：改 room.toml + 重装 session + 重发 snapshot。
+
+        session 重装是必要的 —— permission 挂在 agent.permission_engine + tool_runner 上
+        （:func:`chahua.permissions.apply_permission_mode`），运行时切要么挨个茶客重新
+        ``apply_permission_mode``、要么直接重建。后者复用 :meth:`_replace_session`
+        与 add/remove guest 同口径，简单可靠。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.update_guest_permission(
+                paths=self._paths, room_dir=room_dir, name=name, permission=permission
+            )
+        except Exception:
+            _log.exception(
+                "update_guest_permission: name=%r permission=%r 失败", name, permission
+            )
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="update_guest_permission"):
+            return
+        _log.info("update_guest_permission: %r → %r", name, permission)
+        self._emit_room_snapshot(sink)
+
     def _remove_guest(self, *, name: str, sink: EnvelopeSink) -> None:
         """从当前房间移除一位茶客：改 room.toml + 重装 session + 重发 snapshot。"""
         room_dir = self._session.room_config.room_dir
@@ -670,6 +697,24 @@ class ChahuaServer:
                 return
             await self._cancel_and_drain_inflight()
             self._remove_guest(name=name, sink=sink)
+            return
+        if msg_type == INBOUND_UPDATE_GUEST_PERMISSION:
+            name = data.get("name")
+            permission = data.get("permission")
+            if not isinstance(name, str) or not name:
+                _log.warning(
+                    "ignoring update_guest_permission with missing/empty name"
+                )
+                return
+            if not isinstance(permission, str) or not permission:
+                _log.warning(
+                    "ignoring update_guest_permission with missing/empty permission"
+                )
+                return
+            await self._cancel_and_drain_inflight()
+            self._update_guest_permission(
+                name=name, permission=permission, sink=sink
+            )
             return
         if msg_type == INBOUND_CREATE_ROOM:
             room_id = data.get("room_id")

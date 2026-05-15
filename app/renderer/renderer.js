@@ -217,6 +217,120 @@ function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
   return wrap;
 }
 
+// ── 权限 popover（点 sidebar 头像）───────────────────────────────────
+//
+// 三档权限文案 + 描述 —— 镜像 chahua/permissions.py 的 VALID_MODES。颜色与
+// .permission-badge 的 [data-permission] 同枚举，read-only 不挂底色（默认浅灰）。
+// 改这里的 value 字符串要跟 chahua/permissions.py::PermissionMode 同步。
+const PERMISSION_OPTIONS = Object.freeze([
+  { value: "read-only", label: "只读", desc: "仅看/搜索，不写文件、不跑 shell" },
+  { value: "workspace-write", label: "工作区可写", desc: "可写茶客工作目录、跑常规命令" },
+  { value: "full-access", label: "完全访问", desc: "放行所有工具（含潜在破坏性，谨慎）" },
+]);
+
+let permissionPopoverGuest = null;
+
+function closePermissionPopover() {
+  const pop = document.querySelector(".permission-popover");
+  if (pop) pop.remove();
+  document.removeEventListener("mousedown", _popoverOutsideHandler, true);
+  document.removeEventListener("keydown", _popoverEscHandler);
+  permissionPopoverGuest = null;
+}
+
+function _popoverOutsideHandler(ev) {
+  const pop = document.querySelector(".permission-popover");
+  if (!pop) return;
+  // 点 popover 自身或当前 anchor 头像不关 —— 让用户在选项之间来回看；其它一律关。
+  if (pop.contains(ev.target)) return;
+  closePermissionPopover();
+}
+
+function _popoverEscHandler(ev) {
+  if (ev.key === "Escape") {
+    ev.stopPropagation();
+    closePermissionPopover();
+  }
+}
+
+// 在 anchor 元素附近浮出权限选择 popover。再次点同一头像 → 切回关闭（toggle）。
+function showPermissionPopover(anchor, g) {
+  if (permissionPopoverGuest === g.name) {
+    closePermissionPopover();
+    return;
+  }
+  closePermissionPopover();
+  const current = g.permission || DEFAULT_PERMISSION;
+  const pop = document.createElement("div");
+  pop.className = "permission-popover";
+  const title = document.createElement("div");
+  title.className = "permission-popover-title";
+  title.textContent = `设置「${g.name}」的权限`;
+  pop.appendChild(title);
+  for (const opt of PERMISSION_OPTIONS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "permission-option";
+    btn.dataset.permission = opt.value;
+    if (opt.value === current) btn.classList.add("current");
+    // 左侧色点：与 V 标同色，read-only 用中性灰；视觉一眼分档。
+    const swatch = document.createElement("span");
+    swatch.className = "permission-swatch";
+    swatch.dataset.permission = opt.value;
+    btn.appendChild(swatch);
+    const meta = document.createElement("span");
+    meta.className = "permission-option-meta";
+    const label = document.createElement("span");
+    label.className = "permission-option-label";
+    label.textContent = opt.label;
+    if (opt.value === current) {
+      const tag = document.createElement("span");
+      tag.className = "permission-option-current";
+      tag.textContent = "（当前）";
+      label.appendChild(tag);
+    }
+    meta.appendChild(label);
+    const desc = document.createElement("span");
+    desc.className = "permission-option-desc";
+    desc.textContent = opt.desc;
+    meta.appendChild(desc);
+    btn.appendChild(meta);
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (opt.value === current) {
+        closePermissionPopover();
+        return;
+      }
+      ws.send(JSON.stringify({
+        type: Inbound.UPDATE_GUEST_PERMISSION,
+        name: g.name,
+        permission: opt.value,
+      }));
+      setStatus("", `设置「${g.name}」权限为 ${opt.label}…`);
+      closePermissionPopover();
+    });
+    pop.appendChild(btn);
+  }
+  document.body.appendChild(pop);
+  // 定位：贴 anchor 右侧；右侧不够（窄窗 / sidebar 贴边）退到 anchor 下方。
+  const rect = anchor.getBoundingClientRect();
+  pop.style.position = "fixed";
+  pop.style.left = `${Math.round(rect.right + 8)}px`;
+  pop.style.top = `${Math.round(rect.top)}px`;
+  const popRect = pop.getBoundingClientRect();
+  if (popRect.right > window.innerWidth - 8) {
+    const fallbackLeft = Math.max(8, rect.left);
+    pop.style.left = `${Math.round(fallbackLeft)}px`;
+    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
+  }
+  permissionPopoverGuest = g.name;
+  // 下一 tick 才挂 outside handler —— 否则当前 click（冒泡到 document）会立刻关掉。
+  setTimeout(() => {
+    document.addEventListener("mousedown", _popoverOutsideHandler, true);
+    document.addEventListener("keydown", _popoverEscHandler);
+  }, 0);
+}
+
 // ── 消息流渲染 ───────────────────────────────────────────────────────
 //
 // 茶客发言（li.msg / li.error）：头像 + 气泡（header: 名字 + 打分徽章 / body: 文字），左对齐。
@@ -464,6 +578,9 @@ function renderSidebar(roomInfo) {
   scoresByName = new Map();
   scoreSpansByName.clear();
   messagesEl.replaceChildren();
+  // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
+  // 位置就指向虚空了，干脆关掉。
+  closePermissionPopover();
   setStatus("ok", `已连接 ${wsUrl}`);
   roomNameEl.textContent = roomInfo.room_name || "—";
   roomTopicEl.textContent = roomInfo.topic || "";
@@ -483,8 +600,27 @@ function renderSidebar(roomInfo) {
     // V 标默认浮在头像右上角；缺头像（罕见）时回退到名字后 inline，避免丢失权限提示。
     const showBadge = g.permission && g.permission !== DEFAULT_PERMISSION;
     const node = makeAvatarWithPermission(g, "avatar", "permission-badge");
-    if (node) li.appendChild(node);
-    li.appendChild(makeBadge("guest-name", null, g.name));
+    // 头像 / 名字都可点 —— 点了开"设置权限"popover。头像存在则 click anchor 用头像，
+    // 否则 fall through 到名字徽章（保证用户始终能找到入口）。
+    if (node) {
+      node.classList.add("permission-anchor");
+      node.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
+      node.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (!connected) return;
+        showPermissionPopover(node, g);
+      });
+      li.appendChild(node);
+    }
+    const nameBadge = makeBadge("guest-name", null, g.name);
+    nameBadge.classList.add("permission-anchor");
+    nameBadge.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
+    nameBadge.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (!connected) return;
+      showPermissionPopover(node || nameBadge, g);
+    });
+    li.appendChild(nameBadge);
     if (!node && showBadge) {
       li.appendChild(makePermissionBadge(g.permission, "permission-badge"));
     }
