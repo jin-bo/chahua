@@ -36,7 +36,7 @@ from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from . import admin, persona_import
+from . import admin, persona_import, trust
 from ._paths import Paths, resolve_under
 from .config import RoomConfigError
 from .events import (
@@ -47,6 +47,7 @@ from .events import (
     NOTICE_LEVEL_INFO,
 )
 from .permissions import DEFAULT_MODE
+from .persona_assets import discover_assets, persona_relative
 from .session import (
     DEFAULT_ROOM_REL,
     RoomSession,
@@ -75,6 +76,7 @@ INBOUND_CANCEL = "cancel"
 INBOUND_ADD_GUEST = "add_guest"
 INBOUND_REMOVE_GUEST = "remove_guest"
 INBOUND_UPDATE_GUEST_PERMISSION = "update_guest_permission"
+INBOUND_SET_PERSONA_MCP_TRUST = "set_persona_mcp_trust"
 INBOUND_CREATE_ROOM = "create_room"
 INBOUND_DELETE_ROOM = "delete_room"
 INBOUND_UPDATE_USER_MD = "update_user_md"
@@ -255,15 +257,33 @@ class ChahuaServer:
         ``room_info_delta`` wire 帧增量下发。
         """
         rc = self._session.room_config
-        guests = [
-            {
+        guests: list[dict] = []
+        for gc in rc.guests:
+            assets = discover_assets(gc.persona_path)
+            persona_rel = persona_relative(gc.persona_path, self._paths)
+            mcp_trusted = bool(
+                assets.has_mcp and trust.is_mcp_trusted(self._paths, persona_rel)
+            )
+            # mcp_servers 在 envelope 里是 command / args 摘要 —— 让用户在勾"信任"前
+            # 能看清 persona 想跑啥；不附 env / cwd 等 corner-case 字段，完整内容看 mcp.json。
+            mcp_summary: list[dict] = []
+            if assets.has_mcp:
+                for name, cfg in assets.mcp_servers.items():
+                    mcp_summary.append({
+                        "name": name,
+                        "command": str(cfg.get("command", "")),
+                        "args": [str(a) for a in (cfg.get("args") or [])],
+                    })
+            guests.append({
                 "name": gc.name,
                 "permission": gc.permission,
                 "isolation": "room",
                 "avatar_data_uri": gc.read_avatar_data_uri(),
-            }
-            for gc in rc.guests
-        ]
+                "persona_rel": persona_rel,
+                "mcp_trusted": mcp_trusted,
+                "mcp_servers": mcp_summary,
+                "skills_available": list(assets.skills_available),
+            })
         sink(
             ChahuaEnvelope(
                 room_id=self._session.room.name,
@@ -396,6 +416,46 @@ class ChahuaServer:
         if not self._replace_session(room_dir, sink, label="add_guest"):
             return
         _log.info("add_guest: %r 加入 room=%r", name or persona, room_dir.name)
+        self._emit_room_snapshot(sink)
+
+    def _set_persona_mcp_trust(
+        self, *, persona_rel: str, trusted: bool, sink: EnvelopeSink
+    ) -> None:
+        """改一份 persona 的 MCP 信任状态：写信任清单 + 重装当前 session + 重发 snapshot。
+
+        信任是 user-level（跨房），但只有当前房间载着这位 persona 的茶客时改的"立刻生效"
+        才有意义；本函数只重装当前 session，其它房间下次进房时自然拿到新状态。
+
+        ``persona_rel`` 校验：必须命中当前房间某位茶客的 persona —— 防止前端发任意路径
+        让我们写任意 trust 键（攻击面有限但口径要严）。
+        """
+        # 校验：本房间确实有这位 persona 的茶客，避免被注入任意 trust 键。
+        rc = self._session.room_config
+        known = {
+            persona_relative(gc.persona_path, self._paths) for gc in rc.guests
+        }
+        if persona_rel not in known:
+            _log.warning(
+                "set_persona_mcp_trust: persona_rel=%r 不在本房间茶客列表 %s 内，拒绝",
+                persona_rel, sorted(known),
+            )
+            self._emit_room_info(sink)
+            return
+        try:
+            trust.set_mcp_trust(self._paths, persona_rel, trusted)
+        except Exception:
+            _log.exception(
+                "set_persona_mcp_trust: persona_rel=%r trusted=%r 写盘失败",
+                persona_rel, trusted,
+            )
+            self._emit_room_snapshot(sink)
+            return
+        _log.info(
+            "set_persona_mcp_trust: %s → %s", persona_rel, "trusted" if trusted else "untrusted"
+        )
+        room_dir = rc.room_dir
+        if not self._replace_session(room_dir, sink, label="set_persona_mcp_trust"):
+            return
         self._emit_room_snapshot(sink)
 
     def _update_guest_permission(
@@ -697,6 +757,24 @@ class ChahuaServer:
                 return
             await self._cancel_and_drain_inflight()
             self._remove_guest(name=name, sink=sink)
+            return
+        if msg_type == INBOUND_SET_PERSONA_MCP_TRUST:
+            persona_rel = data.get("persona_rel")
+            trusted = data.get("trusted")
+            if not isinstance(persona_rel, str) or not persona_rel:
+                _log.warning(
+                    "ignoring set_persona_mcp_trust with missing/empty persona_rel"
+                )
+                return
+            if not isinstance(trusted, bool):
+                _log.warning(
+                    "set_persona_mcp_trust.trusted 必须是 bool，收到 %r", type(trusted)
+                )
+                return
+            await self._cancel_and_drain_inflight()
+            self._set_persona_mcp_trust(
+                persona_rel=persona_rel, trusted=trusted, sink=sink
+            )
             return
         if msg_type == INBOUND_UPDATE_GUEST_PERMISSION:
             name = data.get("name")

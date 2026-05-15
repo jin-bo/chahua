@@ -8,6 +8,7 @@ CLI 与 :mod:`chahua.server` 共用同一口径；同时给 SDK-style 调用（�
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import tomllib
@@ -23,9 +24,11 @@ from .config import RoomConfig, load_room_config
 from .cursor import GuestCursor
 from .guest import TeaGuest
 from .orchestrator import Orchestrator, OrchestratorConfig
+from .persona_assets import discover_assets, persona_relative
 from .room import Room
 from .scoring import IntentScorer
 from .summarizer import Summarizer
+from .trust import is_mcp_trusted
 from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
 
 _log = logging.getLogger(__name__)
@@ -94,16 +97,40 @@ def _make_llm_client() -> tuple[LLMClient, str]:
 
 
 def _build_guests(
-    room_config: RoomConfig, llm_client: LLMClient, room: Room
+    room_config: RoomConfig,
+    llm_client: LLMClient,
+    room: Room,
+    paths: Paths,
 ) -> list[tuple[TeaGuest, str]]:
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
     每位茶客的 ``working_directory`` 走 :meth:`GuestConfig.workspace_in`（约定
     ``<room_dir>/guests/<name>/``）。
+
+    persona sibling 的 ``mcp.json`` / ``skills/`` 走两套不同的信任策略：
+
+    - **skills**：只要 ``<persona_dir>/skills/`` 存在就装载（SKILL.md 是 prompt，
+      不直接执行任何东西；read-only 茶客读了也只能"建议"，跑不出真破坏）。无 sibling
+      时不传 SkillManager，Agentao 自己起默认实例。
+    - **mcp**：默认不装载。仅当用户在 UI 里勾过"信任此 persona 的 MCP"
+      （:func:`chahua.trust.is_mcp_trusted` 返回 True）才把 ``mcpServers`` 喂给
+      Agentao —— mcp.json 里的 ``command`` + ``args`` 是任意可执行，未经用户判断
+      不该自动启动。
     """
     out: list[tuple[TeaGuest, str]] = []
     for gc in room_config.guests:
         persona_md = gc.read_persona()
+        assets = discover_assets(gc.persona_path)
+        if assets.has_mcp:
+            persona_rel = persona_relative(gc.persona_path, paths)
+            if not is_mcp_trusted(paths, persona_rel):
+                _log.info(
+                    "guest %s: persona %s 带 mcp.json 但未受信任，跳过 MCP 装载",
+                    gc.name, persona_rel,
+                )
+                # PersonaAssets frozen → dataclasses.replace 出一份 mcp_servers=None
+                # 的副本喂 TeaGuest；skills_dir / skills_available 不动（skills 不进信任门控）。
+                assets = dataclasses.replace(assets, mcp_servers=None)
         guest = TeaGuest(
             name=gc.name,
             persona_md=persona_md,
@@ -111,6 +138,7 @@ def _build_guests(
             working_directory=gc.workspace_in(room_config.room_dir),
             room=room,
             permission=gc.permission,
+            assets=assets,
         )
         out.append((guest, persona_md))
     return out
@@ -230,7 +258,7 @@ def build_room_session(
     )
     room.add_participant(USER_SPEAKER_ID)
 
-    guest_entries = _build_guests(room_config, llm_client, room)
+    guest_entries = _build_guests(room_config, llm_client, room, paths)
     guests = [g for g, _ in guest_entries]
 
     orchestrator = Orchestrator(

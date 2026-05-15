@@ -35,6 +35,7 @@ from .events import (
     new_message_id,
 )
 from .permissions import apply_permission_mode
+from .persona_assets import PersonaAssets
 from .room import Message, Room
 from .transport_bridge import ChahuaTransport
 
@@ -53,6 +54,7 @@ class TeaGuest:
         working_directory: Path,
         room: Room,
         permission: str = "read-only",
+        assets: Optional[PersonaAssets] = None,
     ) -> None:
         self.name = name
         self.room = room
@@ -70,15 +72,19 @@ class TeaGuest:
             loaded_sources=[],
         )
 
+        if assets is not None:
+            assets.materialize_skills(self.working_directory)
+
         self.agent = Agentao(
             working_directory=self.working_directory,
             llm_client=llm_client,
             project_instructions=persona_md,
             transport=self._transport,
             permission_engine=permission_engine,
+            extra_mcp_servers=assets.mcp_servers if assets else None,
         )
 
-        # 必须在 Agentao 构造完成后调 —— tool_runner 是构造时装配的。
+        # tool_runner 是 Agentao.__init__ 里装的，read-only 拦截必须在那之后才能套上。
         apply_permission_mode(self.agent, permission)
 
     @property

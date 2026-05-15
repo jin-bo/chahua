@@ -195,6 +195,64 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   line-height: 1.35;
 }
 
+/* popover 内的 MCP / Skills 摘要段 —— 用分隔线起头，与上面的 permission 选项分开。
+   "信任 MCP" 勾选 + server 列表 / skill 列表都套同一组样式。 */
+.permission-popover .popover-section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #f0ebe0;
+}
+.permission-popover .popover-section-title {
+  font-size: 11px;
+  color: #888;
+  padding: 0 6px 4px;
+}
+.popover-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: #444;
+  cursor: pointer;
+  line-height: 1.35;
+}
+.popover-checkbox input[type="checkbox"] {
+  margin-top: 2px;
+  cursor: pointer;
+}
+.popover-mcp-list,
+.popover-skills-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 6px 0 20px;
+}
+.popover-mcp-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+.popover-mcp-name {
+  color: #444;
+  font-weight: 500;
+}
+.popover-mcp-cmd {
+  color: #888;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popover-skills-list li {
+  padding: 1px 0;
+  font-size: 11px;
+  color: #555;
+  list-style: disc;
+}
+
 /* 切换房间列表。当前高亮 + cursor default；其它项可点。 */
 #rooms { list-style: none; margin: 0; padding: 0; }
 #rooms li {

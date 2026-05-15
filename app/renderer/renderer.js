@@ -311,6 +311,8 @@ function showPermissionPopover(anchor, g) {
     });
     pop.appendChild(btn);
   }
+  appendMcpSection(pop, g);
+  appendSkillsSection(pop, g);
   document.body.appendChild(pop);
   // 定位：贴 anchor 右侧；右侧不够（窄窗 / sidebar 贴边）退到 anchor 下方。
   const rect = anchor.getBoundingClientRect();
@@ -329,6 +331,87 @@ function showPermissionPopover(anchor, g) {
     document.addEventListener("mousedown", _popoverOutsideHandler, true);
     document.addEventListener("keydown", _popoverEscHandler);
   }, 0);
+}
+
+// MCP 因为带来"任意可执行"风险，必须用户显式勾才装载；skills 是 prompt，无门控只展示。
+function appendListSection(pop, { title, listClass, items, renderItem, head }) {
+  if (items.length === 0 && !head) return;
+  const sec = document.createElement("div");
+  sec.className = "popover-section";
+  const titleEl = document.createElement("div");
+  titleEl.className = "popover-section-title";
+  titleEl.textContent = title;
+  sec.appendChild(titleEl);
+  if (head) sec.appendChild(head);
+  if (items.length > 0) {
+    const list = document.createElement("ul");
+    list.className = listClass;
+    for (const it of items) {
+      const li = document.createElement("li");
+      renderItem(li, it);
+      list.appendChild(li);
+    }
+    sec.appendChild(list);
+  }
+  pop.appendChild(sec);
+}
+
+function appendMcpSection(pop, g) {
+  const servers = Array.isArray(g.mcp_servers) ? g.mcp_servers : [];
+  if (servers.length === 0) return;
+  // change 事件发 inbound；server 收到后重装 session，新 mcp_trusted 回流。
+  const head = document.createElement("label");
+  head.className = "popover-checkbox";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = !!g.mcp_trusted;
+  cb.addEventListener("change", () => {
+    if (!connected) {
+      cb.checked = !cb.checked;
+      return;
+    }
+    const trusted = cb.checked;
+    ws.send(JSON.stringify({
+      type: Inbound.SET_PERSONA_MCP_TRUST,
+      persona_rel: g.persona_rel,
+      trusted,
+    }));
+    setStatus(
+      "",
+      trusted
+        ? `信任「${g.name}」的 MCP 服务器…`
+        : `撤销对「${g.name}」MCP 的信任…`,
+    );
+    closePermissionPopover();
+  });
+  head.append(cb, document.createTextNode("信任此 persona 的 MCP（持续生效，跨房间）"));
+  appendListSection(pop, {
+    title: "MCP 服务器",
+    listClass: "popover-mcp-list",
+    items: servers,
+    head,
+    renderItem: (li, s) => {
+      const name = document.createElement("span");
+      name.className = "popover-mcp-name";
+      name.textContent = s.name;
+      const cmd = document.createElement("span");
+      cmd.className = "popover-mcp-cmd";
+      const args = Array.isArray(s.args) ? s.args : [];
+      cmd.textContent = `${s.command || "?"} ${args.join(" ")}`.trim();
+      cmd.title = cmd.textContent;
+      li.append(name, cmd);
+    },
+  });
+}
+
+function appendSkillsSection(pop, g) {
+  const skills = Array.isArray(g.skills_available) ? g.skills_available : [];
+  appendListSection(pop, {
+    title: "Skills（持续加载）",
+    listClass: "popover-skills-list",
+    items: skills,
+    renderItem: (li, s) => { li.textContent = s; },
+  });
 }
 
 // ── 消息流渲染 ───────────────────────────────────────────────────────

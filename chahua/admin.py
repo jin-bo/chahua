@@ -24,10 +24,11 @@ import shutil
 from pathlib import Path
 from typing import Optional, Sequence
 
-from ._paths import Paths, _package_install_root
+from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
 from .config import RoomConfig, RoomConfigError, load_room_config, read_avatar_data_uri
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
+from .persona_assets import persona_relative, search_roots
 
 _log = logging.getLogger(__name__)
 
@@ -44,10 +45,10 @@ PERSONAS_REL_DIR = Path("chahua/personas")
 def _search_roots(paths: Paths) -> tuple[Path, Path, Path]:
     """与 :meth:`Paths.find_in_data_then_app` 同序的三档 root。
 
-    单点定义"persona / asset 搜索优先级"，正向（discover）/ 反向（_persona_to_relative）
-    都从这里读，避免两处硬编排序漂移。
+    单点定义委托给 :func:`chahua.persona_assets.search_roots` —— admin.discover_personas
+    与 persona_relative 共享同一口径，避免漂移。
     """
-    return (paths.user_data_root, paths.app_root, _package_install_root())
+    return search_roots(paths)
 
 
 def discover_personas(paths: Paths) -> list[dict]:
@@ -229,13 +230,12 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> dict:
 
 
 def _persona_to_relative(persona_path: Path, paths: Paths) -> str:
-    """绝对 persona_path → 相对 `chahua/personas/<x>.md`（如可能），保持 toml 写法稳定。"""
-    for root in _search_roots(paths):
-        try:
-            return str(persona_path.relative_to(root))
-        except ValueError:
-            continue
-    return str(persona_path)
+    """绝对 persona_path → 相对 `chahua/personas/<x>.md`（如可能），保持 toml 写法稳定。
+
+    单点委托给 :func:`chahua.persona_assets.persona_relative` —— admin 写 toml 与
+    trust 索引、room_info envelope 三处的 persona 字符串 key 共享同一口径，避免漂移。
+    """
+    return persona_relative(persona_path, paths)
 
 
 # ── room CRUD ────────────────────────────────────────────────────────────

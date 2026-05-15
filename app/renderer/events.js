@@ -43,6 +43,7 @@ export const Inbound = Object.freeze({
   ADD_GUEST: "add_guest",
   REMOVE_GUEST: "remove_guest",
   UPDATE_GUEST_PERMISSION: "update_guest_permission",
+  SET_PERSONA_MCP_TRUST: "set_persona_mcp_trust",
   CREATE_ROOM: "create_room",
   DELETE_ROOM: "delete_room",
   UPDATE_USER_MD: "update_user_md",
