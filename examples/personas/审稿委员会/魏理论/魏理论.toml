@@ -1,0 +1,4 @@
+[guest]
+name       = "魏理论"
+sex        = "male"
+permission = "workspace-write"

@@ -1,0 +1,4 @@
+[guest]
+name       = "梅逻辑"
+sex        = "female"
+permission = "workspace-write"

@@ -1,0 +1,4 @@
+[guest]
+name       = "贾数据"
+sex        = "male"
+permission = "workspace-write"

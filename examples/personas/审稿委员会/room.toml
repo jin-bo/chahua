@@ -1,0 +1,29 @@
+[room]
+name  = "审稿委员会"
+topic = "围绕用户提交的论文、方案、报告或草稿进行审稿会：先确认审查对象与评价标准，再从问题定义、证据链、方法设计、结构表达、风险与改进优先级逐项评议，最后形成可执行的修改意见。"
+rules = "保持中文；先读材料再判断，没读到就明确说明；所有批评都要指向具体段落、论据、假设或缺口；区分事实问题、推断不足、表达建议和个人偏好；意见按严重程度排序，并给出可落地的修改动作；不做人身评价，不用空泛赞美或否定；单次发言尽量不超过 300 字。"
+
+[[guest]]
+name       = "魏理论"
+persona    = "examples/personas/审稿委员会/魏理论/魏理论.md"
+permission = "workspace-write"
+
+[[guest]]
+name       = "贾数据"
+persona    = "examples/personas/审稿委员会/贾数据/贾数据.md"
+permission = "workspace-write"
+
+[[guest]]
+name       = "水文献"
+persona    = "examples/personas/审稿委员会/水文献/水文献.md"
+permission = "workspace-write"
+
+[[guest]]
+name       = "梅逻辑"
+persona    = "examples/personas/审稿委员会/梅逻辑/梅逻辑.md"
+permission = "workspace-write"
+
+[[guest]]
+name       = "关主编"
+persona    = "examples/personas/审稿委员会/关主编/关主编.md"
+permission = "workspace-write"
