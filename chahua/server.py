@@ -32,7 +32,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
@@ -134,6 +134,34 @@ def _attach_files_to_text(text: str, files: object) -> str:
         return text
     appendix = "\n".join(refs)
     return f"{text}\n{appendix}" if text else appendix
+
+
+def _require_str(
+    data: dict, key: str, *, where: str, allow_empty: bool = False
+) -> Optional[str]:
+    """从入站 payload 取一个 str 字段，校验失败 → WARN + 返回 ``None``。
+
+    ``where`` 取 :data:`INBOUND_*` 常量值 —— 让 WARN 日志一眼看出是哪条 wire 帧
+    不合法。``allow_empty=True`` 给 ``content`` 这种允许空串的字段（用户清空
+    USER.md 等）。
+    """
+    v = data.get(key)
+    if not isinstance(v, str) or (not allow_empty and not v):
+        _log.warning(
+            "ignoring %s: %s 必须是%sstr，收到 %r",
+            where, key, "" if allow_empty else "非空 ", v,
+        )
+        return None
+    return v
+
+
+def _require_bool(data: dict, key: str, *, where: str) -> Optional[bool]:
+    """同 :func:`_require_str` —— 取 bool 字段，非 bool → WARN + None。"""
+    v = data.get(key)
+    if not isinstance(v, bool):
+        _log.warning("ignoring %s: %s 必须是 bool，收到 %r", where, key, type(v))
+        return None
+    return v
 
 
 def _import_success_text(result: "persona_import.ImportedPersona") -> str:
@@ -858,206 +886,221 @@ class ChahuaServer:
             self._inflight_turn_task = None
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
-        """分派一条客户端消息。"""
+        """分派一条客户端消息到对应 handler。
+
+        各 handler 自己做 payload 校验（多走 :func:`_require_str` / :func:`_require_bool`
+        简化"missing/非字符串"分支），校验失败 → WARN + 早返；动会话的（add/remove
+        guest、switch_room 等）调用前过 :meth:`_cancel_and_drain_inflight`，不动会话
+        的（upload / 头像 / persona import）直接执行让在飞 turn 自然收尾。
+        """
         msg_type = data.get("type")
-        if msg_type == INBOUND_CANCEL:
-            # turn_id 由前端塞，服务端只记日志：单 in-flight 模型下当前 task 必定就是
-            # 前端能看到 turn_id 的那个；race 窗口（前一 turn 刚 end / 下一 turn 刚
-            # start 之间）下错杀也只是少说半句话，无 transcript 污染。
-            turn_id = data.get("turn_id")
-            if not self._inflight_alive():
-                _log.info("cancel ignored: no in-flight turn (turn_id=%r)", turn_id)
-                return
-            _log.info("cancel: turn_id=%r", turn_id)
-            self._cancel_inflight()
+        handler = _INBOUND_HANDLERS.get(msg_type)
+        if handler is not None:
+            await handler(self, data, sink)
             return
-        if msg_type == INBOUND_SWITCH_ROOM:
-            room_id = data.get("room_id")
-            if not isinstance(room_id, str) or not room_id:
-                _log.warning("ignoring switch_room with missing/empty room_id")
-                return
-            await self._cancel_and_drain_inflight()
-            self._switch_room(room_id, sink)
+        # 友好容忍：未知 type 不断连，仅 WARN。前端在协议升级期发新 type 时
+        # 服务端旧版本也不至于把它踢下线。
+        _log.warning("ignoring inbound message of unknown type=%r", msg_type)
+
+    # ── 各 inbound 帧的 handler；注册在类外 _INBOUND_HANDLERS。────────────
+
+    async def _inbound_cancel(self, data: dict, sink: EnvelopeSink) -> None:
+        # turn_id 由前端塞，服务端只记日志：单 in-flight 模型下当前 task 必定就是
+        # 前端能看到 turn_id 的那个；race 窗口（前一 turn 刚 end / 下一 turn 刚
+        # start 之间）下错杀也只是少说半句话，无 transcript 污染。
+        turn_id = data.get("turn_id")
+        if not self._inflight_alive():
+            _log.info("cancel ignored: no in-flight turn (turn_id=%r)", turn_id)
             return
-        if msg_type == INBOUND_CLEAR_ROOM:
-            await self._cancel_and_drain_inflight()
-            self._clear_room(sink)
+        _log.info("cancel: turn_id=%r", turn_id)
+        self._cancel_inflight()
+
+    async def _inbound_switch_room(self, data: dict, sink: EnvelopeSink) -> None:
+        room_id = _require_str(data, "room_id", where=INBOUND_SWITCH_ROOM)
+        if room_id is None:
             return
-        if msg_type == INBOUND_ADD_GUEST:
-            persona = data.get("persona")
-            if not isinstance(persona, str) or not persona:
-                _log.warning("ignoring add_guest with missing/empty persona")
-                return
-            name = data.get("name")
-            if name is not None and not isinstance(name, str):
-                _log.warning("add_guest.name 必须是字符串或 null，收到 %r", type(name))
-                return
-            permission = data.get("permission") or DEFAULT_MODE
-            if not isinstance(permission, str):
-                _log.warning("add_guest.permission 必须是字符串")
-                return
-            await self._cancel_and_drain_inflight()
-            self._add_guest(
-                persona=persona, name=name, permission=permission, sink=sink
+        await self._cancel_and_drain_inflight()
+        self._switch_room(room_id, sink)
+
+    async def _inbound_clear_room(self, data: dict, sink: EnvelopeSink) -> None:
+        await self._cancel_and_drain_inflight()
+        self._clear_room(sink)
+
+    async def _inbound_add_guest(self, data: dict, sink: EnvelopeSink) -> None:
+        persona = _require_str(data, "persona", where=INBOUND_ADD_GUEST)
+        if persona is None:
+            return
+        # name 是 optional（null 让 admin 端按 persona stem 推），但传了就必须是 str。
+        name = data.get("name")
+        if name is not None and not isinstance(name, str):
+            _log.warning(
+                "ignoring %s: name 必须是 str 或 null，收到 %r",
+                INBOUND_ADD_GUEST, type(name),
             )
             return
-        if msg_type == INBOUND_REMOVE_GUEST:
-            name = data.get("name")
-            if not isinstance(name, str) or not name:
-                _log.warning("ignoring remove_guest with missing/empty name")
-                return
-            await self._cancel_and_drain_inflight()
-            self._remove_guest(name=name, sink=sink)
+        # permission 缺 / falsy → DEFAULT_MODE；显式传就必须是 str。
+        permission = data.get("permission") or DEFAULT_MODE
+        if not isinstance(permission, str):
+            _log.warning("ignoring %s: permission 必须是 str", INBOUND_ADD_GUEST)
             return
-        if msg_type == INBOUND_SET_PERSONA_MCP_TRUST:
-            persona_rel = data.get("persona_rel")
-            trusted = data.get("trusted")
-            if not isinstance(persona_rel, str) or not persona_rel:
-                _log.warning(
-                    "ignoring set_persona_mcp_trust with missing/empty persona_rel"
-                )
-                return
-            if not isinstance(trusted, bool):
-                _log.warning(
-                    "set_persona_mcp_trust.trusted 必须是 bool，收到 %r", type(trusted)
-                )
-                return
-            await self._cancel_and_drain_inflight()
-            self._set_persona_mcp_trust(
-                persona_rel=persona_rel, trusted=trusted, sink=sink
-            )
+        await self._cancel_and_drain_inflight()
+        self._add_guest(persona=persona, name=name, permission=permission, sink=sink)
+
+    async def _inbound_remove_guest(self, data: dict, sink: EnvelopeSink) -> None:
+        name = _require_str(data, "name", where=INBOUND_REMOVE_GUEST)
+        if name is None:
             return
-        if msg_type == INBOUND_UPDATE_GUEST_PERMISSION:
-            name = data.get("name")
-            permission = data.get("permission")
-            if not isinstance(name, str) or not name:
-                _log.warning(
-                    "ignoring update_guest_permission with missing/empty name"
-                )
-                return
-            if not isinstance(permission, str) or not permission:
-                _log.warning(
-                    "ignoring update_guest_permission with missing/empty permission"
-                )
-                return
-            await self._cancel_and_drain_inflight()
-            self._update_guest_permission(
-                name=name, permission=permission, sink=sink
-            )
+        await self._cancel_and_drain_inflight()
+        self._remove_guest(name=name, sink=sink)
+
+    async def _inbound_set_persona_mcp_trust(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        persona_rel = _require_str(
+            data, "persona_rel", where=INBOUND_SET_PERSONA_MCP_TRUST
+        )
+        if persona_rel is None:
             return
-        if msg_type == INBOUND_CREATE_ROOM:
-            room_id = data.get("room_id")
-            name = data.get("name")
-            if not isinstance(room_id, str) or not room_id:
-                _log.warning("ignoring create_room with missing/empty room_id")
-                return
-            if not isinstance(name, str) or not name:
-                _log.warning("ignoring create_room with missing/empty name")
-                return
-            topic = data.get("topic") or ""
-            rules = data.get("rules") or ""
-            guests = data.get("guests")
-            if not isinstance(guests, list) or not guests:
-                _log.warning("ignoring create_room with missing/empty guests")
-                return
-            # 防御：guests 每项至少要 persona 字段 —— admin.create_room 也校验，这里
-            # 早一步报"前端协议不对"而不是被动等到 KeyError。
-            if not all(isinstance(g, dict) and isinstance(g.get("persona"), str) and g["persona"]
-                       for g in guests):
-                _log.warning("create_room.guests 每项必须含 persona:str")
-                return
-            await self._cancel_and_drain_inflight()
-            self._create_room(
-                room_id=room_id,
-                name=name,
-                topic=topic if isinstance(topic, str) else "",
-                rules=rules if isinstance(rules, str) else "",
-                guests=guests,
-                sink=sink,
-            )
+        trusted = _require_bool(data, "trusted", where=INBOUND_SET_PERSONA_MCP_TRUST)
+        if trusted is None:
             return
-        if msg_type == INBOUND_DELETE_ROOM:
-            room_id = data.get("room_id")
-            if not isinstance(room_id, str) or not room_id:
-                _log.warning("ignoring delete_room with missing/empty room_id")
-                return
-            await self._cancel_and_drain_inflight()
-            self._delete_room(room_id=room_id, sink=sink)
+        await self._cancel_and_drain_inflight()
+        self._set_persona_mcp_trust(
+            persona_rel=persona_rel, trusted=trusted, sink=sink
+        )
+
+    async def _inbound_update_guest_permission(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_PERMISSION)
+        if name is None:
             return
-        if msg_type == INBOUND_UPDATE_USER_MD:
-            content = data.get("content")
-            if not isinstance(content, str):
-                _log.warning("ignoring update_user_md with non-string content")
-                return
-            await self._cancel_and_drain_inflight()
-            self._update_user_md(content=content, sink=sink)
+        permission = _require_str(
+            data, "permission", where=INBOUND_UPDATE_GUEST_PERMISSION
+        )
+        if permission is None:
             return
-        if msg_type == INBOUND_UPDATE_ROOM_TOML:
-            content = data.get("content")
-            if not isinstance(content, str):
-                _log.warning("ignoring update_room_toml with non-string content")
-                return
-            await self._cancel_and_drain_inflight()
-            self._update_room_toml(content=content, sink=sink)
+        await self._cancel_and_drain_inflight()
+        self._update_guest_permission(name=name, permission=permission, sink=sink)
+
+    async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
+        room_id = _require_str(data, "room_id", where=INBOUND_CREATE_ROOM)
+        if room_id is None:
             return
-        if msg_type == INBOUND_IMPORT_PERSONA_FOLDER:
-            src = data.get("path")
-            if not isinstance(src, str) or not src:
-                _log.warning("ignoring import_persona_folder with missing/empty path")
-                return
-            # 导入不动 session，无需 cancel inflight。
-            self._run_import(
-                f"import_persona_folder src={src!r}",
-                lambda: persona_import.import_from_folder(self._paths, Path(src)),
-                sink,
-            )
+        name = _require_str(data, "name", where=INBOUND_CREATE_ROOM)
+        if name is None:
             return
-        if msg_type == INBOUND_IMPORT_PERSONA_GITHUB:
-            url = data.get("url")
-            if not isinstance(url, str) or not url:
-                _log.warning("ignoring import_persona_github with missing/empty url")
-                return
-            self._run_import(
-                f"import_persona_github url={url!r}",
-                lambda: persona_import.import_from_github(self._paths, url),
-                sink,
-            )
+        guests = data.get("guests")
+        if not isinstance(guests, list) or not guests:
+            _log.warning("ignoring %s: guests 缺 / 空", INBOUND_CREATE_ROOM)
             return
-        if msg_type == INBOUND_UPLOAD_FILE:
-            filename = data.get("filename")
-            content_b64 = data.get("content_b64")
-            if not isinstance(filename, str) or not filename:
-                _log.warning("ignoring upload_file with missing/empty filename")
-                return
-            if not isinstance(content_b64, str) or not content_b64:
-                _log.warning("ignoring upload_file with missing/empty content_b64")
-                return
-            # 上传不动 session、不挡 inflight turn —— 让正在跑的 turn 自然结束；
-            # 文件落房间共享目录，下一条 user_message 才把它带进上下文。
-            self._upload_file(filename=filename, content_b64=content_b64, sink=sink)
+        # 防御：guests 每项至少要 persona:str —— admin.create_room 也校验，这里
+        # 早一步报"前端协议不对"而不是被动等到 KeyError。
+        if not all(
+            isinstance(g, dict) and isinstance(g.get("persona"), str) and g["persona"]
+            for g in guests
+        ):
+            _log.warning("ignoring %s: guests 每项必须含 persona:str", INBOUND_CREATE_ROOM)
             return
-        if msg_type == INBOUND_UPDATE_USER_AVATAR:
-            data_uri = data.get("data_uri")
-            if not isinstance(data_uri, str) or not data_uri:
-                _log.warning("ignoring update_user_avatar with missing/empty data_uri")
-                return
-            # 头像写不动 session，无需 cancel inflight —— 让正在跑的 turn 自然结束。
-            self._update_user_avatar(data_uri=data_uri, sink=sink)
+        # topic / rules 是可选 str；缺 / 非 str → 空串。一个表达式收 None / 其它类型。
+        topic = data.get("topic") if isinstance(data.get("topic"), str) else ""
+        rules = data.get("rules") if isinstance(data.get("rules"), str) else ""
+        await self._cancel_and_drain_inflight()
+        self._create_room(
+            room_id=room_id,
+            name=name,
+            topic=topic,
+            rules=rules,
+            guests=guests,
+            sink=sink,
+        )
+
+    async def _inbound_delete_room(self, data: dict, sink: EnvelopeSink) -> None:
+        room_id = _require_str(data, "room_id", where=INBOUND_DELETE_ROOM)
+        if room_id is None:
             return
-        if msg_type != INBOUND_USER_MESSAGE:
-            # 友好容忍：未知 type 不断连，仅 WARN。前端在协议升级期发新 type 时
-            # 服务端旧版本也不至于把它踢下线。
-            _log.warning("ignoring inbound message of unknown type=%r", msg_type)
+        await self._cancel_and_drain_inflight()
+        self._delete_room(room_id=room_id, sink=sink)
+
+    async def _inbound_update_user_md(self, data: dict, sink: EnvelopeSink) -> None:
+        # content 允许空串：用户清空 USER.md 也算合法状态。
+        content = _require_str(
+            data, "content", where=INBOUND_UPDATE_USER_MD, allow_empty=True
+        )
+        if content is None:
             return
+        await self._cancel_and_drain_inflight()
+        self._update_user_md(content=content, sink=sink)
+
+    async def _inbound_update_room_toml(self, data: dict, sink: EnvelopeSink) -> None:
+        # room.toml 内容理论上不该为空，但 admin 层会用 RoomConfigError 拦住，校验
+        # 责任不在这层；allow_empty 让传 "" 也走到 admin 拿到结构化错误。
+        content = _require_str(
+            data, "content", where=INBOUND_UPDATE_ROOM_TOML, allow_empty=True
+        )
+        if content is None:
+            return
+        await self._cancel_and_drain_inflight()
+        self._update_room_toml(content=content, sink=sink)
+
+    async def _inbound_update_user_avatar(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        data_uri = _require_str(data, "data_uri", where=INBOUND_UPDATE_USER_AVATAR)
+        if data_uri is None:
+            return
+        # 头像写不动 session，无需 cancel inflight —— 让正在跑的 turn 自然结束。
+        self._update_user_avatar(data_uri=data_uri, sink=sink)
+
+    async def _inbound_import_persona_folder(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        src = _require_str(data, "path", where=INBOUND_IMPORT_PERSONA_FOLDER)
+        if src is None:
+            return
+        # 导入不动 session，无需 cancel inflight。
+        self._run_import(
+            f"import_persona_folder src={src!r}",
+            lambda: persona_import.import_from_folder(self._paths, Path(src)),
+            sink,
+        )
+
+    async def _inbound_import_persona_github(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        url = _require_str(data, "url", where=INBOUND_IMPORT_PERSONA_GITHUB)
+        if url is None:
+            return
+        self._run_import(
+            f"import_persona_github url={url!r}",
+            lambda: persona_import.import_from_github(self._paths, url),
+            sink,
+        )
+
+    async def _inbound_upload_file(self, data: dict, sink: EnvelopeSink) -> None:
+        filename = _require_str(data, "filename", where=INBOUND_UPLOAD_FILE)
+        if filename is None:
+            return
+        content_b64 = _require_str(data, "content_b64", where=INBOUND_UPLOAD_FILE)
+        if content_b64 is None:
+            return
+        # 上传不动 session、不挡 inflight turn —— 让正在跑的 turn 自然结束；
+        # 文件落房间共享目录，下一条 user_message 才把它带进上下文。
+        self._upload_file(filename=filename, content_b64=content_b64, sink=sink)
+
+    async def _inbound_user_message(self, data: dict, sink: EnvelopeSink) -> None:
         text = data.get("text")
         if not isinstance(text, str):
-            _log.warning("ignoring user_message with missing/non-string text")
+            _log.warning(
+                "ignoring %s: text 必须是 str，收到 %r",
+                INBOUND_USER_MESSAGE, type(text),
+            )
             return
         files = data.get("files")
         text = _attach_files_to_text(text, files)
         if not text:
             # 用户既没打字也没附文件 —— 没东西可投。
-            _log.warning("ignoring user_message with empty text and no files")
+            _log.warning("ignoring %s: 空 text + 无 files", INBOUND_USER_MESSAGE)
             return
         if self._inflight_alive():
             # 单 in-flight 严格策略：当前 turn 没结束前 drop 后续 user_message。前端
@@ -1068,6 +1111,32 @@ class ChahuaServer:
         self._inflight_turn_task = asyncio.create_task(
             self._run_turn(text, sink), name="chahua-turn"
         )
+
+
+# inbound 帧类型 → handler unbound method 的注册表。``_handle_inbound`` 拿到 type
+# 直接查表分派，加新 wire 帧只动 INBOUND_* 常量 + 一个 ``_inbound_<name>`` 方法 +
+# 这张表一行；不必再去维护一个 200 行的 if-elif 链。
+_InboundHandler = Callable[
+    ["ChahuaServer", dict, EnvelopeSink], Awaitable[None]
+]
+_INBOUND_HANDLERS: dict[str, _InboundHandler] = {
+    INBOUND_CANCEL: ChahuaServer._inbound_cancel,
+    INBOUND_SWITCH_ROOM: ChahuaServer._inbound_switch_room,
+    INBOUND_CLEAR_ROOM: ChahuaServer._inbound_clear_room,
+    INBOUND_ADD_GUEST: ChahuaServer._inbound_add_guest,
+    INBOUND_REMOVE_GUEST: ChahuaServer._inbound_remove_guest,
+    INBOUND_SET_PERSONA_MCP_TRUST: ChahuaServer._inbound_set_persona_mcp_trust,
+    INBOUND_UPDATE_GUEST_PERMISSION: ChahuaServer._inbound_update_guest_permission,
+    INBOUND_CREATE_ROOM: ChahuaServer._inbound_create_room,
+    INBOUND_DELETE_ROOM: ChahuaServer._inbound_delete_room,
+    INBOUND_UPDATE_USER_MD: ChahuaServer._inbound_update_user_md,
+    INBOUND_UPDATE_ROOM_TOML: ChahuaServer._inbound_update_room_toml,
+    INBOUND_UPDATE_USER_AVATAR: ChahuaServer._inbound_update_user_avatar,
+    INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
+    INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,
+    INBOUND_UPLOAD_FILE: ChahuaServer._inbound_upload_file,
+    INBOUND_USER_MESSAGE: ChahuaServer._inbound_user_message,
+}
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────

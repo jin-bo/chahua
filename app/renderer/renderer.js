@@ -15,6 +15,12 @@
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
 import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION } from "./events.js";
+import {
+  positionPopoverByAnchor,
+  attachPopoverDismissHandlers,
+  closeActionPopover,
+  openActionPopover,
+} from "./ui_popover.js";
 import { marked } from "../node_modules/marked/lib/marked.esm.js";
 import DOMPurify from "../node_modules/dompurify/dist/purify.es.mjs";
 
@@ -237,44 +243,6 @@ const PERMISSION_OPTIONS = Object.freeze([
   { value: "workspace-write", label: "工作区可写", desc: "可写茶客工作目录、跑常规命令" },
   { value: "full-access", label: "完全访问", desc: "放行所有工具（含潜在破坏性，谨慎）" },
 ]);
-
-// 贴 anchor 右侧；右侧不够（窄窗 / sidebar 贴边）退到 anchor 下方。两种 popover
-// （权限 / action）定位完全一致 —— 单点这里，避免漂移。
-function positionPopoverByAnchor(pop, anchor) {
-  const rect = anchor.getBoundingClientRect();
-  pop.style.position = "fixed";
-  pop.style.left = `${Math.round(rect.right + 8)}px`;
-  pop.style.top = `${Math.round(rect.top)}px`;
-  const popRect = pop.getBoundingClientRect();
-  if (popRect.right > window.innerWidth - 8) {
-    const fallbackLeft = Math.max(8, rect.left);
-    pop.style.left = `${Math.round(fallbackLeft)}px`;
-    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
-  }
-}
-
-// 给 popover 装"点外面关 / Esc 关"的兜底。下一 tick 才挂 —— 否则触发 popover 那
-// 一下 click 自身冒泡到 document 上会立刻关掉。返回 detach 函数。
-function attachPopoverDismissHandlers(pop, onClose) {
-  const outside = (ev) => {
-    if (pop.contains(ev.target)) return;
-    onClose();
-  };
-  const esc = (ev) => {
-    if (ev.key === "Escape") {
-      ev.stopPropagation();
-      onClose();
-    }
-  };
-  setTimeout(() => {
-    document.addEventListener("mousedown", outside, true);
-    document.addEventListener("keydown", esc);
-  }, 0);
-  return () => {
-    document.removeEventListener("mousedown", outside, true);
-    document.removeEventListener("keydown", esc);
-  };
-}
 
 let permissionPopoverGuest = null;
 let _detachPermissionPopoverDismiss = null;
@@ -1557,66 +1525,11 @@ roomTomlSubmitBtn.addEventListener("click", () => {
   closeModal(editRoomTomlModal);
 });
 
-// 双击 anchor 弹的简单菜单：编辑配置 / 换头像 / 更改房间配置 / 清空聊天。
-// 共用 popover 定位 + 关闭兜底，与 permission popover 互斥（开一个关另一个）。
-let actionPopoverAnchor = null;
-let _detachActionPopoverDismiss = null;
-
-function closeActionPopover() {
-  const pop = document.querySelector(".action-popover");
-  if (pop) pop.remove();
-  if (_detachActionPopoverDismiss) {
-    _detachActionPopoverDismiss();
-    _detachActionPopoverDismiss = null;
-  }
-  actionPopoverAnchor = null;
-}
-
-// items: [{ label, desc?, onClick, danger? }]
+// 跨 popover 互斥：开 action 前先关 permission（反向不需要 —— 头像 click 与
+// anchor dblclick 物理不冲突）。
 function showActionPopover(anchor, title, items) {
-  if (actionPopoverAnchor === anchor) {
-    closeActionPopover();
-    return;
-  }
-  closeActionPopover();
   closePermissionPopover();
-  const pop = document.createElement("div");
-  pop.className = "popover action-popover";
-  const head = document.createElement("div");
-  head.className = "popover-title";
-  head.textContent = title;
-  pop.appendChild(head);
-  for (const it of items) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "popover-option action-option";
-    if (it.danger) btn.classList.add("danger");
-    const meta = document.createElement("span");
-    meta.className = "popover-option-meta";
-    const label = document.createElement("span");
-    label.className = "popover-option-label";
-    label.textContent = it.label;
-    meta.appendChild(label);
-    if (it.desc) {
-      const desc = document.createElement("span");
-      desc.className = "popover-option-desc";
-      desc.textContent = it.desc;
-      meta.appendChild(desc);
-    }
-    btn.appendChild(meta);
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      closeActionPopover();
-      try { it.onClick(); } catch (e) { console.error("action popover click handler 抛错", e); }
-    });
-    pop.appendChild(btn);
-  }
-  document.body.appendChild(pop);
-  positionPopoverByAnchor(pop, anchor);
-  actionPopoverAnchor = anchor;
-  _detachActionPopoverDismiss = attachPopoverDismissHandlers(
-    pop, closeActionPopover,
-  );
+  openActionPopover(anchor, title, items);
 }
 
 function showUserActionsPopover(anchor) {
