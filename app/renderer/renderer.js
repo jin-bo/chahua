@@ -165,12 +165,10 @@ function stickToBottom(mutate) {
   if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// 头像 + 右上角 V 标的组合节点。头像缺图返 null（调用方自行决定 fallback）；
-// 头像有 + 显著 permission → 用 ``.avatar-wrap`` 包起来，badge 浮右上角；
-// 头像有 + 默认 permission → 直接返 img。
+// 头像 + 右上角 V 标的组合节点。默认 permission 直接返 img；显著 permission 用
+// .avatar-wrap 包起来让 badge 浮右上角。
 function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
   const img = makeAvatar(g.name, avatarClassName);
-  if (!img) return null;
   const showBadge = g.permission && g.permission !== DEFAULT_PERMISSION;
   if (!showBadge) return img;
   const wrap = document.createElement("span");
@@ -369,8 +367,7 @@ function appendSkillsSection(pop, g) {
 function makeGuestRow(speaker, { streaming = false } = {}) {
   const li = document.createElement("li");
   li.className = "msg";
-  const avatar = makeAvatar(speaker, "msg-avatar");
-  if (avatar) li.appendChild(avatar);
+  li.appendChild(makeAvatar(speaker, "msg-avatar"));
   const bubble = document.createElement("div");
   bubble.className = "bubble bubble-guest";
   const header = document.createElement("div");
@@ -405,8 +402,7 @@ function makeUserRow(text) {
   bubble.appendChild(t);
   attachCopyButton(bubble, () => text);
   li.appendChild(bubble);
-  const avatar = makeUserAvatar("msg-avatar");
-  if (avatar) li.appendChild(avatar);
+  li.appendChild(makeUserAvatar("msg-avatar"));
   return li;
 }
 
@@ -573,33 +569,25 @@ function renderSidebar(roomInfo) {
   const lastGuestLock = guests.length <= 1;
   for (const g of guests) {
     const li = document.createElement("li");
-    // V 标默认浮在头像右上角；缺头像（罕见）时回退到名字后 inline，避免丢失权限提示。
-    const showBadge = g.permission && g.permission !== DEFAULT_PERMISSION;
+    // 头像 / 名字都是「设置权限」的 anchor —— popover 锚在头像更直观，但点名字也能开。
     const node = makeAvatarWithPermission(g, "avatar", "permission-badge");
-    // 头像 / 名字都可点 —— 点了开"设置权限"popover。头像存在则 click anchor 用头像，
-    // 否则 fall through 到名字徽章（保证用户始终能找到入口）。
-    if (node) {
-      node.classList.add("permission-anchor");
-      node.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
-      node.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        if (!connected) return;
-        showPermissionPopover(node, g);
-      });
-      li.appendChild(node);
-    }
+    node.classList.add("permission-anchor");
+    node.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
+    node.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (!connected) return;
+      showPermissionPopover(node, g);
+    });
+    li.appendChild(node);
     const nameBadge = makeBadge("guest-name", null, g.name);
     nameBadge.classList.add("permission-anchor");
     nameBadge.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
     nameBadge.addEventListener("click", (ev) => {
       ev.stopPropagation();
       if (!connected) return;
-      showPermissionPopover(node || nameBadge, g);
+      showPermissionPopover(node, g);
     });
     li.appendChild(nameBadge);
-    if (!node && showBadge) {
-      li.appendChild(makePermissionBadge(g.permission, "permission-badge"));
-    }
     if (g.isolation && g.isolation !== "room") {
       li.appendChild(makeBadge("isolation-badge", "isolation", g.isolation));
     }
@@ -976,9 +964,7 @@ newRoomSubmitEl.addEventListener("click", () => {
 
 function renderUserRow() {
   userNameEl.textContent = userDisplayName;
-  userAvatarWrapEl.replaceChildren();
-  const img = makeUserAvatar("user-avatar");
-  if (img) userAvatarWrapEl.appendChild(img);
+  userAvatarWrapEl.replaceChildren(makeUserAvatar("user-avatar"));
 }
 
 const settings = createSettings({

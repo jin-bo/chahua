@@ -27,8 +27,7 @@ export function renderPersonaPicker(rootEl, { personas, multi, excludeNames, onP
     li.className = "persona-item";
     li.dataset.persona = p.persona;
     li.dataset.name = p.name;
-    const img = makeAvatarImg(p.avatar_data_uri, "persona-avatar", p.name);
-    if (img) li.appendChild(img);
+    li.appendChild(makeAvatarImg(p.avatar_data_uri, "persona-avatar", p.name));
     const name = document.createElement("span");
     name.className = "persona-name";
     name.textContent = p.name;

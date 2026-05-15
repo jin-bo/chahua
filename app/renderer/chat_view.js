@@ -27,15 +27,57 @@ export function isSelectionInside(node) {
   return node.contains(sel.anchorNode) || node.contains(sel.focusNode);
 }
 
-// dataUri 缺 → 返 null（调用方按"无头像"降级）。
+// dataUri 缺 / 加载失败 → 用 alt 的首字符 + hash 色圆形 SVG 当兜底。返回值始终是
+// <img>，调用方不必区分两条路径，CSS 规则也共用（width/height/border-radius 来自
+// className）。
 export function makeAvatarImg(dataUri, className, alt) {
-  if (!dataUri) return null;
+  if (!dataUri) return makeInitialAvatar(alt, className);
   const img = document.createElement("img");
   img.className = className;
   img.src = dataUri;
   img.alt = alt || "";
-  // data URI 不会 404，但解码失败（坏图）时静默 hide。
-  img.addEventListener("error", () => img.remove(), { once: true });
+  // 服务端给的 data URI 不会 404，但 base64 损坏时 onerror 会触发 —— 用首字母兜底
+  // 替换，避免节点空白挂着。
+  img.addEventListener("error", () => {
+    img.replaceWith(makeInitialAvatar(alt, className));
+  }, { once: true });
+  return img;
+}
+
+// hash 字符串到 0..360 的 hue —— 同名总落同色。配 hsl(_, 55%, 45%) 给一组对比鲜明、
+// 白字读得清的"头像底色"。
+function avatarHue(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return ((h % 360) + 360) % 360;
+}
+
+function escapeXml(s) {
+  return s.replace(/[&<>'"]/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;",
+  }[c]));
+}
+
+// 首字符 + hash 色圆形底，包成 inline-SVG data URI 当 <img src=>。viewBox 100x100
+// 让 text 跟着 className 的 width/height 自动缩放，不必为每个头像尺寸单写 CSS。
+function makeInitialAvatar(name, className) {
+  const safe = name || "?";
+  const letter = escapeXml(safe.charAt(0));
+  const hue = avatarHue(safe);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">` +
+    `<circle cx="50" cy="50" r="50" fill="hsl(${hue} 55% 45%)"/>` +
+    `<text x="50" y="50" text-anchor="middle" dominant-baseline="central" ` +
+    `fill="white" font-size="52" font-family="system-ui, sans-serif" ` +
+    `font-weight="600">${letter}</text></svg>`;
+  const img = document.createElement("img");
+  img.className = className;
+  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  img.alt = name || "";
   return img;
 }
 
