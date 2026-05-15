@@ -33,6 +33,7 @@ import {
   setStatusTail,
   removeStreamingCursor,
 } from "./chat_view.js";
+import { createMention } from "./mention.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -677,109 +678,18 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
   }
 }
 
-// ── @ 补全 ────────────────────────────────────────────────────────
+// ── @ 补全 + composer 键盘 ────────────────────────────────────────────
 
-let mentionActive = -1; // dropdown 高亮项索引；-1 表示未显示
+const mention = createMention({
+  inputEl: textInput,
+  dropdownEl,
+  getGuests: () => guests,
+});
 
-// 找输入框当前光标位置前最近的 "@<query>"；返回 {start, end, query} 或 null。
-//
-// 字符集放到 `\S*`（任何非空白）—— 与 server 端 _AT_PATTERN 反黑名单语义对齐，
-// 含 `-` `.` 撇号的茶客名也能被前端 typeahead 捕到；候选过滤靠 guests 名册的
-// startsWith 兜底（不在册的名字自然 dropdown 为空，hideMentionDropdown）。
-function detectMention() {
-  const end = textInput.selectionStart ?? textInput.value.length;
-  const before = textInput.value.slice(0, end);
-  const m = /(?:^|\s)@(\S*)$/.exec(before);
-  if (!m) return null;
-  // @ 在 m[0] 中的偏移：m[0] 起头是 @ 时偏 0，是空白时偏 1。
-  const start = m.index + (m[0].startsWith("@") ? 0 : 1);
-  return { start, end, query: m[1] };
-}
-
-// @broadcast 候选项 —— 镜像 chahua/orchestrator.py:_BROADCAST_TOKENS 的"全员"语义。
-// 用 `.find()` 选**第一个匹配**返回单条，避免空 query 时 "所有人 / ALL" 同时
-// 占两行（语义重复）。顺序决定优先级：中文优先（茶话室中文为主），拉丁起头时
-// fallthrough 到 ALL。server 端 _BROADCAST_TOKENS 还包含 everyone / 大家 / 各位
-// 三个不展示但能手输的兼容词。
-const BROADCAST_CANDIDATES = Object.freeze([
-  { name: "所有人", broadcast: true },
-  { name: "ALL", broadcast: true },
-]);
-
-function matchGuests(query) {
-  const q = query.toLowerCase();
-  const broadcast = BROADCAST_CANDIDATES.find((b) =>
-    b.name.toLowerCase().startsWith(q)
-  );
-  const guestMatches = guests.filter((g) => g.name.toLowerCase().startsWith(q));
-  // broadcast 候选放前面 —— 广播是更强烈的意图（"我要全员注意"vs"我点名某个人"）。
-  return broadcast ? [broadcast, ...guestMatches] : guestMatches;
-}
-
-function showMentionDropdown(candidates, match) {
-  if (candidates.length === 0) {
-    hideMentionDropdown();
-    return;
-  }
-  dropdownEl.replaceChildren();
-  candidates.forEach((g, i) => {
-    const li = document.createElement("li");
-    if (i === 0) li.className = "active";
-    if (g.broadcast) li.classList.add("broadcast");
-    li.appendChild(makeBadge("mention-name", null, g.name));
-    // broadcast 项不显示 permission 徽章；只茶客有 permission 概念。
-    if (!g.broadcast && g.permission && g.permission !== DEFAULT_PERMISSION) {
-      li.appendChild(makePermissionBadge(g.permission, "mention-permission"));
-    }
-    if (g.broadcast) {
-      const hint = document.createElement("span");
-      hint.className = "mention-hint";
-      hint.textContent = "广播";
-      li.appendChild(hint);
-    }
-    li.dataset.name = g.name;
-    li.addEventListener("mousedown", (ev) => {
-      // mousedown 而非 click —— input blur 之前完成补全，避免 dropdown 先消失。
-      ev.preventDefault();
-      acceptMention(match, g.name);
-    });
-    dropdownEl.appendChild(li);
-  });
-  mentionActive = 0;
-  dropdownEl.hidden = false;
-}
-
-function hideMentionDropdown() {
-  dropdownEl.hidden = true;
-  mentionActive = -1;
-}
-
-function moveActive(delta) {
-  const items = dropdownEl.querySelectorAll("li");
-  if (items.length === 0) return;
-  items[mentionActive]?.classList.remove("active");
-  mentionActive = (mentionActive + delta + items.length) % items.length;
-  items[mentionActive].classList.add("active");
-  items[mentionActive].scrollIntoView({ block: "nearest" });
-}
-
-function acceptMention(match, name) {
-  // match 由调用方上下文传入（input 路径 / keydown 路径都拿同一份 match），
-  // 不在这里重算 —— 避免与触发时的 detectMention 视图不一致。
-  const v = textInput.value;
-  const before = v.slice(0, match.start);
-  const after = v.slice(match.end);
-  textInput.value = `${before}@${name} ${after}`;
-  const cursor = before.length + 1 + name.length + 1;
-  textInput.setSelectionRange(cursor, cursor);
-  hideMentionDropdown();
-  textInput.focus();
-}
-
-// textarea 自适应高度：内容增长时撑开，达到上限切滚动。``style.height = "auto"``
-// 先把 scrollHeight 算回单行视图，再读取实际内容高度赋值 —— 不重置 height 的话
-// 旧的高 px 值会让 scrollHeight 永远 ≥ 旧值，textarea 只长不缩。
-// max-height 与 #text 的 CSS 上限对齐（200px），超出后 overflow:auto 接管。
+// textarea 自适应高度：内容增长时撑开，达到上限切滚动。style.height = "auto" 先把
+// scrollHeight 算回单行视图，再读取实际内容高度赋值 —— 不重置 height 的话旧的高
+// px 值会让 scrollHeight 永远 ≥ 旧值，textarea 只长不缩。max-height 与 #text 的
+// CSS 上限对齐（200px），超出后 overflow:auto 接管。
 const TEXTAREA_MAX_HEIGHT_PX = 200;
 function autoResizeTextarea() {
   textInput.style.height = "auto";
@@ -791,51 +701,33 @@ function autoResizeTextarea() {
 
 textInput.addEventListener("input", () => {
   autoResizeTextarea();
-  const m = detectMention();
-  if (!m) { hideMentionDropdown(); return; }
-  showMentionDropdown(matchGuests(m.query), m);
+  mention.refresh();
 });
 
 textInput.addEventListener("keydown", (ev) => {
-  // 中文 IME 候选窗 Enter（拼音 → 汉字）会先发 keydown isComposing=true。
-  // 不拦：让 IME 自己消费 Enter，待 compositionend 后再走正常 input 流程。
+  // 中文 IME 候选窗 Enter（拼音 → 汉字）先发 keydown isComposing=true；让 IME 自己
+  // 消费 Enter，待 compositionend 后再走 input 流程。
   if (ev.isComposing || ev.keyCode === 229) return;
-
-  // Enter 提交（无 Shift / 无 mention 选中态）—— textarea 默认 Enter 是换行，
-  // 在 chat composer 里反直觉，反过来：Enter 发送、Shift+Enter 换行（与 Slack /
-  // ChatGPT / Claude 一致）。requestSubmit 走 form submit 事件管道，复用现有 handler。
+  // dropdown 开启时 mention 模块独占键盘 —— Arrow / Enter-accept / Tab / Esc 全在
+  // 模块里处理；返 true 即"已消化"，跳过下面的 composer Enter→submit 分支。
+  if (mention.handleKeydown(ev)) return;
+  // Enter 发送、Shift+Enter 换行（与 Slack / ChatGPT / Claude 一致）。requestSubmit
+  // 走 form submit 事件管道复用现有 handler。
   if (
     ev.key === "Enter" &&
     !ev.shiftKey &&
     !ev.ctrlKey &&
     !ev.metaKey &&
-    !ev.altKey &&
-    dropdownEl.hidden
+    !ev.altKey
   ) {
     ev.preventDefault();
     composer.requestSubmit();
-    return;
-  }
-
-  if (dropdownEl.hidden) return;
-  if (ev.key === "ArrowDown") { ev.preventDefault(); moveActive(1); }
-  else if (ev.key === "ArrowUp") { ev.preventDefault(); moveActive(-1); }
-  else if (ev.key === "Enter" || ev.key === "Tab") {
-    const items = dropdownEl.querySelectorAll("li");
-    if (mentionActive >= 0 && items[mentionActive]) {
-      ev.preventDefault();
-      const m = detectMention();
-      if (m) acceptMention(m, items[mentionActive].dataset.name);
-    }
-  } else if (ev.key === "Escape") {
-    ev.preventDefault();
-    hideMentionDropdown();
   }
 });
 
 textInput.addEventListener("blur", () => {
-  // mousedown 在 blur 之前已完成 acceptMention；这里只是兜底关 dropdown。
-  setTimeout(hideMentionDropdown, 100);
+  // mousedown 已在 blur 之前完成补全；这里 100ms 后兜底关 dropdown。
+  setTimeout(mention.hide, 100);
 });
 
 // ── envelope 分派 ────────────────────────────────────────────────
