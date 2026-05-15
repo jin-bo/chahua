@@ -34,6 +34,7 @@ import {
   removeStreamingCursor,
 } from "./chat_view.js";
 import { createMention } from "./mention.js";
+import { createUpload } from "./upload.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -541,12 +542,12 @@ function closeInFlightOnDisconnect() {
 
 function renderSidebar(roomInfo) {
   // 进新房（首次连接 / 换房）的全量重置：清 in-flight 流 + 当前 turn 打分残留 + 消息
-  // 容器 + 待发文件 pills（pendingFiles 是按房间 share/ 计的相对路径，换房后挂别房不通）。
+  // 容器 + 待发文件 pills（pill 的 rel 是按房间 share/ 计的相对路径，换房后挂别房不通）。
   inFlight.clear();
   scoresByName = new Map();
   scoreSpansByName.clear();
   messagesEl.replaceChildren();
-  clearPendingFiles();
+  upload.clear();
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
@@ -806,20 +807,9 @@ function handleEnvelope(env) {
       }
       return;
     }
-    case EventType.FILE_UPLOADED: {
-      const rel = env.data?.rel;
-      if (typeof rel !== "string" || !rel) return;
-      const original = env.data?.original || rel;
-      // 重复上传同名文件 → server 覆盖落盘；pill 去重避免 pending 区两条同名条目。
-      if (pendingFiles.some((f) => f.rel === rel)) {
-        setStatus("ok", `已覆盖「${original}」`);
-        return;
-      }
-      pendingFiles.push({ rel, original: env.data?.original || "" });
-      renderPendingFiles();
-      setStatus("ok", `已上传「${original}」`);
+    case EventType.FILE_UPLOADED:
+      upload.onServerEcho(env.data ?? {});
       return;
-    }
     // guest_thinking / tool_* 暂时静默。
   }
 }
@@ -1143,105 +1133,14 @@ avatarFileInput.addEventListener("change", () => {
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。
 
-// 与 server.py 的 _UPLOAD_MAX_BYTES 同步（2MB）。前端早拒省一次 base64 + ws 来回。
-const UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
-
-// rel = "share/<safe-name>"（server 派发，filesystem 洗过名）；
-// original = 用户原文件名，pill 显示用 + sanitize 改过时挂 title 对齐"我点的"vs"落地的"。
-const pendingFiles = []; // [{rel, original}, ...]
-
-function renderPendingFiles() {
-  pendingFilesEl.replaceChildren();
-  if (pendingFiles.length === 0) {
-    pendingFilesEl.hidden = true;
-    return;
-  }
-  pendingFilesEl.hidden = false;
-  for (const f of pendingFiles) {
-    const li = document.createElement("li");
-    li.className = "pending-file";
-    const landedName = f.rel.slice("share/".length);
-    const name = document.createElement("span");
-    name.className = "pending-file-name";
-    name.textContent = f.original || landedName;
-    if (f.original && f.original !== landedName) {
-      name.title = `已上传为 ${landedName}（原名 ${f.original} 含非法字符被替换）`;
-    }
-    li.appendChild(name);
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "pending-file-remove";
-    remove.textContent = "×";
-    remove.title = "不发送这个文件（文件已在房间 share 目录里，下次还能引用）";
-    remove.addEventListener("click", () => {
-      const idx = pendingFiles.indexOf(f);
-      if (idx >= 0) {
-        pendingFiles.splice(idx, 1);
-        renderPendingFiles();
-      }
-    });
-    li.appendChild(remove);
-    pendingFilesEl.appendChild(li);
-  }
-}
-
-function clearPendingFiles() {
-  pendingFiles.length = 0;
-  renderPendingFiles();
-}
-
-// File → base64 字符串（不带 data URI 前缀）。FileReader.readAsDataURL 比手写
-// ArrayBuffer → btoa 链路省一次大数组中转；逗号后的部分就是纯 base64。
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result;
-      if (typeof result !== "string") {
-        reject(new Error("FileReader 没返回字符串"));
-        return;
-      }
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = () => reject(reader.error || new Error("FileReader 失败"));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function uploadOneFile(file) {
-  if (file.size > UPLOAD_MAX_BYTES) {
-    window.alert(`「${file.name}」超过 ${(UPLOAD_MAX_BYTES / 1024 / 1024).toFixed(1)}MB 上限，挑张小一点的。`);
-    return;
-  }
-  setStatus("", `上传「${file.name}」…`);
-  let content_b64;
-  try {
-    content_b64 = await readFileAsBase64(file);
-  } catch (e) {
-    setStatus("error", `读「${file.name}」失败：${e.message || e}`);
-    return;
-  }
-  ws.send(JSON.stringify({
-    type: Inbound.UPLOAD_FILE,
-    filename: file.name,
-    content_b64,
-  }));
-}
-
-attachFileBtn.addEventListener("click", () => {
-  if (!connected) return;
-  // reset 让相同文件再选也能触发 change（浏览器对同源文件默认不再 fire）。
-  fileInputEl.value = "";
-  fileInputEl.click();
-});
-
-fileInputEl.addEventListener("change", () => {
-  const files = Array.from(fileInputEl.files || []);
-  if (files.length === 0) return;
-  // 并发读 —— FileReader 跑在 worker 线程，串行没必要等前一个 onload 才开下一个；
-  // ws.send 本身非阻塞，server 端 inbound 循环按到达顺序串行处理。
-  Promise.all(files.map(uploadOneFile));
+const upload = createUpload({
+  pendingFilesEl,
+  fileInputEl,
+  attachFileBtn,
+  isConnected: () => connected,
+  // 闭包读最新 ws —— 重连时 ws 变量会被重赋值。
+  send: (payload) => ws.send(JSON.stringify(payload)),
+  setStatus,
 });
 
 // 中央裁方 + 等比缩到 AVATAR_TARGET_PX × AVATAR_TARGET_PX。
@@ -1365,9 +1264,9 @@ composer.addEventListener("submit", (ev) => {
     return;
   }
   const text = textInput.value.trim();
-  // pendingFiles 不空时即使 text 为空也允许发送 —— 用户拖了文件就是有意图。
-  if (!text && pendingFiles.length === 0) return;
-  const files = pendingFiles.map((f) => f.rel);
+  // 文件不空时即使 text 为空也允许发送 —— 用户拖了文件就是有意图。
+  if (!text && !upload.hasPending()) return;
+  const files = upload.snapshotRels();
   // echo 显示：文本 + 文件引用（与 server 端 _attach_files_to_text 同口径），
   // 让用户在自己气泡里就能看到"我刚发了什么"。
   const echoLines = [text];
@@ -1380,7 +1279,7 @@ composer.addEventListener("submit", (ev) => {
     ...(files.length > 0 ? { files } : {}),
   }));
   textInput.value = "";
-  clearPendingFiles();
+  upload.clear();
   autoResizeTextarea();
 });
 
