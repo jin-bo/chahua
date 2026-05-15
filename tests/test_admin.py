@@ -311,6 +311,51 @@ def test_update_user_md_rejects_oversized(paths):
         admin.update_user_md(paths, "x" * (64 * 1024 + 1))
 
 
+# update_room_toml ───────────────────────────────────────────────────────
+
+
+def _seed_room_for_update(paths):
+    return admin.create_room(
+        paths=paths, room_id="upd-room", name="待改",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+
+
+def test_update_room_toml_round_trip(paths):
+    rc = _seed_room_for_update(paths)
+    new_toml = (
+        '[room]\n'
+        'name  = "新名"\n'
+        'topic = "新话题"\n'
+        'rules = ""\n'
+        '\n'
+        '[[guest]]\n'
+        'name       = "宝总"\n'
+        'persona    = "chahua/personas/宝总.md"\n'
+        'permission = "read-only"\n'
+    )
+    rc2 = admin.update_room_toml(rc.room_dir, new_toml, paths=paths)
+    assert rc2.name == "新名"
+    assert rc2.topic == "新话题"
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == new_toml
+
+
+def test_update_room_toml_rolls_back_on_invalid(paths):
+    rc = _seed_room_for_update(paths)
+    original = (rc.room_dir / "room.toml").read_text("utf-8")
+    bad_toml = '[room]\nname = "x"\n# 缺 [[guest]]，load_room_config 会拒\n'
+    with pytest.raises(RoomConfigError):
+        admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
+    # 回滚：磁盘上仍是原文，房间仍可装载。
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == original
+
+
+def test_update_room_toml_rejects_oversized(paths):
+    rc = _seed_room_for_update(paths)
+    with pytest.raises(ValueError, match="room.toml 太大"):
+        admin.update_room_toml(rc.room_dir, "x" * (64 * 1024 + 1), paths=paths)
+
+
 def test_update_user_md_round_trip_via_load_user_md(paths):
     from chahua.user_md import load_user_md
     admin.update_user_md(paths, "## 显示名\n老金\n\n## 偏好\n直接\n")

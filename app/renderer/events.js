@@ -50,6 +50,8 @@ export const Inbound = Object.freeze({
   DELETE_ROOM: "delete_room",
   UPDATE_USER_MD: "update_user_md",
   UPDATE_USER_AVATAR: "update_user_avatar",
+  // 覆盖当前房间 room.toml 全文。服务端校验失败会回滚 + emit notice(error)。
+  UPDATE_ROOM_TOML: "update_room_toml",
   // persona 导入：本地文件夹（main 端 dialog 选目录后传 path）/ GitHub URL。
   // 成功 / 失败都走 NOTICE envelope 回报；前端再用 alert / status 显示。
   IMPORT_PERSONA_FOLDER: "import_persona_folder",

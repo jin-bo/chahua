@@ -70,7 +70,10 @@ class Summarizer:
     单房间一份。:meth:`maybe_summarize` 自管"上次到哪了"，调用方只需在每轮发言后调一次。
     """
 
-    _MAX_TOKENS: int = 512
+    # 摘要本身 ~200-400 token；Gemini 2.5 thinking 模型把 thinking budget 也算
+    # 进 max_tokens，旧值 512 会被截。2048 给 thinking + output 都留足，对无
+    # thinking 模型不会多消耗（实际输出长度由摘要 prompt 控制）。
+    _MAX_TOKENS: int = 2048
 
     def __init__(
         self,

@@ -51,7 +51,6 @@ const roomTopicEl = document.getElementById("room-topic");
 const guestsEl = document.getElementById("guests");
 const roomsEl = document.getElementById("rooms");
 const dropdownEl = document.getElementById("mention-dropdown");
-const clearRoomBtn = document.getElementById("clear-room");
 const addGuestBtn = document.getElementById("add-guest");
 const importPersonaBtn = document.getElementById("import-persona");
 const addRoomBtn = document.getElementById("add-room");
@@ -68,8 +67,6 @@ const importFolderPathEl = document.getElementById("import-folder-path");
 const importFolderPickBtn = document.getElementById("import-folder-pick");
 const importGithubUrlEl = document.getElementById("import-github-url");
 const importPersonaSubmitBtn = document.getElementById("import-persona-submit");
-const editUserMdBtn = document.getElementById("edit-user-md");
-const uploadAvatarBtn = document.getElementById("upload-avatar");
 const avatarFileInput = document.getElementById("avatar-file-input");
 const editUserModal = document.getElementById("edit-user-modal");
 const userMdTextarea = document.getElementById("user-md-textarea");
@@ -77,6 +74,10 @@ const userMdSourceHintEl = document.getElementById("user-md-source-hint");
 const userMdSubmitBtn = document.getElementById("user-md-submit");
 const userAvatarWrapEl = document.getElementById("user-avatar-wrap");
 const userNameEl = document.getElementById("user-name");
+const editRoomTomlModal = document.getElementById("edit-room-toml-modal");
+const roomTomlTextarea = document.getElementById("room-toml-textarea");
+const roomTomlSourceHintEl = document.getElementById("room-toml-source-hint");
+const roomTomlSubmitBtn = document.getElementById("room-toml-submit");
 const attachFileBtn = document.getElementById("attach-file");
 const fileInputEl = document.getElementById("file-input");
 const pendingFilesEl = document.getElementById("pending-files");
@@ -107,9 +108,11 @@ let userDisplayName = "我";
 let userAvatarDataUri = null;
 // 可用 persona 候选（room_info 来时装）—— "添加茶客" / "新建房间"的 picker 用。
 let personasAvailable = []; // [{persona, name, avatar_data_uri}, ...]
-// 用户 USER.md 当前内容 + source 路径（room_info 时装）—— "编辑配置"modal prefill 用。
+// USER.md / room.toml 原文 + source 路径（room_info 时装）—— 编辑 modal prefill 用。
 let userMdContent = "";
 let userMdSource = null;
+let roomTomlContent = "";
+let roomTomlSource = null;
 
 // 头像 <img> 通用工厂：dataUri 缺 → 返 null（调用方按"无头像"降级）。
 function makeAvatarImg(dataUri, className, alt) {
@@ -146,13 +149,13 @@ function setStatus(kind, text) {
 function setInputEnabled(enabled) {
   textInput.disabled = !enabled;
   submitBtn.disabled = !enabled;
-  clearRoomBtn.disabled = !enabled;
   addGuestBtn.disabled = !enabled;
   importPersonaBtn.disabled = !enabled;
   addRoomBtn.disabled = !enabled;
-  editUserMdBtn.disabled = !enabled;
-  uploadAvatarBtn.disabled = !enabled;
   attachFileBtn.disabled = !enabled;
+  // 双击 anchor 不走 disabled——dblclick handler 自己看 connected 决定弹不弹 popover。
+  // 视觉上 .dblclick-anchor 的 hover 在 :not(.disconnected) 下亮，连接断时变灰。
+  document.body.classList.toggle("disconnected", !enabled);
 }
 
 // 按 currentTurnId 切换 submitBtn 的文字 + class —— 同一个按钮承担「发送 / 停止」
@@ -235,29 +238,55 @@ const PERMISSION_OPTIONS = Object.freeze([
   { value: "full-access", label: "完全访问", desc: "放行所有工具（含潜在破坏性，谨慎）" },
 ]);
 
+// 贴 anchor 右侧；右侧不够（窄窗 / sidebar 贴边）退到 anchor 下方。两种 popover
+// （权限 / action）定位完全一致 —— 单点这里，避免漂移。
+function positionPopoverByAnchor(pop, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  pop.style.position = "fixed";
+  pop.style.left = `${Math.round(rect.right + 8)}px`;
+  pop.style.top = `${Math.round(rect.top)}px`;
+  const popRect = pop.getBoundingClientRect();
+  if (popRect.right > window.innerWidth - 8) {
+    const fallbackLeft = Math.max(8, rect.left);
+    pop.style.left = `${Math.round(fallbackLeft)}px`;
+    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
+  }
+}
+
+// 给 popover 装"点外面关 / Esc 关"的兜底。下一 tick 才挂 —— 否则触发 popover 那
+// 一下 click 自身冒泡到 document 上会立刻关掉。返回 detach 函数。
+function attachPopoverDismissHandlers(pop, onClose) {
+  const outside = (ev) => {
+    if (pop.contains(ev.target)) return;
+    onClose();
+  };
+  const esc = (ev) => {
+    if (ev.key === "Escape") {
+      ev.stopPropagation();
+      onClose();
+    }
+  };
+  setTimeout(() => {
+    document.addEventListener("mousedown", outside, true);
+    document.addEventListener("keydown", esc);
+  }, 0);
+  return () => {
+    document.removeEventListener("mousedown", outside, true);
+    document.removeEventListener("keydown", esc);
+  };
+}
+
 let permissionPopoverGuest = null;
+let _detachPermissionPopoverDismiss = null;
 
 function closePermissionPopover() {
   const pop = document.querySelector(".permission-popover");
   if (pop) pop.remove();
-  document.removeEventListener("mousedown", _popoverOutsideHandler, true);
-  document.removeEventListener("keydown", _popoverEscHandler);
-  permissionPopoverGuest = null;
-}
-
-function _popoverOutsideHandler(ev) {
-  const pop = document.querySelector(".permission-popover");
-  if (!pop) return;
-  // 点 popover 自身或当前 anchor 头像不关 —— 让用户在选项之间来回看；其它一律关。
-  if (pop.contains(ev.target)) return;
-  closePermissionPopover();
-}
-
-function _popoverEscHandler(ev) {
-  if (ev.key === "Escape") {
-    ev.stopPropagation();
-    closePermissionPopover();
+  if (_detachPermissionPopoverDismiss) {
+    _detachPermissionPopoverDismiss();
+    _detachPermissionPopoverDismiss = null;
   }
+  permissionPopoverGuest = null;
 }
 
 // 在 anchor 元素附近浮出权限选择 popover。再次点同一头像 → 切回关闭（toggle）。
@@ -269,15 +298,15 @@ function showPermissionPopover(anchor, g) {
   closePermissionPopover();
   const current = g.permission || DEFAULT_PERMISSION;
   const pop = document.createElement("div");
-  pop.className = "permission-popover";
+  pop.className = "popover permission-popover";
   const title = document.createElement("div");
-  title.className = "permission-popover-title";
+  title.className = "popover-title";
   title.textContent = `设置「${g.name}」的权限`;
   pop.appendChild(title);
   for (const opt of PERMISSION_OPTIONS) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "permission-option";
+    btn.className = "popover-option permission-option";
     btn.dataset.permission = opt.value;
     if (opt.value === current) btn.classList.add("current");
     // 左侧色点：与 V 标同色，read-only 用中性灰；视觉一眼分档。
@@ -286,19 +315,19 @@ function showPermissionPopover(anchor, g) {
     swatch.dataset.permission = opt.value;
     btn.appendChild(swatch);
     const meta = document.createElement("span");
-    meta.className = "permission-option-meta";
+    meta.className = "popover-option-meta";
     const label = document.createElement("span");
-    label.className = "permission-option-label";
+    label.className = "popover-option-label";
     label.textContent = opt.label;
     if (opt.value === current) {
       const tag = document.createElement("span");
-      tag.className = "permission-option-current";
+      tag.className = "popover-option-current";
       tag.textContent = "（当前）";
       label.appendChild(tag);
     }
     meta.appendChild(label);
     const desc = document.createElement("span");
-    desc.className = "permission-option-desc";
+    desc.className = "popover-option-desc";
     desc.textContent = opt.desc;
     meta.appendChild(desc);
     btn.appendChild(meta);
@@ -321,23 +350,11 @@ function showPermissionPopover(anchor, g) {
   appendMcpSection(pop, g);
   appendSkillsSection(pop, g);
   document.body.appendChild(pop);
-  // 定位：贴 anchor 右侧；右侧不够（窄窗 / sidebar 贴边）退到 anchor 下方。
-  const rect = anchor.getBoundingClientRect();
-  pop.style.position = "fixed";
-  pop.style.left = `${Math.round(rect.right + 8)}px`;
-  pop.style.top = `${Math.round(rect.top)}px`;
-  const popRect = pop.getBoundingClientRect();
-  if (popRect.right > window.innerWidth - 8) {
-    const fallbackLeft = Math.max(8, rect.left);
-    pop.style.left = `${Math.round(fallbackLeft)}px`;
-    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
-  }
+  positionPopoverByAnchor(pop, anchor);
   permissionPopoverGuest = g.name;
-  // 下一 tick 才挂 outside handler —— 否则当前 click（冒泡到 document）会立刻关掉。
-  setTimeout(() => {
-    document.addEventListener("mousedown", _popoverOutsideHandler, true);
-    document.addEventListener("keydown", _popoverEscHandler);
-  }, 0);
+  _detachPermissionPopoverDismiss = attachPopoverDismissHandlers(
+    pop, closePermissionPopover,
+  );
 }
 
 // MCP 因为带来"任意可执行"风险，必须用户显式勾才装载；skills 是 prompt，无门控只展示。
@@ -679,6 +696,8 @@ function renderSidebar(roomInfo) {
   userAvatarDataUri = roomInfo.user_avatar_data_uri || null;
   userMdContent = roomInfo.user_md_content || "";
   userMdSource = roomInfo.user_md_source || null;
+  roomTomlContent = roomInfo.room_toml_content || "";
+  roomTomlSource = roomInfo.room_toml_source || null;
   renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
@@ -1291,7 +1310,7 @@ function renderUserRow() {
   if (img) userAvatarWrapEl.appendChild(img);
 }
 
-editUserMdBtn.addEventListener("click", () => {
+function openEditUserMd() {
   if (!connected) return;
   userMdTextarea.value = userMdContent;
   userMdSourceHintEl.textContent = userMdSource
@@ -1299,7 +1318,14 @@ editUserMdBtn.addEventListener("click", () => {
     : "尚无 USER.md，保存后会落到 user_data_root/USER.md。";
   openModal(editUserModal);
   userMdTextarea.focus();
-});
+}
+
+function pickAvatarFile() {
+  if (!connected) return;
+  // reset 让相同文件再选也能触发 change（浏览器对同名同源文件默认不再 fire）。
+  avatarFileInput.value = "";
+  avatarFileInput.click();
+}
 
 userMdSubmitBtn.addEventListener("click", () => {
   if (!connected) return;
@@ -1309,13 +1335,6 @@ userMdSubmitBtn.addEventListener("click", () => {
   }));
   setStatus("", "保存用户配置…");
   closeModal(editUserModal);
-});
-
-uploadAvatarBtn.addEventListener("click", () => {
-  if (!connected) return;
-  // reset 让相同文件再选也能触发 change（浏览器对同名同源文件默认不再 fire）。
-  avatarFileInput.value = "";
-  avatarFileInput.click();
 });
 
 // 头像上传：浏览器对 PNG / JPEG / WebP / GIF 都能 <img> 原生解码 → 画进 canvas →
@@ -1495,7 +1514,7 @@ function cropAndEncodeAvatar(img) {
 }
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
-const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal];
+const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal, editRoomTomlModal];
 for (const modal of ALL_MODALS) {
   modal.addEventListener("click", (ev) => {
     if (ev.target === modal) closeModal(modal);
@@ -1510,12 +1529,127 @@ document.addEventListener("keydown", (ev) => {
 // 清空聊天：本地不抢先清 DOM，让回环一致 —— 服务端清完会重发 room_info +
 // room_history(空)，renderSidebar 一帧 messagesEl.replaceChildren；失败 / 服务端拒收
 // 时 UI 不会出现"明明清了又冒出来"的诡异状态。
-clearRoomBtn.addEventListener("click", () => {
+function clearCurrentRoom() {
   if (!connected) return;
   const roomName = roomNameEl.textContent;
   if (!window.confirm(`确定清空「${roomName}」的全部聊天记录？\n茶客在场，但本房间的 transcript / 摘要 / 游标会被重置。`)) return;
   ws.send(JSON.stringify({ type: Inbound.CLEAR_ROOM }));
   setStatus("", `清空「${roomName}」…`);
+}
+
+function openEditRoomToml() {
+  if (!connected) return;
+  roomTomlTextarea.value = roomTomlContent;
+  roomTomlSourceHintEl.textContent = roomTomlSource
+    ? `当前文件：${roomTomlSource}`
+    : "";
+  openModal(editRoomTomlModal);
+  roomTomlTextarea.focus();
+}
+
+roomTomlSubmitBtn.addEventListener("click", () => {
+  if (!connected) return;
+  ws.send(JSON.stringify({
+    type: Inbound.UPDATE_ROOM_TOML,
+    content: roomTomlTextarea.value,
+  }));
+  setStatus("", "保存房间配置…");
+  closeModal(editRoomTomlModal);
+});
+
+// 双击 anchor 弹的简单菜单：编辑配置 / 换头像 / 更改房间配置 / 清空聊天。
+// 共用 popover 定位 + 关闭兜底，与 permission popover 互斥（开一个关另一个）。
+let actionPopoverAnchor = null;
+let _detachActionPopoverDismiss = null;
+
+function closeActionPopover() {
+  const pop = document.querySelector(".action-popover");
+  if (pop) pop.remove();
+  if (_detachActionPopoverDismiss) {
+    _detachActionPopoverDismiss();
+    _detachActionPopoverDismiss = null;
+  }
+  actionPopoverAnchor = null;
+}
+
+// items: [{ label, desc?, onClick, danger? }]
+function showActionPopover(anchor, title, items) {
+  if (actionPopoverAnchor === anchor) {
+    closeActionPopover();
+    return;
+  }
+  closeActionPopover();
+  closePermissionPopover();
+  const pop = document.createElement("div");
+  pop.className = "popover action-popover";
+  const head = document.createElement("div");
+  head.className = "popover-title";
+  head.textContent = title;
+  pop.appendChild(head);
+  for (const it of items) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "popover-option action-option";
+    if (it.danger) btn.classList.add("danger");
+    const meta = document.createElement("span");
+    meta.className = "popover-option-meta";
+    const label = document.createElement("span");
+    label.className = "popover-option-label";
+    label.textContent = it.label;
+    meta.appendChild(label);
+    if (it.desc) {
+      const desc = document.createElement("span");
+      desc.className = "popover-option-desc";
+      desc.textContent = it.desc;
+      meta.appendChild(desc);
+    }
+    btn.appendChild(meta);
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      closeActionPopover();
+      try { it.onClick(); } catch (e) { console.error("action popover click handler 抛错", e); }
+    });
+    pop.appendChild(btn);
+  }
+  document.body.appendChild(pop);
+  positionPopoverByAnchor(pop, anchor);
+  actionPopoverAnchor = anchor;
+  _detachActionPopoverDismiss = attachPopoverDismissHandlers(
+    pop, closeActionPopover,
+  );
+}
+
+function showUserActionsPopover(anchor) {
+  if (!connected) return;
+  showActionPopover(anchor, "我（设置）", [
+    { label: "编辑配置", desc: "改 USER.md（显示名 / 个人偏好）", onClick: openEditUserMd },
+    { label: "换头像", desc: "PNG / JPG / WebP / GIF，自动裁方 + 压到 256px PNG", onClick: pickAvatarFile },
+  ]);
+}
+
+function showRoomActionsPopover(anchor) {
+  if (!connected) return;
+  const roomName = roomNameEl.textContent || "本房间";
+  showActionPopover(anchor, `房间「${roomName}」`, [
+    { label: "更改房间配置", desc: "直接编辑 room.toml（topic / rules / guests）", onClick: openEditRoomToml },
+    { label: "清空聊天", desc: "重置 transcript / 摘要 / 游标，茶客在场", danger: true, onClick: clearCurrentRoom },
+  ]);
+}
+
+// preventDefault 压住浏览器默认的 dblclick 选中文本行为，让 popover 弹出时 anchor
+// 不会被高亮选中。outside-close 的兜底来自 attachPopoverDismissHandlers 的 setTimeout
+// 延后挂载——dblclick 本身的 mousedown 已经在监听器装上之前结束，不会触发自关。
+userAvatarWrapEl.addEventListener("dblclick", (ev) => {
+  ev.preventDefault();
+  showUserActionsPopover(userAvatarWrapEl);
+});
+userNameEl.addEventListener("dblclick", (ev) => {
+  ev.preventDefault();
+  showUserActionsPopover(userAvatarWrapEl);
+});
+roomNameEl.addEventListener("dblclick", (ev) => {
+  ev.preventDefault();
+  showRoomActionsPopover(roomNameEl);
 });
 
 composer.addEventListener("submit", (ev) => {

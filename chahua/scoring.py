@@ -178,8 +178,12 @@ def _render_prompt(
 class IntentScorer:
     """便宜模型的"想不想接话"打分器。无内部状态，可被多 guest 并发复用。"""
 
-    # 留个口子：将来想给打分另设 max_tokens 时改这。
-    _MAX_TOKENS: int = 128
+    # JSON 输出本身 ~10 token 就够，但 Gemini 2.5 Flash 系列的 thinking budget 也算
+    # 进 max_tokens 里 —— 旧值 128 在 Gemini 上经常思考完只剩个位数 token 输出
+    # `{"score":` 就被 length 截掉（Finish Reason: length, Completion Tokens: 4）。
+    # 1024 给 thinking 留富余，对 OpenAI / Claude / DeepSeek 无 thinking 模型也只是
+    # 上限抬高，不会多用 token（实际输出还是 ~10 token）。
+    _MAX_TOKENS: int = 1024
 
     def __init__(self, llm_client: LLMClient) -> None:
         self._llm = llm_client

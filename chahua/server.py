@@ -87,6 +87,7 @@ INBOUND_CREATE_ROOM = "create_room"
 INBOUND_DELETE_ROOM = "delete_room"
 INBOUND_UPDATE_USER_MD = "update_user_md"
 INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
+INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
@@ -94,6 +95,16 @@ INBOUND_UPLOAD_FILE = "upload_file"
 # 单文件上限。WS 入站帧 max=4MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
 # 文件极限 ~3MB。设 2MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
 _UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _read_room_toml(room_dir: Path) -> str:
+    """读 ``room_dir/room.toml`` 原文。读盘失败 → 空串（room_info 不会因为这个炸掉）。"""
+    toml_path = room_dir / "room.toml"
+    try:
+        return toml_path.read_text("utf-8")
+    except OSError:
+        _log.exception("read_room_toml: %s 读盘失败", toml_path)
+        return ""
 
 
 def _attach_files_to_text(text: str, files: object) -> str:
@@ -346,6 +357,10 @@ class ChahuaServer:
                         if self._session.user_config.source is not None
                         else None
                     ),
+                    # 房间 room.toml 原文 + 路径 —— 前端「更改房间配置」modal prefill。
+                    # 读盘失败（理论上不会，session 已经成功 load 过一次）兜底空串。
+                    "room_toml_content": _read_room_toml(rc.room_dir),
+                    "room_toml_source": str(rc.room_dir / "room.toml"),
                     "current_room_id": rc.room_dir.name,
                     "rooms_available": discover_rooms(self._paths),
                     # 已在场茶客的 name 也在 personas_available 里 —— 前端按
@@ -590,6 +605,34 @@ class ChahuaServer:
             return
         self._session.reload_user_config(self._paths)
         _log.info("update_user_md: %d 字节已落盘", len(content))
+        self._emit_room_snapshot(sink)
+
+    def _update_room_toml(self, *, content: str, sink: EnvelopeSink) -> None:
+        """覆盖当前房间 room.toml 全文 + 重装 session + 重发 snapshot。
+
+        校验失败（语法 / 白名单 / persona 找不到）→ emit error notice + 重发当前 snapshot
+        让前端 UI 复位；admin.update_room_toml 已经把磁盘内容回滚到旧 toml。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.update_room_toml(room_dir, content, paths=self._paths)
+        except (ValueError, RoomConfigError) as e:
+            _log.warning("update_room_toml: room=%r 校验失败：%s", room_dir.name, e)
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"房间配置保存失败：{e}"
+            )
+            self._emit_room_snapshot(sink)
+            return
+        except Exception:
+            _log.exception("update_room_toml: room=%r 失败", room_dir.name)
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text="房间配置保存失败（详见服务端日志）"
+            )
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="update_room_toml"):
+            return
+        _log.info("update_room_toml: room=%r 已落盘", room_dir.name)
         self._emit_room_snapshot(sink)
 
     def _update_user_avatar(self, *, data_uri: str, sink: EnvelopeSink) -> None:
@@ -948,6 +991,14 @@ class ChahuaServer:
                 return
             await self._cancel_and_drain_inflight()
             self._update_user_md(content=content, sink=sink)
+            return
+        if msg_type == INBOUND_UPDATE_ROOM_TOML:
+            content = data.get("content")
+            if not isinstance(content, str):
+                _log.warning("ignoring update_room_toml with non-string content")
+                return
+            await self._cancel_and_drain_inflight()
+            self._update_room_toml(content=content, sink=sink)
             return
         if msg_type == INBOUND_IMPORT_PERSONA_FOLDER:
             src = data.get("path")

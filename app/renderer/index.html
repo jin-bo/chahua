@@ -15,9 +15,8 @@
     <aside id="sidebar" aria-label="房间成员">
       <div class="sidebar-section">
         <div class="sidebar-title">房间</div>
-        <div id="room-name" class="sidebar-room-name">—</div>
+        <div id="room-name" class="sidebar-room-name dblclick-anchor" title="双击：房间配置 / 清空聊天">—</div>
         <div id="room-topic" class="sidebar-room-topic"></div>
-        <button id="clear-room" type="button" class="sidebar-action" disabled>清空聊天</button>
       </div>
       <div class="sidebar-section">
         <div class="sidebar-title">
@@ -37,12 +36,8 @@
       <div class="sidebar-section" id="user-section">
         <div class="sidebar-title">我</div>
         <div class="user-row">
-          <span class="user-avatar-wrap" id="user-avatar-wrap"></span>
-          <span class="user-name" id="user-name">—</span>
-        </div>
-        <div class="user-actions">
-          <button id="edit-user-md" type="button" class="sidebar-action" disabled>编辑配置</button>
-          <button id="upload-avatar" type="button" class="sidebar-action" disabled title="支持 PNG / JPG / WebP / GIF（GIF 取首帧），自动居中裁方 + 压到 256px PNG">换头像</button>
+          <span class="user-avatar-wrap dblclick-anchor" id="user-avatar-wrap" title="双击：编辑配置 / 换头像"></span>
+          <span class="user-name dblclick-anchor" id="user-name" title="双击：编辑配置 / 换头像">—</span>
         </div>
         <input id="avatar-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
       </div>
@@ -118,6 +113,26 @@
         </div>
         <div class="modal-footer">
           <button id="user-md-submit" type="button" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="edit-room-toml-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>更改房间配置（room.toml）</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">
+            直接编辑当前房间的 room.toml：[room].name / topic / rules，[[guest]] 列表。
+            保存时服务端会校验白名单字段；语法或字段非法会回滚并提示。
+          </p>
+          <textarea id="room-toml-textarea" class="modal-textarea" spellcheck="false" rows="18"></textarea>
+          <div class="modal-hint" id="room-toml-source-hint"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="room-toml-submit" type="button" class="primary">保存</button>
         </div>
       </div>
     </div>

@@ -123,10 +123,11 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #guests li .avatar-wrap.permission-anchor:hover { opacity: 0.85; }
 #guests li .guest-name.permission-anchor:hover { color: #6b4f2a; text-decoration: underline; }
 
-/* 权限 popover 卡片 —— fixed 定位由 renderer.js 计算（贴 anchor 右侧）。
+/* popover 卡片底座 —— fixed 定位由 renderer.js 计算（贴 anchor 右侧）。
    宽度限定区间，避免短描述时太窄/长描述时撑爆。z-index 高于 modal-backdrop（100），
-   保证从 modal 里触发的 popover 也可见（虽然当前没这条路径，留余地）。 */
-.permission-popover {
+   保证从 modal 里触发的 popover 也可见。.permission-popover / .action-popover 是
+   按内容分的修饰类，只承载内容差异（左侧色点、danger 红 hover 等）。 */
+.popover {
   background: #fff;
   border: 1px solid #d0c8b4;
   border-radius: 6px;
@@ -137,14 +138,14 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   max-width: 300px;
   font-family: inherit;
 }
-.permission-popover-title {
+.popover-title {
   font-size: 11px;
   color: #888;
   padding: 4px 6px 6px;
   border-bottom: 1px solid #f0ebe0;
   margin-bottom: 4px;
 }
-.permission-option {
+.popover-option {
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -158,8 +159,8 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   font-family: inherit;
   color: #444;
 }
-.permission-option:hover:not(.current) { background: #f5f1e6; }
-.permission-option.current { background: #ece5d2; cursor: default; }
+.popover-option:hover:not(.current) { background: #f5f1e6; }
+.popover-option.current { background: #ece5d2; cursor: default; }
 /* 左侧小色点 —— 与 .permission-badge 同 [data-permission] 配色，read-only 中性灰。
    不复用 .permission-badge（V 标）—— popover 里的 ✓ 字符会混淆"已选"语义。 */
 .permission-swatch {
@@ -172,37 +173,37 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 }
 .permission-swatch[data-permission="workspace-write"] { background: #4a90e2; }
 .permission-swatch[data-permission="full-access"] { background: #d05050; }
-.permission-option-meta {
+.popover-option-meta {
   display: flex;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
 }
-.permission-option-label {
+.popover-option-label {
   font-size: 13px;
   font-weight: 500;
   color: #333;
 }
-.permission-option-current {
+.popover-option-current {
   margin-left: 4px;
   font-size: 10px;
   font-weight: normal;
   color: #888;
 }
-.permission-option-desc {
+.popover-option-desc {
   font-size: 11px;
   color: #888;
   line-height: 1.35;
 }
 
-/* popover 内的 MCP / Skills 摘要段 —— 用分隔线起头，与上面的 permission 选项分开。
+/* popover 内的 MCP / Skills 摘要段 —— 用分隔线起头，与上面的 option 列表分开。
    "信任 MCP" 勾选 + server 列表 / skill 列表都套同一组样式。 */
-.permission-popover .popover-section {
+.popover .popover-section {
   margin-top: 8px;
   padding-top: 6px;
   border-top: 1px solid #f0ebe0;
 }
-.permission-popover .popover-section-title {
+.popover .popover-section-title {
   font-size: 11px;
   color: #888;
   padding: 0 6px 4px;
@@ -688,12 +689,19 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#user-section .user-actions {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-#user-section .user-actions .sidebar-action { margin-top: 0; }
+/* 双击 anchor：room-name / user-avatar / user-name 上 hover 时给一个视觉暗示
+   "这里可以点"。disconnected 状态置灰 + 禁 cursor。 */
+.dblclick-anchor { cursor: pointer; }
+.dblclick-anchor:hover { background: #ece5d2; border-radius: 4px; }
+.sidebar-room-name.dblclick-anchor:hover,
+.user-name.dblclick-anchor:hover { padding-left: 4px; padding-right: 4px; margin-left: -4px; }
+.user-avatar-wrap.dblclick-anchor:hover { opacity: 0.85; }
+body.disconnected .dblclick-anchor { cursor: not-allowed; opacity: 0.6; }
+body.disconnected .dblclick-anchor:hover { background: transparent; }
+
+/* action popover 内容修饰：每条目稍微宽点；.danger 给破坏性动作（清空聊天）红 hover。 */
+.action-option { padding: 8px 10px; }
+.action-option.danger:hover:not(.current) { background: #f9e9e9; color: #b04040; }
 
 /* modal —— 添加茶客 / 新建房间 / 编辑用户配置 共用样式。
    backdrop 全屏半透明；.modal 居中卡片。点 backdrop 自身 / × 按钮 / ESC 都能关。 */
