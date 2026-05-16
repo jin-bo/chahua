@@ -55,6 +55,13 @@ export const Inbound = Object.freeze({
   UPDATE_USER_AVATAR: "update_user_avatar",
   // 覆盖当前房间 room.toml 全文。服务端校验失败会回滚 + emit notice(error)。
   UPDATE_ROOM_TOML: "update_room_toml",
+  // 结构化 mutator（P4 详细设置 modal 用）。payload 见对应 chahua/server.py
+  // _inbound_* —— spec=null 是合法 payload，语义"清整段，回房间默认"。
+  UPDATE_ROOM_ORCHESTRATOR: "update_room_orchestrator",
+  UPDATE_ROOM_LLM: "update_room_llm",
+  UPDATE_GUEST_LLM: "update_guest_llm",
+  UPDATE_GUEST_ISOLATION: "update_guest_isolation",
+  UPDATE_GUEST_EXTRA_MCP: "update_guest_extra_mcp",
   // persona 导入：本地文件夹（main 端 dialog 选目录后传 path）/ GitHub URL。
   // 成功 / 失败都走 NOTICE envelope 回报；前端再用 alert / status 显示。
   IMPORT_PERSONA_FOLDER: "import_persona_folder",

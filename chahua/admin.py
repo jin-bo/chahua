@@ -275,7 +275,7 @@ def _llm_spec_to_dict(spec: LLMSpec) -> dict[str, str]:
     重新拼回 ``provider/model`` 合并写法（设计 §2.1）；``temperature`` 不进 toml schema
     所以不出现在结果里。
     """
-    out: dict[str, str] = {"model": f"{spec.provider}/{spec.model}"}
+    out: dict[str, str] = {"model": spec.model_id}
     if spec.base_url:
         out["base_url"] = spec.base_url
     if spec.api_key_env:

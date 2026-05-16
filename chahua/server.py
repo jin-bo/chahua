@@ -32,7 +32,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Literal, Optional
 
 from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
@@ -93,6 +93,7 @@ INBOUND_UPDATE_ROOM_ORCHESTRATOR = "update_room_orchestrator"
 INBOUND_UPDATE_ROOM_LLM = "update_room_llm"
 INBOUND_UPDATE_GUEST_LLM = "update_guest_llm"
 INBOUND_UPDATE_GUEST_ISOLATION = "update_guest_isolation"
+INBOUND_UPDATE_GUEST_EXTRA_MCP = "update_guest_extra_mcp"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
@@ -111,6 +112,48 @@ def _read_room_toml(room_dir: Path) -> str:
     except OSError:
         _log.exception("read_room_toml: %s 读盘失败", toml_path)
         return ""
+
+
+def _mcp_summary_list(
+    servers: Optional[dict[str, dict]],
+) -> list[dict]:
+    """``{name -> cfg}`` → 前端 popover 展示用 list。
+
+    只挑 ``name`` / ``command`` / ``args`` —— ``env`` 含可能敏感的 token，**绝不下发**。
+    """
+    if not servers:
+        return []
+    return [
+        {
+            "name": name,
+            "command": str(cfg.get("command", "")),
+            "args": [str(a) for a in (cfg.get("args") or [])],
+        }
+        for name, cfg in servers.items()
+    ]
+
+
+# `_llm_summary` 的 ``source`` 字段：guest 段是 ``guest``/``room_default``，房间段是
+# ``room``/``default``。串字面挪到一处 + Literal 注解 → IDE 能挡 typo。
+LlmSource = Literal["guest", "room_default", "room", "default"]
+
+
+def _llm_summary(*, spec, source: LlmSource) -> dict:
+    """``LLMSpec`` → 前端 envelope 字典。
+
+    **绝不下发 ``api_key`` 本身**：envelope 一旦塞 key，前端 devtools / log dump 都能
+    看到，跨用户 user_data 共享更糟（设计 §2.2）。``api_key_ready`` 是 server 端探测
+    出的 bool —— ``ollama`` 本地不强鉴权所以永远 ready。
+    """
+    api_key_env = spec.default_api_key_env()
+    api_key_ready = spec.provider == "ollama" or bool(os.environ.get(api_key_env))
+    return {
+        "model": spec.model_id,
+        "base_url": spec.base_url,
+        "api_key_env": api_key_env,
+        "api_key_ready": api_key_ready,
+        "source": source,
+    }
 
 
 def _orchestrator_effective_dict(config: OrchestratorConfig) -> dict[str, object]:
@@ -177,6 +220,15 @@ def _require_bool(data: dict, key: str, *, where: str) -> Optional[bool]:
     v = data.get(key)
     if not isinstance(v, bool):
         _log.warning("ignoring %s: %s 必须是 bool，收到 %r", where, key, type(v))
+        return None
+    return v
+
+
+def _require_list(data: dict, key: str, *, where: str) -> Optional[list]:
+    """同 :func:`_require_str` —— 取 list 字段。空 list 是合法值（语义"清整段"），不拒。"""
+    v = data.get(key)
+    if not isinstance(v, list):
+        _log.warning("ignoring %s: %s 必须是 list，收到 %r", where, key, type(v))
         return None
     return v
 
@@ -351,39 +403,33 @@ class ChahuaServer:
     def _emit_room_info(self, sink: EnvelopeSink) -> None:
         """ws 连上即下发一次 ``room_info`` —— 前端拿来装 sidebar / @ 补全候选。
 
-        茶客信息从 ``room_config.guests``（``GuestConfig``）取而非运行时
-        ``session.guests``（``TeaGuest``）—— 与 ``rc.name`` / ``rc.topic`` 同走声明源；
-        P4 加 ``[[guest]].isolation`` 字段后这里读真值，前端按 ``data-isolation`` 渲染
-        无需改。P3.2.2 内 ``isolation="room"`` hardcode 占位。
-
-        ``avatar_data_uri`` / ``user_avatar_data_uri``：茶客 / 用户头像，与对应 md sibling
-        同名 ``.png``，base64 嵌进 envelope。缺图返 ``None``，前端按无头像渲染。
-
-        ``rooms_available`` / ``current_room_id``：P3.2.x 切房功能的 wire 输入 —— 前端
-        sidebar 列其它房间供切换。``current_room_id`` 用房间目录名（P4 才有
-        ``[room].id`` 稳定字段，与 envelope ``room_id`` 占位口径一致）。
-
-        副作用：runtime 期 ``permission`` 切换（P4 才支持）不会反映到 sidebar —— 届时加
-        ``room_info_delta`` wire 帧增量下发。
+        - **绝不下发 ``api_key`` 本身**：只出 ``api_key_env`` 名 + ``api_key_ready`` bool
+          （设计 §2.2，避免前端 devtools / log dump 泄露）。
+        - **persona vs 房间级 MCP 拆两块**：trust 门控不对称 —— persona sidecar 走 trust
+          清单（持续生效），``[[guest.extra_mcp_servers]]`` 是用户在自己 toml 里手写自动
+          信任。前端按各自语义渲染。``effective_mcp_names`` 是合并后实际装载（房间级覆盖
+          persona 同名），纯展示。
         """
         rc = self._session.room_config
+        # 一次性加载 trust 清单 —— 后面每 guest 走 ``in`` 查，避免 N 次 disk read。
+        trusted_personas = trust.list_trusted(self._paths)
         guests: list[dict] = []
         for gc in rc.guests:
             assets = discover_assets(gc.persona_path)
             persona_rel = persona_relative(gc.persona_path, self._paths)
-            mcp_trusted = bool(
-                assets.has_mcp and trust.is_mcp_trusted(self._paths, persona_rel)
+            persona_mcp_trusted = bool(
+                assets.has_mcp and persona_rel in trusted_personas
             )
-            # mcp_servers 在 envelope 里是 command / args 摘要 —— 让用户在勾"信任"前
-            # 能看清 persona 想跑啥；不附 env / cwd 等 corner-case 字段，完整内容看 mcp.json。
-            mcp_summary: list[dict] = []
-            if assets.has_mcp:
-                for name, cfg in assets.mcp_servers.items():
-                    mcp_summary.append({
-                        "name": name,
-                        "command": str(cfg.get("command", "")),
-                        "args": [str(a) for a in (cfg.get("args") or [])],
-                    })
+            persona_mcp_servers = _mcp_summary_list(assets.mcp_servers)
+            room_mcp_servers = _mcp_summary_list(gc.extra_mcp_servers)
+            # effective 装载顺序：persona (受信任时) + 房间级覆盖同名 —— 与
+            # chahua.guest._merged_mcp_configs 的合并语义一致。
+            effective: dict[str, None] = {}
+            if persona_mcp_trusted:
+                for s in persona_mcp_servers:
+                    effective[s["name"]] = None
+            for s in room_mcp_servers:
+                effective[s["name"]] = None
             workspace_path = gc.workspace_in(
                 paths=self._paths, room_dir=rc.room_dir,
             )
@@ -394,8 +440,14 @@ class ChahuaServer:
                 "workspace_path": str(workspace_path),
                 "avatar_data_uri": gc.read_avatar_data_uri(),
                 "persona_rel": persona_rel,
-                "mcp_trusted": mcp_trusted,
-                "mcp_servers": mcp_summary,
+                "persona_mcp_trusted": persona_mcp_trusted,
+                "persona_mcp_servers": persona_mcp_servers,
+                "room_mcp_servers": room_mcp_servers,
+                "effective_mcp_names": list(effective),
+                "llm": _llm_summary(
+                    spec=self._session.guest_specs[gc.name],
+                    source="guest" if gc.llm is not None else "room_default",
+                ),
                 "skills_available": list(assets.skills_available),
             })
         sink(
@@ -431,6 +483,17 @@ class ChahuaServer:
                         self._session.orchestrator.config
                     ),
                     "orchestrator_overrides_keys": sorted(rc.orchestrator_overrides),
+                    # 房间级 LLM section：与 guests[].llm 同构。
+                    # ``source`` 是 "room" 表示 [scoring]/[summary] 段在 toml 里有写；
+                    # "default" 表示该段缺失走的是房间默认（即 LLM_PROVIDER 环境变量）。
+                    "scoring_llm": _llm_summary(
+                        spec=self._session.scoring_spec,
+                        source="room" if rc.scoring_llm is not None else "default",
+                    ),
+                    "summary_llm": _llm_summary(
+                        spec=self._session.summary_spec,
+                        source="room" if rc.summary_llm is not None else "default",
+                    ),
                     "current_room_id": rc.room_dir.name,
                     "rooms_available": discover_rooms(self._paths),
                     # 已在场茶客的 name 也在 personas_available 里 —— 前端按
@@ -708,6 +771,34 @@ class ChahuaServer:
         if not self._replace_session(room_dir, sink, label="update_guest_llm"):
             return
         _log.info("update_guest_llm: name=%r spec=%r", name, spec_dict)
+        self._emit_room_snapshot(sink)
+
+    def _update_guest_extra_mcp(
+        self, *, name: str, servers: list, sink: EnvelopeSink
+    ) -> None:
+        """覆盖一位茶客的 ``[[guest.extra_mcp_servers]]`` 数组段 + 重装 session + 重发 snapshot。
+
+        ``servers=[]`` 即清掉该茶客的所有房间级 MCP entry（与 admin 层语义一致）。
+        session 重装是必要的 —— Agentao 在 ``__init__`` 时把 mcp_manager 装进去，运行时
+        无法热改；改完即 ``_replace_session`` 让那位茶客以新 MCP 装载起。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.update_guest_extra_mcp(
+                paths=self._paths, room_dir=room_dir,
+                name=name, servers=servers,
+            )
+        except Exception:
+            _log.exception(
+                "update_guest_extra_mcp: name=%r servers=%r 失败", name, servers
+            )
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="update_guest_extra_mcp"):
+            return
+        _log.info(
+            "update_guest_extra_mcp: name=%r servers=%d 项", name, len(servers)
+        )
         self._emit_room_snapshot(sink)
 
     def _remove_guest(self, *, name: str, sink: EnvelopeSink) -> None:
@@ -1206,6 +1297,19 @@ class ChahuaServer:
         await self._cancel_and_drain_inflight()
         self._update_guest_isolation(name=name, isolation=isolation, sink=sink)
 
+    async def _inbound_update_guest_extra_mcp(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_EXTRA_MCP)
+        if name is None:
+            return
+        # 每项 dict 内字段校验在 admin 层 _build_extra_mcp_servers；这里只挡 wire 层。
+        servers = _require_list(data, "servers", where=INBOUND_UPDATE_GUEST_EXTRA_MCP)
+        if servers is None:
+            return
+        await self._cancel_and_drain_inflight()
+        self._update_guest_extra_mcp(name=name, servers=servers, sink=sink)
+
     async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
         room_id = _require_str(data, "room_id", where=INBOUND_CREATE_ROOM)
         if room_id is None:
@@ -1362,6 +1466,7 @@ _INBOUND_HANDLERS: dict[str, _InboundHandler] = {
     INBOUND_UPDATE_ROOM_LLM: ChahuaServer._inbound_update_room_llm,
     INBOUND_UPDATE_GUEST_LLM: ChahuaServer._inbound_update_guest_llm,
     INBOUND_UPDATE_GUEST_ISOLATION: ChahuaServer._inbound_update_guest_isolation,
+    INBOUND_UPDATE_GUEST_EXTRA_MCP: ChahuaServer._inbound_update_guest_extra_mcp,
     INBOUND_UPDATE_USER_AVATAR: ChahuaServer._inbound_update_user_avatar,
     INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
     INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,

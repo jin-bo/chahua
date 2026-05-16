@@ -35,8 +35,12 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
 _DEFAULT_TEMPERATURE: float = 1.0
 
 
-def _provider_prefix(provider: str) -> str:
-    """provider name → 环境变量前缀。``openai`` → ``OPENAI``、``deep-seek`` → ``DEEP_SEEK``。"""
+def provider_env_prefix(provider: str) -> str:
+    """provider name → 环境变量前缀。``openai`` → ``OPENAI``、``deep-seek`` → ``DEEP_SEEK``。
+
+    公开 —— :func:`build_client` 解析 ``<PREFIX>_API_KEY`` 与 server 端 envelope 渲染
+    ``api_key_env`` 默认名两处共用，单点避免漂移。
+    """
     return provider.upper().replace("-", "_")
 
 
@@ -109,6 +113,15 @@ class LLMSpec:
     api_key_env: Optional[str] = None
     temperature: Optional[float] = None
 
+    @property
+    def model_id(self) -> str:
+        """``provider/model`` 合并字面量 —— 与 ``room.toml`` 字面、UI 展示同口径。"""
+        return f"{self.provider}/{self.model}"
+
+    def default_api_key_env(self) -> str:
+        """effective api_key 环境变量名：``api_key_env`` 优先，缺则 ``<PROVIDER>_API_KEY``。"""
+        return self.api_key_env or f"{provider_env_prefix(self.provider)}_API_KEY"
+
     @classmethod
     def from_env(cls) -> "LLMSpec":
         """从环境变量构造 spec：
@@ -127,7 +140,7 @@ class LLMSpec:
         推断的默认 spec"。
         """
         provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
-        prefix = _provider_prefix(provider)
+        prefix = provider_env_prefix(provider)
 
         model = os.environ.get(f"{prefix}_MODEL")
         if not model:
@@ -234,7 +247,7 @@ def build_client(spec: LLMSpec) -> LLMClient:
     - temperature 走 ``spec.temperature`` 优先；缺则按 ``LLM_TEMPERATURE`` 环境变量；
       仍缺走 :data:`_DEFAULT_TEMPERATURE`。
     """
-    api_key_env_name = spec.api_key_env or f"{_provider_prefix(spec.provider)}_API_KEY"
+    api_key_env_name = spec.default_api_key_env()
     api_key = os.environ.get(api_key_env_name)
     if spec.provider == "ollama" and not api_key:
         api_key = "ollama"

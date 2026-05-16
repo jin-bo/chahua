@@ -296,51 +296,69 @@ function appendListSection(pop, { title, listClass, items, renderItem, head }) {
 }
 
 function appendMcpSection(pop, g) {
-  const servers = Array.isArray(g.mcp_servers) ? g.mcp_servers : [];
-  if (servers.length === 0) return;
-  // change 事件发 inbound；server 收到后重装 session，新 mcp_trusted 回流。
-  const head = document.createElement("label");
-  head.className = "popover-checkbox";
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  cb.checked = !!g.mcp_trusted;
-  cb.addEventListener("change", () => {
-    if (!connected) {
-      cb.checked = !cb.checked;
-      return;
-    }
-    const trusted = cb.checked;
-    ws.send(JSON.stringify({
-      type: Inbound.SET_PERSONA_MCP_TRUST,
-      persona_rel: g.persona_rel,
-      trusted,
-    }));
-    setStatus(
-      "",
-      trusted
-        ? `信任「${g.name}」的 MCP 服务器…`
-        : `撤销对「${g.name}」MCP 的信任…`,
-    );
-    closePermissionPopover();
-  });
-  head.append(cb, document.createTextNode("信任此 persona 的 MCP（持续生效，跨房间）"));
-  appendListSection(pop, {
-    title: "MCP 服务器",
-    listClass: "popover-mcp-list",
-    items: servers,
-    head,
-    renderItem: (li, s) => {
-      const name = document.createElement("span");
-      name.className = "popover-mcp-name";
-      name.textContent = s.name;
-      const cmd = document.createElement("span");
-      cmd.className = "popover-mcp-cmd";
-      const args = Array.isArray(s.args) ? s.args : [];
-      cmd.textContent = `${s.command || "?"} ${args.join(" ")}`.trim();
-      cmd.title = cmd.textContent;
-      li.append(name, cmd);
-    },
-  });
+  // P4.4：envelope 把 MCP 拆成两块。
+  //   - persona_mcp_servers：persona sidecar mcp.json，整 persona 一刀切走 trust。
+  //   - room_mcp_servers：[[guest.extra_mcp_servers]]，自动信任，逐条可编辑（P4.5 UI）。
+  // popover 这里仅做"显示 + persona 信任开关"。逐条增删走详细设置 modal（P4.5）。
+  const personaServers = Array.isArray(g.persona_mcp_servers) ? g.persona_mcp_servers : [];
+  const roomServers = Array.isArray(g.room_mcp_servers) ? g.room_mcp_servers : [];
+  if (personaServers.length === 0 && roomServers.length === 0) return;
+
+  const renderRow = (li, s) => {
+    const name = document.createElement("span");
+    name.className = "popover-mcp-name";
+    name.textContent = s.name;
+    const cmd = document.createElement("span");
+    cmd.className = "popover-mcp-cmd";
+    const args = Array.isArray(s.args) ? s.args : [];
+    cmd.textContent = `${s.command || "?"} ${args.join(" ")}`.trim();
+    cmd.title = cmd.textContent;
+    li.append(name, cmd);
+  };
+
+  if (personaServers.length > 0) {
+    const head = document.createElement("label");
+    head.className = "popover-checkbox";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!g.persona_mcp_trusted;
+    cb.addEventListener("change", () => {
+      if (!connected) {
+        cb.checked = !cb.checked;
+        return;
+      }
+      const trusted = cb.checked;
+      ws.send(JSON.stringify({
+        type: Inbound.SET_PERSONA_MCP_TRUST,
+        persona_rel: g.persona_rel,
+        trusted,
+      }));
+      setStatus(
+        "",
+        trusted
+          ? `信任「${g.name}」的 MCP 服务器…`
+          : `撤销对「${g.name}」MCP 的信任…`,
+      );
+      closePermissionPopover();
+    });
+    head.append(cb, document.createTextNode("信任此 persona 的 MCP（持续生效，跨房间）"));
+    appendListSection(pop, {
+      title: "persona 自带 MCP",
+      listClass: "popover-mcp-list",
+      items: personaServers,
+      head,
+      renderItem: renderRow,
+    });
+  }
+
+  if (roomServers.length > 0) {
+    appendListSection(pop, {
+      title: "房间级 MCP（自动信任）",
+      listClass: "popover-mcp-list",
+      items: roomServers,
+      renderItem: renderRow,
+    });
+  }
 }
 
 function appendSkillsSection(pop, g) {

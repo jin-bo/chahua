@@ -35,6 +35,7 @@ from chahua.server import (
     INBOUND_REMOVE_GUEST,
     INBOUND_SET_PERSONA_MCP_TRUST,
     INBOUND_SWITCH_ROOM,
+    INBOUND_UPDATE_GUEST_EXTRA_MCP,
     INBOUND_UPDATE_GUEST_ISOLATION,
     INBOUND_UPDATE_GUEST_LLM,
     INBOUND_UPDATE_GUEST_PERMISSION,
@@ -149,6 +150,11 @@ class _SpyServer(ChahuaServer):
     def _update_guest_isolation(self, *, name, isolation, sink):  # type: ignore[override]
         self.calls.append((
             "_update_guest_isolation", {"name": name, "isolation": isolation},
+        ))
+
+    def _update_guest_extra_mcp(self, *, name, servers, sink):  # type: ignore[override]
+        self.calls.append((
+            "_update_guest_extra_mcp", {"name": name, "servers": servers},
         ))
 
     def _update_user_avatar(self, *, data_uri, sink):  # type: ignore[override]
@@ -766,6 +772,61 @@ async def test_update_guest_isolation_ok(srv: _SpyServer):
 async def test_update_guest_isolation_bad_payload(srv: _SpyServer, payload):
     """非法 isolation 值（如 'rogue'）由 admin 层在 _update_guest_isolation 内拒；
     这里只盯 wire 层的"必字段缺 / 类型错"。"""
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0
+
+
+# ── update_guest_extra_mcp（P4.4）─────────────────────────────────────────
+
+
+async def test_update_guest_extra_mcp_ok(srv: _SpyServer):
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_GUEST_EXTRA_MCP,
+            "name": "宝总",
+            "servers": [
+                {"name": "web", "command": "npx", "args": ["-y", "@mcp/web"]},
+                {"name": "fs", "command": "fs-mcp", "env": {"ROOT": "/tmp"}},
+            ],
+        },
+        _sink,
+    )
+    assert srv.cancel_drain_count == 1
+    assert srv.calls == [(
+        "_update_guest_extra_mcp",
+        {
+            "name": "宝总",
+            "servers": [
+                {"name": "web", "command": "npx", "args": ["-y", "@mcp/web"]},
+                {"name": "fs", "command": "fs-mcp", "env": {"ROOT": "/tmp"}},
+            ],
+        },
+    )]
+
+
+async def test_update_guest_extra_mcp_empty_list_clears(srv: _SpyServer):
+    """空 list 是合法 payload —— 语义"清掉所有 entry"，与 admin 层一致。"""
+    await srv._handle_inbound(
+        {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "name": "宝总", "servers": []},
+        _sink,
+    )
+    assert srv.calls == [(
+        "_update_guest_extra_mcp", {"name": "宝总", "servers": []},
+    )]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "servers": []},                # 缺 name
+    {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "name": "", "servers": []},     # 空 name
+    {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "name": "宝总"},                  # 缺 servers
+    {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "name": "宝总", "servers": None},  # null
+    {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "name": "宝总", "servers": {}},    # dict 不是 list
+    {"type": INBOUND_UPDATE_GUEST_EXTRA_MCP, "name": "宝总", "servers": "x"},   # str
+])
+async def test_update_guest_extra_mcp_bad_payload(srv: _SpyServer, payload):
+    """每项内字段非法（缺 name / command / 重名）由 admin 层 ``_build_extra_mcp_servers``
+    在 mutator 里拒；这里只盯 wire 层的"必字段缺 / 类型错"。"""
     await srv._handle_inbound(payload, _sink)
     assert srv.calls == []
     assert srv.cancel_drain_count == 0
