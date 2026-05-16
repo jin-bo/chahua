@@ -154,20 +154,20 @@
             <div class="modal-hint">影响"由谁发言、连续几轮、什么时候等用户"。留空恢复默认。</div>
             <div class="modal-orch-grid">
               <label class="modal-field">
-                <span>意愿阈值 want_threshold（0~1，默认 0.45）</span>
-                <input id="edit-room-orch-want-threshold" type="number" step="0.05" min="0" max="1" placeholder="0.45">
+                <span>意愿阈值 <code>want_threshold</code></span>
+                <input id="edit-room-orch-want-threshold" type="number" step="0.05" min="0" max="1" placeholder="0~1，默认 0.45">
               </label>
               <label class="modal-field">
-                <span>连续 AI 轮上限 max_consecutive_ai_turns（≥1，默认 4）</span>
-                <input id="edit-room-orch-max-turns" type="number" min="1" step="1" placeholder="4">
+                <span>连续 AI 轮上限 <code>max_consecutive_ai_turns</code></span>
+                <input id="edit-room-orch-max-turns" type="number" min="1" step="1" placeholder="≥1，默认 4">
               </label>
               <label class="modal-field">
-                <span>冷却轮数 speaker_cooldown_turns（≥0，默认 1）</span>
-                <input id="edit-room-orch-cooldown" type="number" min="0" step="1" placeholder="1">
+                <span>冷却轮数 <code>speaker_cooldown_turns</code></span>
+                <input id="edit-room-orch-cooldown" type="number" min="0" step="1" placeholder="≥0，默认 1">
               </label>
               <label class="modal-field">
-                <span>onboarding 阈值 onboarding_threshold（≥1，默认 20）</span>
-                <input id="edit-room-orch-onboarding" type="number" min="1" step="1" placeholder="20">
+                <span>onboarding 阈值 <code>onboarding_threshold</code></span>
+                <input id="edit-room-orch-onboarding" type="number" min="1" step="1" placeholder="≥1，默认 20">
               </label>
             </div>
           </fieldset>

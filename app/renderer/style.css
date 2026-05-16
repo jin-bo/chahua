@@ -886,13 +886,25 @@ body.disconnected .dblclick-anchor:hover { background: transparent; }
   font-size: 12px;
 }
 .modal-secondary:hover { background: #ece5d2; }
-/* 房间详细设置 modal：编排参数 4 字段两列网格。 */
+/* 房间详细设置 modal：编排参数 4 字段两列网格。label 强制单行 + ellipsis 兜底，
+   范围 / 默认值放进 input placeholder（聚焦时消失），4 格高度一致 input 竖直对齐。 */
 .modal-orch-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px 12px;
 }
 .modal-orch-grid .modal-field { margin-bottom: 0; }
+.modal-orch-grid .modal-field > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.modal-orch-grid .modal-field > span code {
+  font-size: 11px;
+  color: #6b4f2a;
+  background: transparent;
+}
 .modal-orch-grid input[type="number"] {
   width: 100%;
   padding: 4px 8px;
