@@ -70,9 +70,13 @@ def _print_banner(session: RoomSession, *, paths: Paths) -> None:
         f"{g.name}({g.permission})" if g.permission != "read-only" else g.name
         for g in session.guests
     ]
-    # 三位茶客同一 LLMClient → 共一个 model 字段；P4 接 room.toml provider/model 后改成各自的。
-    model = session.guests[0].agent.llm.model
-    print(f"在场茶客：{'、'.join(parts)}   provider：{session.provider}   模型：{model}")
+    # 全茶客共享一份 LLMClient（房间默认 spec）；P4.1 起每茶客可独立配 client，
+    # 那时 banner 应改成"按 guest 列模型"。
+    spec = session.room_default_spec
+    print(
+        f"在场茶客：{'、'.join(parts)}   "
+        f"房间默认模型：{spec.provider}/{spec.model}"
+    )
     print("输入回车发送；空行 / /quit 退出；/info 看权限状态；@<名字> 直接点茶客。")
     print("─" * 60)
 

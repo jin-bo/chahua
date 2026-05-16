@@ -23,13 +23,57 @@ import re
 import shutil
 import tomllib
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, TypedDict
 
 from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
 from .config import RoomConfig, RoomConfigError, load_room_config, read_avatar_data_uri
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 from .persona_assets import persona_relative, search_roots
+
+
+# ── 完整 room.toml 视图（mutator 内部用，对应 docs/P4-专业茶客配置闭环.md §4.4.1）─
+#
+# 当前消费 name / topic / rules / user_md / guests 五个字段位（emit 由 _render_room_toml
+# 实现）；orchestrator_overrides / scoring / summary 字段位留好，由 P4.0+ 各自 PR 一并
+# 加 emit + load —— "schema 与运行时消费绑同一 PR"。
+class GuestSnapshot(TypedDict, total=False):
+    """单个 ``[[guest]]`` 表的字段视图。
+
+    ``total=False`` 让 P4.1+ 加新字段时不破现有构造（mutator 只填它知道的字段；
+    snapshot reader 用 ``.get()`` 拿值）。
+    """
+    name: str
+    persona: str
+    permission: str
+    # P4.1+: isolation: Literal["room", "global"]
+    # P4.1+: llm: dict  (LLMSpec 序列化结果)
+    # P4.1+: extra_mcp_servers: list[dict]
+
+
+class TomlSnapshot(TypedDict, total=False):
+    name: str
+    topic: str
+    rules: str
+    user_md: Optional[str]                       # [room].user_md；None / "" = 不写
+    orchestrator_overrides: dict[str, Any]       # 空 dict = 不写编排字段（P4.0 消费）
+    scoring: Optional[dict]                      # None = 不写 [scoring]（P4.1）
+    summary: Optional[dict]                      # None = 不写 [summary]（P4.1）
+    guests: list[GuestSnapshot]
+
+
+# render 时认得的 guest 字段；其它字段位（isolation / llm / extra_mcp_servers）由
+# P4.1+ 加 emit 时一并扩这个 set。
+_ALLOWED_GUEST_EMIT: frozenset[str] = frozenset({"name", "persona", "permission"})
+
+# 与 _render_room_toml 一一对应：每个 (label, 取 snapshot 值的 key, owner) 三元组在
+# emit 时若非空就 raise NotImplementedError，等对应 P4.x PR 把 emit 一起加上。
+_DEFERRED_TOP_EMIT: tuple[tuple[str, str, str], ...] = (
+    ("orchestrator_overrides", "orchestrator_overrides", "P4.0"),
+    ("[scoring]", "scoring", "P4.1"),
+    ("[summary]", "summary", "P4.1"),
+)
+
 
 _log = logging.getLogger(__name__)
 
@@ -195,40 +239,62 @@ def _toml_basic_string(s: str) -> str:
     return '"' + "".join(out) + '"'
 
 
-def write_room_toml(
-    room_dir: Path,
-    *,
-    name: str,
-    topic: str,
-    rules: str,
-    guests: Sequence[dict],
-) -> None:
-    """把 room.toml 整个重写。原文件如有手工注释 / 排版会被丢弃（见模块 docstring 说明）。
+def _render_room_toml(snapshot: TomlSnapshot) -> str:
+    """``TomlSnapshot`` → ``room.toml`` 文本。纯函数（无 IO）。
 
-    `guests` 每项必含 `name` / `persona`；`permission` 缺省 :data:`DEFAULT_MODE`。
+    当前 emit 范围：``[room].{name, topic, rules, user_md}`` + ``[[guest]].{name,
+    persona, permission}``。其它字段（编排参数 / [scoring] / [summary] / guest
+    isolation/llm/extra_mcp_servers）只有字段位，emit 留给 P4.0+ 在加 schema 解析的同 PR
+    一并实现 —— 现在若 snapshot 携带这些非空字段就 :class:`NotImplementedError` 防御，
+    避免出现 "snapshot 接受 / 写盘但 load_room_config 拒" 的中间态写坏 toml。
     """
+    for label, key, owner in _DEFERRED_TOP_EMIT:
+        if snapshot.get(key):
+            raise NotImplementedError(
+                f"{label} 的 toml 写出由 {owner} 加；snapshot 暂不应携带"
+            )
+
     lines: list[str] = ["[room]"]
-    lines.append(f"name  = {_toml_basic_string(name)}")
-    lines.append(f"topic = {_toml_basic_string(topic or '')}")
-    lines.append(f"rules = {_toml_basic_string(rules or '')}")
-    for g in guests:
+    lines.append(f"name  = {_toml_basic_string(snapshot['name'])}")
+    lines.append(f"topic = {_toml_basic_string(snapshot.get('topic') or '')}")
+    lines.append(f"rules = {_toml_basic_string(snapshot.get('rules') or '')}")
+    user_md = snapshot.get("user_md")
+    if user_md:
+        lines.append(f"user_md = {_toml_basic_string(user_md)}")
+
+    for g in snapshot["guests"]:
         gname = str(g["name"])
-        gpersona = str(g["persona"])
-        gpermission = str(g.get("permission") or DEFAULT_MODE)
+        unknown = set(g) - _ALLOWED_GUEST_EMIT
+        if unknown:
+            raise NotImplementedError(
+                f"[[guest]] {gname!r} 携带字段 {sorted(unknown)} 的 toml 写出由 P4.x 加；"
+                f"snapshot 暂不应携带"
+            )
         lines.append("")
         lines.append("[[guest]]")
         lines.append(f"name       = {_toml_basic_string(gname)}")
-        lines.append(f"persona    = {_toml_basic_string(gpersona)}")
-        lines.append(f"permission = {_toml_basic_string(gpermission)}")
-    text = "\n".join(lines) + "\n"
-    write_text_atomic(room_dir / "room.toml", text)
+        lines.append(f"persona    = {_toml_basic_string(str(g['persona']))}")
+        lines.append(
+            f"permission = {_toml_basic_string(str(g.get('permission') or DEFAULT_MODE))}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_room_toml(room_dir: Path, snapshot: TomlSnapshot) -> None:
+    """把 ``snapshot`` 整段渲染并重写 ``room_dir/room.toml``（不校验）。
+
+    原文件如有手工注释 / 排版会被丢弃（见模块 docstring）。校验路径走
+    :func:`_rewrite_and_validate`（mutator 端）或 :func:`update_room_toml`（raw editor 端），
+    本函数仅是落盘。
+    """
+    write_text_atomic(room_dir / "room.toml", _render_room_toml(snapshot))
 
 
 # ── room.toml 读现状（mutator 用，区别于 config.load_room_config 的严格校验路径）─
 
 
-def _read_existing_for_mutate(room_dir: Path, paths: Paths) -> dict:
-    """读 room.toml 当前内容，返回标准化的 dict 形态（喂给 write_room_toml）。
+def _read_existing_for_mutate(room_dir: Path, paths: Paths) -> TomlSnapshot:
+    """读 room.toml 当前内容，返回完整 :class:`TomlSnapshot`。
 
     走 :func:`chahua.config.load_room_config` 而非裸 tomllib —— 保证 mutator 路径
     上看到的快照与启动期等价（白名单严格）；用户如果手 edit 出非法 toml，本函数也会
@@ -238,18 +304,26 @@ def _read_existing_for_mutate(room_dir: Path, paths: Paths) -> dict:
     return _room_config_to_dict(rc, paths)
 
 
-def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> dict:
-    """`RoomConfig` → mutator 内部用的 dict 形态。
+def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
+    """`RoomConfig` → :class:`TomlSnapshot`。
 
     `persona` 字段尽量还原成"相对 chahua/personas/"的形式 —— 用户在 toml 里那么写，
     我们 mutator 写回去也保持一致；但 `RoomConfig.GuestConfig.persona_path` 已 resolve
     成绝对路径，丢了原始相对写法。回退策略：如果 absolute path 在某个搜索根下，重算
     相对值；否则保留 absolute（兼容用户硬编绝对路径的极少数场景）。
+
+    P4.-1 还原范围：name / topic / rules / user_md_override / guests 三件套。其余字段位
+    （orchestrator_overrides / scoring / summary / guest 新字段）置空 —— config.py 当前
+    白名单仍拒，所以 snapshot 也不可能有非空值；P4.0+ 在加 schema 解析的同 PR 一并填这里。
     """
     return {
         "name": rc.name,
         "topic": rc.topic,
         "rules": rc.rules,
+        "user_md": rc.user_md_override,
+        "orchestrator_overrides": {},
+        "scoring": None,
+        "summary": None,
         "guests": [
             {
                 "name": gc.name,
@@ -309,10 +383,14 @@ def create_room(
     room_dir = paths.user_data_root / "rooms" / room_id
     # mkdir(exist_ok=False) 自身就会 raise FileExistsError；不另设 if exists 兜底。
     room_dir.mkdir(parents=True, exist_ok=False)
+    snapshot: TomlSnapshot = {
+        "name": name,
+        "topic": topic,
+        "rules": rules,
+        "guests": normalized_guests,
+    }
     try:
-        write_room_toml(
-            room_dir, name=name, topic=topic, rules=rules, guests=normalized_guests
-        )
+        write_room_toml(room_dir, snapshot)
         return load_room_config(room_dir, paths=paths)
     except Exception:
         # 校验 / 写失败 → 回滚整个目录，避免半成品房间挂在 sidebar 列表里。
@@ -354,10 +432,10 @@ def add_guest(
         name = Path(persona).stem
     if any(g["name"] == name for g in snapshot["guests"]):
         raise ValueError(f"已有同名茶客：{name!r}")
-
-    new_guest = {"name": name, "persona": persona, "permission": permission}
-    new_guests = list(snapshot["guests"]) + [new_guest]
-    return _rewrite_and_validate(room_dir, snapshot, new_guests, paths)
+    snapshot["guests"] = list(snapshot["guests"]) + [
+        {"name": name, "persona": persona, "permission": permission}
+    ]
+    return _rewrite_and_validate(room_dir, snapshot, paths)
 
 
 def remove_guest(*, paths: Paths, room_dir: Path, name: str) -> RoomConfig:
@@ -375,7 +453,8 @@ def remove_guest(*, paths: Paths, room_dir: Path, name: str) -> RoomConfig:
         raise ValueError(f"茶客 {name!r} 不在房间里")
     if not new_guests:
         raise ValueError("不能移除最后一位茶客（房间至少要有 1 人）")
-    return _rewrite_and_validate(room_dir, snapshot, new_guests, paths)
+    snapshot["guests"] = new_guests
+    return _rewrite_and_validate(room_dir, snapshot, paths)
 
 
 def update_guest_permission(
@@ -402,32 +481,50 @@ def update_guest_permission(
             new_guests.append(g)
     if not found:
         raise ValueError(f"茶客 {name!r} 不在房间里")
-    return _rewrite_and_validate(room_dir, snapshot, new_guests, paths)
+    snapshot["guests"] = new_guests
+    return _rewrite_and_validate(room_dir, snapshot, paths)
 
 
-def _rewrite_and_validate(
-    room_dir: Path, snapshot: dict, new_guests: list[dict], paths: Paths
+def _write_text_and_validate(
+    room_dir: Path, new_content: str, *, paths: Paths
 ) -> RoomConfig:
-    """共用：写新 toml + 重新加载校验；失败回滚到 snapshot。"""
-    write_room_toml(
-        room_dir,
-        name=snapshot["name"],
-        topic=snapshot["topic"],
-        rules=snapshot["rules"],
-        guests=new_guests,
-    )
+    """共用写盘 + 校验 + 回滚 helper。结构化 mutator 与 raw editor 都走这条路：
+
+    1. 读旧 bytes（缺文件 → ``None``，意味着是首次创建场景）。
+    2. 写新文本（``write_text_atomic``）。
+    3. 重 ``load_room_config`` 校验。
+    4. 失败 → 回写旧 bytes（或删空 toml）后 raise。
+
+    P4.-1 把"结构化 mutator 走 dict-snapshot 重写回滚"路径改成"统一走旧 bytes 回滚"
+    —— 避免 "snapshot 自身就 corrupt 再写回去" 的边角，也保留用户原始格式（multi-table
+    顺序 / 留白）。
+    """
+    toml_path = room_dir / "room.toml"
+    try:
+        old_bytes: Optional[bytes] = toml_path.read_bytes()
+    except FileNotFoundError:
+        old_bytes = None
+    write_text_atomic(toml_path, new_content)
     try:
         return load_room_config(room_dir, paths=paths)
     except RoomConfigError:
-        # 回滚：把 snapshot 写回去，让 toml 与启动期看到的一致。
-        write_room_toml(
-            room_dir,
-            name=snapshot["name"],
-            topic=snapshot["topic"],
-            rules=snapshot["rules"],
-            guests=snapshot["guests"],
-        )
+        if old_bytes is not None:
+            write_bytes_atomic(toml_path, old_bytes)
+        else:
+            toml_path.unlink(missing_ok=True)
         raise
+
+
+def _rewrite_and_validate(
+    room_dir: Path, snapshot: TomlSnapshot, paths: Paths
+) -> RoomConfig:
+    """结构化 mutator 入口：``snapshot`` → 渲染 toml 文本 → 走 :func:`_write_text_and_validate`。
+
+    snapshot 经 :func:`_render_room_toml` 转文本（emit 路径里若携带 P4.0+ 才支持的字段
+    会 :class:`NotImplementedError`，避免写出运行时未消费的字段）。
+    """
+    new_text = _render_room_toml(snapshot)
+    return _write_text_and_validate(room_dir, new_text, paths=paths)
 
 
 # ── USER.md / 头像 mutator ────────────────────────────────────────────────
@@ -498,29 +595,15 @@ def update_room_toml(room_dir: Path, content: str, *, paths: Paths) -> RoomConfi
 
     与 add_guest / update_guest_permission 那条「结构化 mutator」路径并存 —— 这里是
     「raw editor」入口（前端 textarea 直编），让用户能改 [room] / [[guest]] 任何字段，
-    包括 add/remove_guest 无法直接表达的 rules 修订。
+    包括 add/remove_guest 无法直接表达的 rules 修订。底层共用 :func:`_write_text_and_validate`
+    的"写 + 校验 + 回滚旧 bytes" helper。
     """
     encoded = content.encode("utf-8")
     if len(encoded) > _ROOM_TOML_MAX_BYTES:
         raise ValueError(
             f"room.toml 太大（{len(encoded)} bytes，上限 {_ROOM_TOML_MAX_BYTES}）"
         )
-    toml_path = room_dir / "room.toml"
-    # snapshot 老文本用于校验失败回滚；room_dir 已存在意味着 toml 也应在（否则 session
-    # 装不起来），但防御性兜底 missing 情形。
-    try:
-        old_bytes = toml_path.read_bytes()
-    except FileNotFoundError:
-        old_bytes = None
-    write_text_atomic(toml_path, content)
-    try:
-        return load_room_config(room_dir, paths=paths)
-    except RoomConfigError:
-        if old_bytes is not None:
-            write_bytes_atomic(toml_path, old_bytes)
-        else:
-            toml_path.unlink(missing_ok=True)
-        raise
+    return _write_text_and_validate(room_dir, content, paths=paths)
 
 
 def update_user_avatar(

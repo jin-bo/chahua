@@ -232,10 +232,11 @@ class ChahuaServer:
                 f"茶话室 server 监听 ws://{self._host}:{self._port}",
                 file=sys.stderr,
             )
+            spec = self._session.room_default_spec
             print(
                 f"房间：{self._session.room_config.name}  "
                 f"({self._session.room.latest_seq} 条历史)  "
-                f"provider：{self._session.provider}",
+                f"房间默认模型：{spec.provider}/{spec.model}",
                 file=sys.stderr,
             )
             await stop.wait()

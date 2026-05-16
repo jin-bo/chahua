@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ from ._paths import Paths
 from .config import RoomConfig, load_room_config
 from .cursor import GuestCursor
 from .guest import TeaGuest
+from .llm_spec import LLMSpec, build_client
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .persona_assets import discover_assets, persona_relative
 from .room import Room
@@ -39,20 +39,6 @@ _log = logging.getLogger(__name__)
 DEFAULT_ROOM_REL: Path = Path("rooms/p1-test")
 
 
-# LLMClient provider 选择。``LLM_PROVIDER`` 未设或空串默认 openai。
-_DEFAULT_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com/v1",
-    "deepseek": "https://api.deepseek.com/v1",
-    "moonshot": "https://api.moonshot.cn/v1",
-    "siliconflow": "https://api.siliconflow.cn/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "ollama": "http://localhost:11434/v1",
-}
-
-# 闲聊场景调高，比 agentao 自带的 0.2 暖；可被 ``LLM_TEMPERATURE`` 覆盖。
-_DEFAULT_TEMPERATURE: float = 1.0
-
-
 def load_env_files(paths: Paths) -> None:
     """凭码查找顺序（高 → 低）：shell export > ``user_data_root/.env`` > ``~/.env``。
 
@@ -62,61 +48,6 @@ def load_env_files(paths: Paths) -> None:
     """
     load_dotenv(paths.user_data_root / ".env")
     load_dotenv(Path.home() / ".env")
-
-
-def _make_llm_client() -> tuple[LLMClient, str]:
-    """从环境变量构造 LLMClient，返回 ``(client, provider_name)``。
-
-    选哪家由 ``LLM_PROVIDER`` 决定（未设或空字符串时默认 ``openai``）。
-    然后按前缀读 ``<PROVIDER>_API_KEY/_BASE_URL/_MODEL``。
-    """
-    provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
-    prefix = provider.upper().replace("-", "_")
-
-    api_key = os.environ.get(f"{prefix}_API_KEY")
-    base_url = os.environ.get(f"{prefix}_BASE_URL") or _DEFAULT_BASE_URLS.get(provider)
-    model = os.environ.get(f"{prefix}_MODEL")
-
-    if provider == "ollama" and not api_key:
-        # ollama 本地不强制 API_KEY，给个占位让 LLMClient 校验过。
-        api_key = "ollama"
-
-    required: list[tuple[str, str | None]] = [
-        (f"{prefix}_API_KEY", api_key),
-        (f"{prefix}_MODEL", model),
-    ]
-    if not base_url:
-        required.append((f"{prefix}_BASE_URL", base_url))
-    missing = [n for n, v in required if not v]
-    if missing:
-        known = ", ".join(sorted(_DEFAULT_BASE_URLS.keys()))
-        raise SystemExit(
-            f"LLM_PROVIDER={provider!r}：缺少环境变量 {', '.join(missing)}。\n"
-            f"先复制 .env.example → .env 并填入真实值，或写到 ~/.env，或 shell export。\n"
-            f"已知 provider（自带默认 base_url）：{known}。\n"
-            f"其它 provider 可用，但 BASE_URL 必须显式给。"
-        )
-
-    raw_temp = (os.environ.get("LLM_TEMPERATURE") or "").strip()
-    if raw_temp:
-        try:
-            temperature = float(raw_temp)
-        except ValueError as exc:
-            raise SystemExit(
-                f"LLM_TEMPERATURE={raw_temp!r} 解析失败：必须是浮点数（如 0.7）。"
-            ) from exc
-    else:
-        temperature = _DEFAULT_TEMPERATURE
-
-    return (
-        LLMClient(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            temperature=temperature,
-        ),
-        provider,
-    )
 
 
 # 房间共享子目录名。room.toml 不可改 —— 所有茶客 cwd 下都靠这个软链名访问。
@@ -216,7 +147,13 @@ class RoomSession:
     guests: list[TeaGuest]
     user_config: UserConfig
     room_config: RoomConfig
-    provider: str
+    room_default_spec: LLMSpec
+    """房间默认 LLM spec（env 推断的 :meth:`LLMSpec.from_env`）。
+
+    "单 provider 字符串"在 P4 多 client 后表达不了"每茶客可异构"的事实；这里持 spec
+    是 banner / 启动日志 / 未来 envelope 展示房间默认配置的唯一数据源。**不缓存
+    :class:`LLMClient` 对象引用** —— 茶客实例本身已持 client（agentao 内部），
+    ``RoomSession`` 只持声明性 spec。"""
 
     def close(self) -> None:
         for guest in self.guests:
@@ -301,7 +238,10 @@ def build_room_session(
         room_dir=room_config.room_dir,
         explicit=room_config.user_md_override,
     )
-    llm_client, provider = _make_llm_client()
+    # P4.1 起这里会按 room.toml 的 [[guest]] / [scoring] / [summary] 装多套 client；
+    # 现在 spec 单一，三处（茶客 / 打分 / 摘要）复用同一 client。
+    room_default_spec = LLMSpec.from_env()
+    llm_client = build_client(room_default_spec)
 
     # 持久化文件全部塞在 room_dir 下 —— 删房间一并清掉（设计文档 §3.7）。
     transcript_path = room_config.room_dir / "transcript.jsonl"
@@ -336,5 +276,5 @@ def build_room_session(
         guests=guests,
         user_config=user_config,
         room_config=room_config,
-        provider=provider,
+        room_default_spec=room_default_spec,
     )
