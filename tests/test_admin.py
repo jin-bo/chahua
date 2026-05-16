@@ -545,6 +545,160 @@ def test_isolation_preserved_alongside_llm_mutator(paths):
     assert rc3.guests[0].llm.model == "gpt-4"  # type: ignore[union-attr]
 
 
+# ── extra_mcp_servers round-trip + mutator（P4.3）────────────────────────
+
+
+def _seed_room_for_extra_mcp(paths):
+    return admin.create_room(
+        paths=paths, room_id="mcp", name="mcp",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+
+
+def test_extra_mcp_round_trip_via_raw_toml(paths):
+    """raw editor 写 `[[guest.extra_mcp_servers]]` → load 解析为 dict[name -> cfg]。"""
+    rc = _seed_room_for_extra_mcp(paths)
+    new_toml = (
+        '[room]\nname = "mcp"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\npermission = "read-only"\n\n'
+        '[[guest.extra_mcp_servers]]\n'
+        'name = "web-search"\n'
+        'command = "npx"\n'
+        'args = ["-y", "@some/web-mcp"]\n'
+        'env = { "API_TOKEN" = "x" }\n'
+    )
+    rc2 = admin.update_room_toml(rc.room_dir, new_toml, paths=paths)
+    servers = rc2.guests[0].extra_mcp_servers
+    assert servers is not None
+    assert "web-search" in servers
+    assert servers["web-search"] == {
+        "command": "npx",
+        "args": ["-y", "@some/web-mcp"],
+        "env": {"API_TOKEN": "x"},
+    }
+
+
+def test_update_guest_extra_mcp_persists(paths):
+    rc = _seed_room_for_extra_mcp(paths)
+    rc2 = admin.update_guest_extra_mcp(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        servers=[
+            {"name": "web", "command": "npx", "args": ["-y", "@mcp/web"]},
+            {"name": "fs", "command": "fs-mcp", "env": {"ROOT": "/tmp"}},
+        ],
+    )
+    by_name = rc2.guests[0].extra_mcp_servers
+    assert by_name is not None
+    assert list(by_name) == ["web", "fs"]  # 顺序稳定（list 顺序保留）
+    assert by_name["web"] == {"command": "npx", "args": ["-y", "@mcp/web"]}
+    assert by_name["fs"] == {"command": "fs-mcp", "env": {"ROOT": "/tmp"}}
+    # reload 也看得到 —— 写盘真生效。
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.guests[0].extra_mcp_servers == by_name
+
+
+def test_update_guest_extra_mcp_empty_clears(paths):
+    rc = _seed_room_for_extra_mcp(paths)
+    admin.update_guest_extra_mcp(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        servers=[{"name": "web", "command": "npx"}],
+    )
+    rc_after = admin.update_guest_extra_mcp(
+        paths=paths, room_dir=rc.room_dir, name="宝总", servers=[],
+    )
+    assert rc_after.guests[0].extra_mcp_servers is None
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "[[guest.extra_mcp_servers]]" not in text
+
+
+def test_update_guest_extra_mcp_duplicate_name_rejected(paths):
+    rc = _seed_room_for_extra_mcp(paths)
+    original = (rc.room_dir / "room.toml").read_text("utf-8")
+    with pytest.raises(RoomConfigError, match=r"重复"):
+        admin.update_guest_extra_mcp(
+            paths=paths, room_dir=rc.room_dir, name="宝总",
+            servers=[
+                {"name": "dup", "command": "a"},
+                {"name": "dup", "command": "b"},
+            ],
+        )
+    # 预校验 → 磁盘不动。
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == original
+
+
+def test_update_guest_extra_mcp_unknown_name(paths):
+    rc = _seed_room_for_extra_mcp(paths)
+    with pytest.raises(ValueError, match="不在房间"):
+        admin.update_guest_extra_mcp(
+            paths=paths, room_dir=rc.room_dir, name="路人",
+            servers=[{"name": "w", "command": "c"}],
+        )
+
+
+@pytest.mark.parametrize("servers,match", [
+    ([{"command": "c"}], r"name 必须是非空字符串"),
+    ([{"name": "", "command": "c"}], r"name 必须是非空字符串"),
+    ([{"name": "x"}], r"command 必须是非空字符串"),
+    ([{"name": "x", "command": "c", "args": "not-a-list"}], r"args 必须是字符串列表"),
+    ([{"name": "x", "command": "c", "args": [1, 2]}], r"args 必须是字符串列表"),
+    ([{"name": "x", "command": "c", "env": "not-a-dict"}], r"env 必须是 str→str"),
+    ([{"name": "x", "command": "c", "env": {"K": 1}}], r"env 必须是 str→str"),
+    ([{"name": "x", "command": "c", "cwd": "/tmp"}], r"未知字段"),
+])
+def test_update_guest_extra_mcp_invalid_rejected(paths, servers, match):
+    rc = _seed_room_for_extra_mcp(paths)
+    original = (rc.room_dir / "room.toml").read_text("utf-8")
+    with pytest.raises(RoomConfigError, match=match):
+        admin.update_guest_extra_mcp(
+            paths=paths, room_dir=rc.room_dir, name="宝总", servers=servers,
+        )
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == original
+
+
+def test_extra_mcp_preserved_alongside_other_mutators(paths):
+    """改 isolation / LLM 不应丢已写好的 extra_mcp_servers，反之亦然。"""
+    rc = _seed_room_for_extra_mcp(paths)
+    admin.update_guest_extra_mcp(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        servers=[{"name": "web", "command": "npx", "args": ["@x"]}],
+    )
+    admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="global",
+    )
+    rc2 = admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        spec_dict={"model": "openai/gpt-4"},
+    )
+    gc = rc2.guests[0]
+    assert gc.isolation == "global"
+    assert gc.llm is not None
+    assert gc.extra_mcp_servers is not None
+    assert gc.extra_mcp_servers["web"]["args"] == ["@x"]
+
+
+def test_extra_mcp_load_rejects_duplicate_in_raw_toml(paths):
+    rc = _seed_room_for_extra_mcp(paths)
+    bad_toml = (
+        '[room]\nname = "x"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n\n'
+        '[[guest.extra_mcp_servers]]\nname = "dup"\ncommand = "a"\n\n'
+        '[[guest.extra_mcp_servers]]\nname = "dup"\ncommand = "b"\n'
+    )
+    with pytest.raises(RoomConfigError, match=r"重复"):
+        admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
+
+
+def test_extra_mcp_load_rejects_unknown_entry_key(paths):
+    rc = _seed_room_for_extra_mcp(paths)
+    bad_toml = (
+        '[room]\nname = "x"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n\n'
+        '[[guest.extra_mcp_servers]]\nname = "w"\ncommand = "c"\ncwd = "/tmp"\n'
+    )
+    with pytest.raises(RoomConfigError, match=r"未知字段"):
+        admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
+
+
 # ── TOML 字面写出 ────────────────────────────────────────────────────────
 
 

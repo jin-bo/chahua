@@ -29,8 +29,10 @@ from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
 from .config import (
     DEFAULT_ISOLATION,
+    EXTRA_MCP_ENTRY_KEYS,
     ORCH_FIELD_BOUNDS,
     VALID_ISOLATION,
+    _build_extra_mcp_servers,
     _build_orchestrator_overrides,
     RoomConfig,
     RoomConfigError,
@@ -45,8 +47,7 @@ from .persona_assets import persona_relative, search_roots
 # ── 完整 room.toml 视图（mutator 内部用，对应 docs/P4-专业茶客配置闭环.md §4.4.1）─
 #
 # 当前消费 name / topic / rules / user_md / orchestrator_overrides / scoring / summary /
-# guests（含 LLM 三件套）；剩 isolation / extra_mcp_servers 字段位留好，由 P4.2+ 在加
-# schema 解析的同 PR 一并加 emit + load —— "schema 与运行时消费绑同一 PR"。
+# guests（含 LLM 三件套 + isolation + extra_mcp_servers）。
 class GuestSnapshot(TypedDict, total=False):
     """单个 ``[[guest]]`` 表的字段视图。
 
@@ -62,7 +63,9 @@ class GuestSnapshot(TypedDict, total=False):
     model: str
     base_url: str
     api_key_env: str
-    # P4.3+: extra_mcp_servers: list[dict]
+    # `[[guest.extra_mcp_servers]]` 数组表 —— snapshot 内部按 list[dict]（与 toml 形态
+    # 一致），每项含 name / command 必给，args / env 可选。空 list / 缺键 = 不写 toml。
+    extra_mcp_servers: list[dict[str, Any]]
 
 
 class TomlSnapshot(TypedDict, total=False):
@@ -76,10 +79,9 @@ class TomlSnapshot(TypedDict, total=False):
     guests: list[GuestSnapshot]
 
 
-# render 时认得的 guest 字段；其它字段位（extra_mcp_servers）由 P4.3+ 加 emit 时
-# 一并扩这个 set。
+# render 时认得的 guest 字段。
 _ALLOWED_GUEST_EMIT: frozenset[str] = (
-    frozenset({"name", "persona", "permission", "isolation"})
+    frozenset({"name", "persona", "permission", "isolation", "extra_mcp_servers"})
     | frozenset(LLM_TOML_FIELDS)
 )
 
@@ -248,6 +250,25 @@ def _toml_basic_string(s: str) -> str:
     return '"' + "".join(out) + '"'
 
 
+def _extra_mcp_dict_to_list(
+    servers: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """``{name -> cfg}``（``GuestConfig.extra_mcp_servers`` 形态）→ list[dict]（snapshot
+    / toml 数组表形态）。name 重新写回到每条 entry 里。
+
+    保持 dict 插入顺序 → 输出列表顺序稳定 —— round-trip 写盘 / reload / 再写不会无意义打乱。
+    """
+    out: list[dict[str, Any]] = []
+    for name, cfg in servers.items():
+        entry: dict[str, Any] = {"name": name, "command": cfg["command"]}
+        if "args" in cfg:
+            entry["args"] = list(cfg["args"])
+        if "env" in cfg:
+            entry["env"] = dict(cfg["env"])
+        out.append(entry)
+    return out
+
+
 def _llm_spec_to_dict(spec: LLMSpec) -> dict[str, str]:
     """``LLMSpec`` → toml 表层 dict（仅含非 ``None`` 字段）。
 
@@ -271,6 +292,25 @@ def _format_toml_scalar(value: Any) -> str:
     if isinstance(value, float):
         return repr(value)
     raise TypeError(f"_format_toml_scalar 不支持类型 {type(value).__name__}")
+
+
+def _toml_inline_string_array(items: Sequence[str]) -> str:
+    """TOML inline array of basic strings：``["a", "b"]``。空 list 写成 ``[]``。"""
+    return "[" + ", ".join(_toml_basic_string(s) for s in items) + "]"
+
+
+def _toml_inline_string_table(d: dict[str, str]) -> str:
+    """TOML inline table：``{ "K" = "V", "K2" = "V2" }``。空 dict 写成 ``{}``。
+
+    key 也走 basic string 转义 —— TOML bare key 只允许 ``[A-Za-z0-9_-]``，env 名 / mcp
+    arg 里出现别的字符（如 ``.`` / 中文）就会被拒。统一引号化最稳。
+    """
+    if not d:
+        return "{}"
+    parts = [
+        f"{_toml_basic_string(k)} = {_toml_basic_string(v)}" for k, v in d.items()
+    ]
+    return "{ " + ", ".join(parts) + " }"
 
 
 def _render_room_toml(snapshot: TomlSnapshot) -> str:
@@ -332,6 +372,19 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         for key in LLM_TOML_FIELDS:
             if key in g:
                 lines.append(f"{key:<11}= {_toml_basic_string(str(g[key]))}")
+        for entry in g.get("extra_mcp_servers") or []:
+            lines.append("")
+            lines.append("[[guest.extra_mcp_servers]]")
+            lines.append(f"name    = {_toml_basic_string(str(entry['name']))}")
+            lines.append(f"command = {_toml_basic_string(str(entry['command']))}")
+            if "args" in entry:
+                lines.append(
+                    f"args    = {_toml_inline_string_array(list(entry['args']))}"
+                )
+            if "env" in entry:
+                lines.append(
+                    f"env     = {_toml_inline_string_table(dict(entry['env']))}"
+                )
     return "\n".join(lines) + "\n"
 
 
@@ -369,11 +422,11 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
 
     还原范围：name / topic / rules / user_md_override / orchestrator_overrides /
     scoring_llm / summary_llm + 每位 guest 的 name / persona / permission / isolation /
-    LLM 三件套。剩下的 guest 字段位（extra_mcp_servers）由 P4.3+ 加 schema 解析的同
-    PR 一并填这里。
+    LLM 三件套 + extra_mcp_servers。
 
     ``isolation`` 走"默认值不进 snapshot"约定 —— 等于 ``"room"`` 时键不出现，emit 路径
-    不写到 toml，保留用户那条 toml 行的简洁度。
+    不写到 toml，保留用户那条 toml 行的简洁度。``extra_mcp_servers`` 同理 —— 内部 dict
+    形态在 snapshot 里反序列化为 list（数组表与 toml 形态一致），空 dict / None → 不出现。
     """
     guests: list[GuestSnapshot] = []
     for gc in rc.guests:
@@ -386,6 +439,8 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
             g["isolation"] = gc.isolation
         if gc.llm is not None:
             g.update(_llm_spec_to_dict(gc.llm))
+        if gc.extra_mcp_servers:
+            g["extra_mcp_servers"] = _extra_mcp_dict_to_list(gc.extra_mcp_servers)
         guests.append(g)
     return {
         "name": rc.name,
@@ -663,6 +718,61 @@ def update_guest_isolation(
         return cleaned
 
     snapshot = _read_existing_for_mutate(room_dir, paths)
+    _mutate_guest_in_snapshot(snapshot, name=name, transform=_patch)
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def update_guest_extra_mcp(
+    *, paths: Paths, room_dir: Path, name: str,
+    servers: Sequence[dict[str, Any]],
+) -> RoomConfig:
+    """覆盖一位茶客的 ``[[guest.extra_mcp_servers]]`` 数组段（整体替换语义）。
+
+    ``servers=[]`` → 清掉该茶客的所有房间级 MCP entry。语义见设计 §2.4：
+
+    - 用户在自己 room.toml 里手写 → 等价用户意图，**自动信任**，不进 trust 清单。
+    - 与 persona sidecar mcp 同名时**房间级覆盖** persona（合并在
+      :func:`chahua.guest._merged_mcp_configs`）。
+
+    写盘前预校验走 :func:`chahua.config._build_extra_mcp_servers` —— 同 guest 下重名 /
+    缺 name / 缺 command / 类型错全在这层抛 :class:`RoomConfigError`，磁盘不动。重名
+    强约束的取舍：toml 数组表的顺序在 mutator → 写盘 → reload 之间不稳定（按 dict 序），
+    让用户依赖顺序是雷；想覆盖 persona 写一条房间级条目就够。
+
+    名字不在册 → :class:`ValueError`（存在性校验先于 servers 校验，避免"既改错名字又写
+    坏 servers"时把 servers 错误先报出来）。
+    """
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    if not any(g["name"] == name for g in snapshot["guests"]):
+        raise ValueError(f"茶客 {name!r} 不在房间里")
+
+    # 预校验：复用 config 的 parser，list → dict 校验（重名 / 字段类型）。
+    # 用 sentinel 路径让 RoomConfigError 上下文清晰（mutator 本来不映射 toml 文件）。
+    _build_extra_mcp_servers(
+        list(servers) if servers else None,
+        label=f"[[guest]] {name!r}",
+        toml_path=room_dir / "room.toml",
+    )
+
+    # 规范化：去多余键 + 规范化字段类型，保证写盘前后字面量稳定。
+    cleaned_entries: list[dict[str, Any]] = []
+    for s in servers:
+        entry: dict[str, Any] = {
+            "name": str(s["name"]).strip(),
+            "command": str(s["command"]).strip(),
+        }
+        if s.get("args") is not None:
+            entry["args"] = [str(a) for a in s["args"]]
+        if s.get("env") is not None:
+            entry["env"] = {str(k): str(v) for k, v in s["env"].items()}
+        cleaned_entries.append(entry)
+
+    def _patch(g: GuestSnapshot) -> GuestSnapshot:
+        cleaned: GuestSnapshot = {k: v for k, v in g.items() if k != "extra_mcp_servers"}  # type: ignore[misc]
+        if cleaned_entries:
+            cleaned["extra_mcp_servers"] = cleaned_entries
+        return cleaned
+
     _mutate_guest_in_snapshot(snapshot, name=name, transform=_patch)
     return _rewrite_and_validate(room_dir, snapshot, paths)
 

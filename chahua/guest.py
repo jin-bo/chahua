@@ -48,8 +48,19 @@ _log = logging.getLogger(__name__)
 def _merged_mcp_configs(
     working_directory: Path,
     persona_servers: Optional[dict],
+    room_level_servers: Optional[dict] = None,
 ) -> dict:
-    """Load workspace/user MCP and overlay trusted persona sidecar MCP."""
+    """Overlay 三档 MCP 来源 → 单一 dict 喂 :class:`agentao.Agentao`：
+
+    1. agentao 文件加载（``<workdir>/.agentao/mcp.json`` + ``~/.agentao/mcp.json``）。
+    2. persona sidecar mcp（trust 门控已在 :func:`chahua.session._build_guests` 处生效 ——
+       未受信任时 ``persona_servers`` 是 ``None``）。
+    3. 房间级 ``[[guest.extra_mcp_servers]]`` —— 用户手写在自己 room.toml 里，等价用户
+       意图自动信任，无 trust 清单。同名时**覆盖** persona / 文件加载层。
+
+    设计 §2.4：trust 门控不对称（persona 来路可能任意可执行；房间级是用户当下意图）；
+    覆盖顺序由"哪一层更接近用户当下意图"决定。
+    """
     try:
         configs = load_mcp_config(
             project_root=working_directory,
@@ -58,13 +69,20 @@ def _merged_mcp_configs(
     except Exception:
         _log.exception("Failed to load MCP config for %s", working_directory)
         configs = {}
-    if not persona_servers:
-        return configs
     merged = dict(configs)
-    for name, cfg in persona_servers.items():
-        if name in merged:
-            _log.info("persona MCP server %r overrides file-loaded config", name)
-        merged[name] = {**cfg, "trust": cfg.get("trust", True)}
+    if persona_servers:
+        for name, cfg in persona_servers.items():
+            if name in merged:
+                _log.info("persona MCP server %r overrides file-loaded config", name)
+            merged[name] = {**cfg, "trust": cfg.get("trust", True)}
+    if room_level_servers:
+        for name, cfg in room_level_servers.items():
+            if name in merged:
+                _log.info(
+                    "room-level MCP server %r overrides persona / file-loaded config", name
+                )
+            # 房间级自动信任 —— 用户在自己 room.toml 里手写 == 用户意图。
+            merged[name] = {**cfg, "trust": True}
     return merged
 
 
@@ -81,6 +99,7 @@ class TeaGuest:
         room: Room,
         permission: str = "read-only",
         assets: Optional[PersonaAssets] = None,
+        room_level_mcp: Optional[dict[str, dict]] = None,
     ) -> None:
         self.name = name
         self.room = room
@@ -105,6 +124,7 @@ class TeaGuest:
         mcp_configs = _merged_mcp_configs(
             self.working_directory,
             assets.mcp_servers if assets is not None else None,
+            room_level_servers=room_level_mcp,
         )
         if mcp_configs:
             # chahua constructs TeaGuest inside the websocket event loop.  The

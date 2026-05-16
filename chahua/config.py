@@ -67,14 +67,19 @@ _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
     {
         "name", "persona", "permission", "isolation",
         "model", "base_url", "api_key_env",
+        "extra_mcp_servers",
     }
 )
 # 已移除的字段 —— 不会有未来 phase 接 `provider`（设计 §2.1：用 model = "<provider>/<model>"
 # 合并写法）。出现 → 给定向 hint。
 _REMOVED_GUEST_KEYS: frozenset[str] = frozenset({"provider"})
 # 后续 phase 接入的字段 —— 现在写了报"未实现"。
-_DEFERRED_GUEST_KEYS: frozenset[str] = frozenset(
-    {"extra_mcp_servers", "transport"}
+_DEFERRED_GUEST_KEYS: frozenset[str] = frozenset({"transport"})
+
+# `[[guest.extra_mcp_servers]]` 单条 entry 允许的键。其它键 → RoomConfigError（与 §2 一致：
+# 不静默吞 typo）。公开 —— admin 端写盘 / mutator 都用同一 set。
+EXTRA_MCP_ENTRY_KEYS: frozenset[str] = frozenset(
+    {"name", "command", "args", "env"}
 )
 
 # isolation 合法值 + 默认值。公开 —— admin 端 mutator 校验 / server 端 envelope 渲染都用
@@ -112,6 +117,22 @@ class GuestConfig:
     llm: Optional[LLMSpec] = None
     """``[[guest]]`` 里写明的 ``model`` / ``base_url`` / ``api_key_env`` 解析结果；
     缺即走房间默认（:meth:`LLMSpec.from_env`）。P4.1 起每位茶客可独立配 client。"""
+
+    extra_mcp_servers: Optional[dict[str, dict[str, Any]]] = None
+    """房间级 inline MCP servers（``[[guest.extra_mcp_servers]]`` 数组表解析结果）。
+
+    ``None`` = 没写；非 ``None`` 是 ``{name -> {command, args?, env?}}``（name 字段被吸收做
+    key 后从 cfg 移除）。语义见设计 §2.4：
+
+    - 用户在自己房间 toml 里手写 → 等价用户意图，**自动信任**，不进
+      :mod:`chahua.trust` 清单（trust 只挡 persona sidecar mcp，那是可能从 GitHub 导入的
+      任意可执行）。
+    - 合并到 :class:`agentao.Agentao` 的 ``extra_mcp_servers``，与 persona sidecar mcp
+      同名时**房间级覆盖**（房间级是"这里要这么用"的具体配置）。
+
+    同 guest 下重名 → 解析期 :class:`RoomConfigError`（强约束）。不取"后者覆盖"，因为
+    toml 数组表的顺序在 UI mutator → 写盘 → reload 之间不稳定（admin 重写按 dict 顺序），
+    让用户依赖顺序是雷。"""
 
     def read_persona(self) -> str:
         return self.persona_path.read_text(encoding="utf-8")
@@ -326,6 +347,81 @@ def _build_orchestrator_overrides(
     return out
 
 
+def _build_extra_mcp_servers(
+    raw: Any, *, label: str, toml_path: Path
+) -> Optional[dict[str, dict[str, Any]]]:
+    """解析 ``[[guest.extra_mcp_servers]]`` 数组表 → ``{name -> cfg}``。
+
+    缺段 / 空数组 → ``None``。每条 entry 必含 ``name`` (str) + ``command`` (str)；
+    ``args`` 可选 list[str]；``env`` 可选 dict[str, str]。其它键 → :class:`RoomConfigError`
+    （:data:`EXTRA_MCP_ENTRY_KEYS` 之外，防 typo 静默吞）。同 guest 下重名 → raise。
+
+    返回的 dict ``name`` 字段已吸收做 key 移除；保留 ``command`` / ``args`` / ``env``，
+    格式与 :class:`agentao.Agentao` 的 ``extra_mcp_servers`` 直接兼容。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise RoomConfigError(
+            f"{toml_path}: {label}.extra_mcp_servers 必须是表数组（[[guest.extra_mcp_servers]]"
+            f" 重复段），得到 {type(raw).__name__}"
+        )
+    if not raw:
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise RoomConfigError(
+                f"{toml_path}: {label}.extra_mcp_servers[{i}] 不是表（table）"
+            )
+        unknown = set(item) - EXTRA_MCP_ENTRY_KEYS
+        if unknown:
+            raise RoomConfigError(
+                f"{toml_path}: {label}.extra_mcp_servers[{i}] 未知字段 {sorted(unknown)}；"
+                f"允许：{sorted(EXTRA_MCP_ENTRY_KEYS)}"
+            )
+        name_raw = item.get("name")
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            raise RoomConfigError(
+                f"{toml_path}: {label}.extra_mcp_servers[{i}].name 必须是非空字符串"
+            )
+        name = name_raw.strip()
+        command_raw = item.get("command")
+        if not isinstance(command_raw, str) or not command_raw.strip():
+            raise RoomConfigError(
+                f"{toml_path}: {label}.extra_mcp_servers[{i}] {name!r}: "
+                f"command 必须是非空字符串"
+            )
+        cfg: dict[str, Any] = {"command": command_raw.strip()}
+        args_raw = item.get("args")
+        if args_raw is not None:
+            if not isinstance(args_raw, list) or not all(
+                isinstance(a, str) for a in args_raw
+            ):
+                raise RoomConfigError(
+                    f"{toml_path}: {label}.extra_mcp_servers[{i}] {name!r}: "
+                    f"args 必须是字符串列表"
+                )
+            cfg["args"] = list(args_raw)
+        env_raw = item.get("env")
+        if env_raw is not None:
+            if not isinstance(env_raw, dict) or not all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in env_raw.items()
+            ):
+                raise RoomConfigError(
+                    f"{toml_path}: {label}.extra_mcp_servers[{i}] {name!r}: "
+                    f"env 必须是 str→str 字典"
+                )
+            cfg["env"] = dict(env_raw)
+        if name in out:
+            raise RoomConfigError(
+                f"{toml_path}: {label}.extra_mcp_servers 同 guest 下 name={name!r} 重复"
+            )
+        out[name] = cfg
+    return out
+
+
 def _build_guests(
     guests_raw: Any, *, paths: Paths, toml_path: Path
 ) -> tuple[GuestConfig, ...]:
@@ -413,6 +509,12 @@ def _build_guests(
             toml_path=toml_path,
         )
 
+        extra_mcp = _build_extra_mcp_servers(
+            g.get("extra_mcp_servers"),
+            label=f"[[guest]] {name!r}",
+            toml_path=toml_path,
+        )
+
         out.append(
             GuestConfig(
                 name=name,
@@ -420,6 +522,7 @@ def _build_guests(
                 permission=permission_raw,
                 isolation=isolation_raw,
                 llm=guest_llm,
+                extra_mcp_servers=extra_mcp,
             )
         )
 

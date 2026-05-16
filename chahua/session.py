@@ -131,6 +131,7 @@ def _build_guests(
             room=room,
             permission=gc.permission,
             assets=assets,
+            room_level_mcp=gc.extra_mcp_servers,
         )
         # TeaGuest.__init__ 已经 mkdir 了 working_directory，share 软链放这里安全。
         _link_guest_share(guest.working_directory, room_share)

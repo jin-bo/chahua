@@ -108,3 +108,52 @@ def test_merged_mcp_configs_preserves_file_loaded_and_overlays_persona(
     assert merged["project"]["command"] == "project-cmd"
     assert merged["persona"] == {"command": "persona-cmd", "trust": True}
     assert merged["shared"] == {"command": "persona-shared", "trust": False}
+
+
+def test_merged_mcp_configs_room_level_overrides_persona_and_file(
+    tmp_path, monkeypatch
+):
+    """P4.3：`[[guest.extra_mcp_servers]]` 是用户在自己 room.toml 里手写的 ——
+    等价用户意图自动信任，与 persona / 文件加载层同名时**房间级覆盖**。"""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    user_cfg_dir = tmp_path / "home" / ".agentao"
+    user_cfg_dir.mkdir(parents=True)
+    (user_cfg_dir / "mcp.json").write_text(
+        json.dumps(
+            {"mcpServers": {"shared": {"command": "user-shared"}}}
+        ),
+        encoding="utf-8",
+    )
+
+    merged = _merged_mcp_configs(
+        tmp_path / "wd",
+        {
+            "persona-only": {"command": "persona-cmd"},
+            "shared": {"command": "persona-shared", "trust": False},
+        },
+        room_level_servers={
+            "room-only": {"command": "room-cmd", "args": ["--port", "9000"]},
+            "shared": {"command": "room-shared"},  # 覆盖 persona / 文件加载层同名
+        },
+    )
+
+    # 房间级 entry 自动信任，无需任何 trust 标记。
+    assert merged["room-only"] == {
+        "command": "room-cmd", "args": ["--port", "9000"], "trust": True,
+    }
+    # 同名时房间级覆盖 persona（含信任语义 —— 即便 persona trust=False）。
+    assert merged["shared"] == {"command": "room-shared", "trust": True}
+    # persona-only 仍走 persona trust 默认（cfg 无 trust → True）。
+    assert merged["persona-only"] == {"command": "persona-cmd", "trust": True}
+
+
+def test_merged_mcp_configs_no_room_level_falls_through(tmp_path, monkeypatch):
+    """room_level_servers=None / [] → 与原 persona-only 路径行为等价。"""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    (tmp_path / "home" / ".agentao").mkdir(parents=True)
+    merged = _merged_mcp_configs(
+        tmp_path / "wd",
+        {"persona": {"command": "p"}},
+        room_level_servers=None,
+    )
+    assert merged == {"persona": {"command": "p", "trust": True}}
