@@ -119,9 +119,12 @@ async function startSidecar({ paths, logsDir }) {
     {
       cwd: appRoot,
       // PYTHONUNBUFFERED 让 print 立即冲到 stderr，不至于卡在 buffer 等不到 ready 行。
+      // PYTHONUTF8 / PYTHONIOENCODING 避免 Windows 非 UTF-8 locale 下中文日志乱码。
       env: {
         ...process.env,
         PYTHONUNBUFFERED: "1",
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
         CHAHUA_APP_ROOT: appRoot,
         CHAHUA_USER_DATA: userDataRoot,
         // Windows 下 sidecar 用这个 PID 走 OpenProcess(SYNCHRONIZE) +
