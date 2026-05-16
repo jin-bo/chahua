@@ -1,11 +1,14 @@
 """LLM 凭据 spec —— 把"环境变量 / room.toml → LLMClient"的两条来路合并到一个数据类。
 
-env 路径走 :meth:`LLMSpec.from_env`，spec 喂 :func:`build_client` 构造
-:class:`agentao.llm.LLMClient`。toml 路径与 ``split_model_id`` / ``from_toml`` 留到 P4.1
-同 PR 加（schema 解析与 mutator 消费绑同一 PR，避免 "parser 接受了但 session 不用"
-的中间态）。
+env 路径走 :meth:`LLMSpec.from_env`；toml 路径走 :meth:`LLMSpec.from_toml`（``[scoring]``
+/ ``[summary]`` / ``[[guest]]`` 三处共用）。spec 再喂 :func:`build_client` 构造
+:class:`agentao.llm.LLMClient`。
 
 设计文档：[docs/P4-专业茶客配置闭环.md §4.1](../docs/P4-专业茶客配置闭环.md#41-chahuallmspecpy-新)。
+
+**异常约定**：toml 校验失败（all-or-nothing 违反 / model 缺 ``/`` / 未知 provider 等）抛
+裸 :class:`ValueError` —— 由 :mod:`chahua.config` 在调用处包成 :class:`RoomConfigError`
+加上 toml 路径上下文。这层故意不依赖 config 模块，避免与之循环 import。
 """
 
 from __future__ import annotations
@@ -35,6 +38,37 @@ _DEFAULT_TEMPERATURE: float = 1.0
 def _provider_prefix(provider: str) -> str:
     """provider name → 环境变量前缀。``openai`` → ``OPENAI``、``deep-seek`` → ``DEEP_SEEK``。"""
     return provider.upper().replace("-", "_")
+
+
+def split_model_id(value: str) -> tuple[str, str]:
+    """``"openai/gpt-5.4"`` → ``("openai", "gpt-5.4")``；
+    ``"openrouter/qwen/qwen3-coder"`` → ``("openrouter", "qwen/qwen3-coder")``。
+
+    取**第一个** ``/`` 作 provider/model 分隔 —— OpenRouter / LiteLLM 的 model id 普遍
+    含 ``/`` 二级路径，必须保留。无 ``/`` 或两侧为空 → :class:`ValueError`。
+
+    返回的 provider 已 lowercase（与 :data:`_DEFAULT_BASE_URLS` 键风格一致）；model 保留
+    原大小写。
+    """
+    if "/" not in value:
+        raise ValueError(
+            f"model={value!r} 必须形如 '<provider>/<model>'（如 'openai/gpt-5.4'）"
+        )
+    provider, _, model = value.partition("/")
+    if not provider or not model:
+        raise ValueError(
+            f"model={value!r} 形态不合法 —— '/' 两侧都不能为空"
+        )
+    return provider.strip().lower(), model.strip()
+
+
+# toml 表层 LLM 字段的写出 / 解析顺序（model 在前 + 可选两项在后，与设计 §3 示例对齐
+# 让用户读 toml 时形态稳定）。公开（无下划线）—— admin 端 emit / 校验都从这里取，
+# 避免与 _TOML_LLM_KEYS 漂移。
+LLM_TOML_FIELDS: tuple[str, ...] = ("model", "base_url", "api_key_env")
+
+# from_toml 容忍的字段集。出现其它键 → ValueError（防 typo 静默吞）。
+_TOML_LLM_KEYS: frozenset[str] = frozenset(LLM_TOML_FIELDS)
 
 
 def _resolve_temperature_from_env() -> Optional[float]:
@@ -113,6 +147,78 @@ class LLMSpec:
             base_url=base_url,
             api_key_env=None,
             temperature=_resolve_temperature_from_env(),
+        )
+
+    @classmethod
+    def from_toml(
+        cls, data: Optional[dict], *, label: str
+    ) -> Optional["LLMSpec"]:
+        """从 toml 表（``[scoring]`` / ``[summary]`` / ``[[guest]]`` LLM 字段子集）构造 spec。
+
+        §2.3 all-or-nothing：
+
+        - ``data is None`` / ``data == {}`` → ``None``（让调用方走 fallback 链）。
+        - ``base_url`` / ``api_key_env`` 出现但缺 ``model`` → :class:`ValueError`。
+        - ``model`` 缺 ``/`` 或两侧为空 → :class:`ValueError`。
+        - 未知 provider 且没显式 ``base_url`` → :class:`ValueError`。
+        - 出现 :data:`_TOML_LLM_KEYS` 之外的键 → :class:`ValueError`（防 typo 静默吞）。
+
+        ``label`` 是 ``"[scoring]"`` / ``"[[guest]] 宝总"`` 等人话定位，进异常信息让用户
+        一眼能定位 toml 里哪一段错了。
+
+        ``temperature`` 不进 toml schema（设计 §3 示例不暴露），spec 留 None；运行时由
+        :func:`build_client` 走 ``LLM_TEMPERATURE`` env / 默认。
+        """
+        if not data:
+            return None
+        unknown = set(data) - _TOML_LLM_KEYS
+        if unknown:
+            raise ValueError(
+                f"{label}: 未知字段 {sorted(unknown)}；允许：{sorted(_TOML_LLM_KEYS)}"
+            )
+        model_raw = data.get("model")
+        base_url_raw = data.get("base_url")
+        api_key_env_raw = data.get("api_key_env")
+
+        if not model_raw and (base_url_raw or api_key_env_raw):
+            raise ValueError(
+                f"{label}: base_url / api_key_env 不能单独出现，需同写 model"
+            )
+        if not model_raw:
+            return None
+        if not isinstance(model_raw, str):
+            raise ValueError(
+                f"{label}: model 必须是字符串，得到 {type(model_raw).__name__}"
+            )
+        try:
+            provider, bare_model = split_model_id(model_raw)
+        except ValueError as exc:
+            raise ValueError(f"{label}: {exc}") from exc
+
+        if base_url_raw is not None and not isinstance(base_url_raw, str):
+            raise ValueError(
+                f"{label}: base_url 必须是字符串，得到 {type(base_url_raw).__name__}"
+            )
+        if api_key_env_raw is not None and not isinstance(api_key_env_raw, str):
+            raise ValueError(
+                f"{label}: api_key_env 必须是字符串，得到 {type(api_key_env_raw).__name__}"
+            )
+
+        base_url = (base_url_raw or "").strip() or None
+        api_key_env = (api_key_env_raw or "").strip() or None
+
+        if not base_url and provider not in _DEFAULT_BASE_URLS:
+            known = ", ".join(sorted(_DEFAULT_BASE_URLS.keys()))
+            raise ValueError(
+                f"{label}: provider={provider!r} 不在已知列表，必须显式给 base_url；"
+                f"已知：{known}"
+            )
+
+        return cls(
+            provider=provider,
+            model=bare_model,
+            base_url=base_url,
+            api_key_env=api_key_env,
         )
 
 

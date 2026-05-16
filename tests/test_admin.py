@@ -271,6 +271,176 @@ def test_remove_unknown_guest_refused(paths):
         admin.remove_guest(paths=paths, room_dir=rc.room_dir, name="不在场")
 
 
+# ── [scoring] / [summary] / [[guest]].LLM round-trip + mutator（P4.1）─────
+
+
+def _seed_room_for_llm(paths):
+    return admin.create_room(
+        paths=paths, room_id="llm", name="llm",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+
+
+def test_room_llm_round_trip(paths):
+    rc = _seed_room_for_llm(paths)
+    rc2 = admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="scoring",
+        spec_dict={"model": "openai/gpt-5.4-mini"},
+    )
+    assert rc2.scoring_llm is not None
+    assert rc2.scoring_llm.provider == "openai"
+    assert rc2.scoring_llm.model == "gpt-5.4-mini"
+    # reload 也保留。
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.scoring_llm == rc2.scoring_llm
+
+
+def test_room_llm_summary_round_trip_with_base_url(paths):
+    rc = _seed_room_for_llm(paths)
+    rc2 = admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="summary",
+        spec_dict={
+            "model": "anthropic/claude-opus-4-7",
+            "base_url": "https://api.anthropic.com",
+            "api_key_env": "ANTHROPIC_API_KEY",
+        },
+    )
+    assert rc2.summary_llm is not None
+    assert rc2.summary_llm.base_url == "https://api.anthropic.com"
+    assert rc2.summary_llm.api_key_env == "ANTHROPIC_API_KEY"
+
+
+def test_update_room_llm_null_clears_section(paths):
+    rc = _seed_room_for_llm(paths)
+    admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="scoring",
+        spec_dict={"model": "openai/gpt-5.4-mini"},
+    )
+    rc_after = admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="scoring", spec_dict=None,
+    )
+    assert rc_after.scoring_llm is None
+    assert "[scoring]" not in (rc.room_dir / "room.toml").read_text("utf-8")
+
+
+def test_update_room_llm_bad_section_rejected(paths):
+    rc = _seed_room_for_llm(paths)
+    with pytest.raises(RoomConfigError, match="section"):
+        admin.update_room_llm(
+            paths=paths, room_dir=rc.room_dir, section="foo",
+            spec_dict={"model": "openai/gpt-4"},
+        )
+
+
+def test_update_room_llm_empty_dict_rejected(paths):
+    """{} 语义模糊（"清整段"应该传 None）—— 拒。"""
+    rc = _seed_room_for_llm(paths)
+    with pytest.raises(RoomConfigError, match=r"不含 model 字段"):
+        admin.update_room_llm(
+            paths=paths, room_dir=rc.room_dir, section="scoring", spec_dict={},
+        )
+
+
+@pytest.mark.parametrize("spec,match", [
+    ({"base_url": "http://x"}, r"base_url / api_key_env 不能单独出现"),
+    ({"model": "gpt-4"}, r"必须形如 '<provider>/<model>'"),
+    ({"model": "weirdprovider/m"}, r"不在已知列表"),
+    ({"model": "openai/gpt-4", "temperature": 0.5}, r"未知字段"),
+])
+def test_update_room_llm_invalid_spec_rejected(paths, spec, match):
+    rc = _seed_room_for_llm(paths)
+    original = (rc.room_dir / "room.toml").read_text("utf-8")
+    with pytest.raises(RoomConfigError, match=match):
+        admin.update_room_llm(
+            paths=paths, room_dir=rc.room_dir, section="scoring", spec_dict=spec,
+        )
+    # 写盘前 pre-validate 拦截 —— 磁盘 toml 不动。
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == original
+
+
+def test_guest_llm_round_trip(paths):
+    rc = _seed_room_for_llm(paths)
+    rc2 = admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        spec_dict={
+            "model": "anthropic/claude-opus-4-7",
+            "base_url": "https://api.anthropic.com",
+            "api_key_env": "ANTHROPIC_API_KEY",
+        },
+    )
+    spec = rc2.guests[0].llm
+    assert spec is not None and spec.provider == "anthropic"
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.guests[0].llm == spec
+
+
+def test_update_guest_llm_null_clears(paths):
+    rc = _seed_room_for_llm(paths)
+    admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        spec_dict={"model": "openai/gpt-4"},
+    )
+    rc_after = admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总", spec_dict=None,
+    )
+    assert rc_after.guests[0].llm is None
+    # toml 里也不应再含 LLM 字段。
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "model    " not in text
+    assert "base_url" not in text
+    assert "api_key_env" not in text
+
+
+def test_update_guest_llm_unknown_name(paths):
+    rc = _seed_room_for_llm(paths)
+    with pytest.raises(ValueError, match="不在房间"):
+        admin.update_guest_llm(
+            paths=paths, room_dir=rc.room_dir, name="路人",
+            spec_dict={"model": "openai/gpt-4"},
+        )
+
+
+def test_update_guest_llm_preserves_other_guests_and_room_llm(paths):
+    """改 A 的 LLM 不应丢 B 的 LLM / [scoring] / [summary]。"""
+    rc = admin.create_room(
+        paths=paths, room_id="multi", name="multi",
+        guests=[
+            {"persona": "chahua/personas/宝总.md", "name": "宝总"},
+            {"persona": "chahua/personas/汪小姐.md", "name": "汪小姐"},
+        ],
+    )
+    admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="scoring",
+        spec_dict={"model": "openai/gpt-5.4-mini"},
+    )
+    admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="汪小姐",
+        spec_dict={"model": "openai/gpt-4"},
+    )
+    # 现在改宝总。
+    rc_after = admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        spec_dict={"model": "openai/gpt-4o"},
+    )
+    assert rc_after.scoring_llm is not None
+    assert rc_after.scoring_llm.model == "gpt-5.4-mini"
+    by_name = {g.name: g.llm for g in rc_after.guests}
+    assert by_name["宝总"].model == "gpt-4o"  # type: ignore[union-attr]
+    assert by_name["汪小姐"].model == "gpt-4"  # type: ignore[union-attr]
+
+
+def test_legacy_provider_field_rejected_with_hint(paths):
+    """用户按"老式"思路单独写 provider —— config 报错并提示走合并写法。"""
+    rc = _seed_room_for_llm(paths)
+    bad_toml = (
+        '[room]\nname = "x"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+        'provider = "openai"\nmodel = "openai/gpt-4"\n'
+    )
+    with pytest.raises(RoomConfigError, match=r"model = \"<provider>/<model>\""):
+        admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
+
+
 # ── TOML 字面写出 ────────────────────────────────────────────────────────
 
 

@@ -82,7 +82,7 @@ def _link_guest_share(guest_workdir: Path, room_share: Path) -> None:
 
 def _build_guests(
     room_config: RoomConfig,
-    llm_client: LLMClient,
+    guest_clients: dict[str, LLMClient],
     room: Room,
     paths: Paths,
 ) -> list[tuple[TeaGuest, str]]:
@@ -121,7 +121,7 @@ def _build_guests(
         guest = TeaGuest(
             name=gc.name,
             persona_md=persona_md,
-            llm_client=llm_client,
+            llm_client=guest_clients[gc.name],
             working_directory=gc.workspace_in(room_config.room_dir),
             room=room,
             permission=gc.permission,
@@ -154,6 +154,17 @@ class RoomSession:
     是 banner / 启动日志 / 未来 envelope 展示房间默认配置的唯一数据源。**不缓存
     :class:`LLMClient` 对象引用** —— 茶客实例本身已持 client（agentao 内部），
     ``RoomSession`` 只持声明性 spec。"""
+
+    scoring_spec: LLMSpec
+    """打分用的 effective LLM spec。fallback 链：``rc.scoring_llm`` → ``room_default_spec``。"""
+
+    summary_spec: LLMSpec
+    """摘要用的 effective LLM spec。fallback 链：``rc.summary_llm`` → :attr:`scoring_spec`
+    （进而 → room_default）。"""
+
+    guest_specs: dict[str, LLMSpec]
+    """每位茶客的 effective LLM spec（``gc.llm`` 或 fallback 到 room_default）。
+    keys 与 :attr:`guests` 的 ``name`` 一一对应；envelope 渲染时按这个出"哪位茶客用什么"。"""
 
     def close(self) -> None:
         for guest in self.guests:
@@ -269,10 +280,37 @@ def build_room_session(
         room_dir=room_config.room_dir,
         explicit=room_config.user_md_override,
     )
-    # P4.1 起这里会按 room.toml 的 [[guest]] / [scoring] / [summary] 装多套 client；
-    # 现在 spec 单一，三处（茶客 / 打分 / 摘要）复用同一 client。
+    # P4.1：按 room.toml 装多套 client。fallback 链：
+    #   - guest:    gc.llm or room_default
+    #   - scoring:  rc.scoring_llm or room_default
+    #   - summary:  rc.summary_llm or scoring（仍缺则 → room_default，由前一行链上来）
+    # `build_client` 在缺 api_key 等时 SystemExit —— 让用户早炸而不是跑到第一次发言才出问题。
     room_default_spec = LLMSpec.from_env()
-    llm_client = build_client(room_default_spec)
+    scoring_spec = room_config.scoring_llm or room_default_spec
+    summary_spec = room_config.summary_llm or scoring_spec
+
+    # 同一 spec 复用一份 client —— LLMSpec 是 frozen+slots dataclass，hashable。
+    # 常见单 provider 场景下 5 茶客 + scoring + summary = 7 处用同一 spec，没 cache
+    # 会装 7 份 LLMClient；agentao.LLMClient.__init__ 会 evict shared 'agentao' logger
+    # 上一份 _agentao_llm_file_handler，导致先装的几位茶客日志被静默 detach。
+    clients_by_spec: dict[LLMSpec, LLMClient] = {}
+
+    def _client_for(spec: LLMSpec) -> LLMClient:
+        cached = clients_by_spec.get(spec)
+        if cached is None:
+            cached = build_client(spec)
+            clients_by_spec[spec] = cached
+        return cached
+
+    guest_specs: dict[str, LLMSpec] = {}
+    guest_clients: dict[str, LLMClient] = {}
+    for gc in room_config.guests:
+        spec = gc.llm or room_default_spec
+        guest_specs[gc.name] = spec
+        guest_clients[gc.name] = _client_for(spec)
+
+    scoring_client = _client_for(scoring_spec)
+    summary_client = _client_for(summary_spec)
 
     # 持久化文件全部塞在 room_dir 下 —— 删房间一并清掉（设计文档 §3.7）。
     transcript_path = room_config.room_dir / "transcript.jsonl"
@@ -287,7 +325,7 @@ def build_room_session(
     )
     room.add_participant(USER_SPEAKER_ID)
 
-    guest_entries = _build_guests(room_config, llm_client, room, paths)
+    guest_entries = _build_guests(room_config, guest_clients, room, paths)
     guests = [g for g, _ in guest_entries]
 
     effective_orch_config = _make_orchestrator_config(
@@ -297,8 +335,8 @@ def build_room_session(
     orchestrator = Orchestrator(
         room=room,
         user_config=user_config,
-        scorer=IntentScorer(llm_client),
-        summarizer=Summarizer(llm_client, summary_path=summary_path),
+        scorer=IntentScorer(scoring_client),
+        summarizer=Summarizer(summary_client, summary_path=summary_path),
         cursor=GuestCursor(cursor_path=cursor_path),
         config=effective_orch_config,
     )
@@ -312,4 +350,7 @@ def build_room_session(
         user_config=user_config,
         room_config=room_config,
         room_default_spec=room_default_spec,
+        scoring_spec=scoring_spec,
+        summary_spec=summary_spec,
+        guest_specs=guest_specs,
     )

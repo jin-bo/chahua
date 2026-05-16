@@ -35,7 +35,9 @@ from chahua.server import (
     INBOUND_REMOVE_GUEST,
     INBOUND_SET_PERSONA_MCP_TRUST,
     INBOUND_SWITCH_ROOM,
+    INBOUND_UPDATE_GUEST_LLM,
     INBOUND_UPDATE_GUEST_PERMISSION,
+    INBOUND_UPDATE_ROOM_LLM,
     INBOUND_UPDATE_ROOM_ORCHESTRATOR,
     INBOUND_UPDATE_ROOM_TOML,
     INBOUND_UPDATE_USER_AVATAR,
@@ -132,6 +134,16 @@ class _SpyServer(ChahuaServer):
 
     def _update_room_orchestrator(self, *, overrides, sink):  # type: ignore[override]
         self.calls.append(("_update_room_orchestrator", {"overrides": overrides}))
+
+    def _update_room_llm(self, *, section, spec_dict, sink):  # type: ignore[override]
+        self.calls.append((
+            "_update_room_llm", {"section": section, "spec_dict": spec_dict},
+        ))
+
+    def _update_guest_llm(self, *, name, spec_dict, sink):  # type: ignore[override]
+        self.calls.append((
+            "_update_guest_llm", {"name": name, "spec_dict": spec_dict},
+        ))
 
     def _update_user_avatar(self, *, data_uri, sink):  # type: ignore[override]
         self.calls.append(("_update_user_avatar", {"data_uri": data_uri}))
@@ -637,3 +649,83 @@ async def test_unknown_type_ignored(srv: _SpyServer, caplog):
     assert srv.calls == []
     assert srv._inflight_turn_task is None
     assert any("unknown type" in r.message for r in caplog.records)
+
+
+# ── update_room_llm / update_guest_llm（P4.1）─────────────────────────────
+
+
+async def test_update_room_llm_ok(srv: _SpyServer):
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_ROOM_LLM,
+            "section": "scoring",
+            "spec": {"model": "openai/gpt-5.4-mini"},
+        },
+        _sink,
+    )
+    assert srv.cancel_drain_count == 1
+    assert srv.calls == [(
+        "_update_room_llm",
+        {"section": "scoring", "spec_dict": {"model": "openai/gpt-5.4-mini"}},
+    )]
+
+
+async def test_update_room_llm_null_spec_clears(srv: _SpyServer):
+    """spec=null 是合法 payload —— 语义"删整段"。"""
+    await srv._handle_inbound(
+        {"type": INBOUND_UPDATE_ROOM_LLM, "section": "summary", "spec": None},
+        _sink,
+    )
+    assert srv.calls == [(
+        "_update_room_llm", {"section": "summary", "spec_dict": None},
+    )]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_ROOM_LLM, "spec": {"model": "x/y"}},               # 缺 section
+    {"type": INBOUND_UPDATE_ROOM_LLM, "section": "foo", "spec": {}},            # 非法 section
+    {"type": INBOUND_UPDATE_ROOM_LLM, "section": "scoring", "spec": "hello"},   # spec 是 str
+    {"type": INBOUND_UPDATE_ROOM_LLM, "section": "scoring", "spec": [1, 2]},    # spec 是 list
+])
+async def test_update_room_llm_bad_payload(srv: _SpyServer, payload):
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0
+
+
+async def test_update_guest_llm_ok(srv: _SpyServer):
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_GUEST_LLM,
+            "name": "宝总",
+            "spec": {"model": "anthropic/claude-opus-4-7", "base_url": "https://api.anthropic.com"},
+        },
+        _sink,
+    )
+    assert srv.cancel_drain_count == 1
+    assert srv.calls == [(
+        "_update_guest_llm",
+        {
+            "name": "宝总",
+            "spec_dict": {"model": "anthropic/claude-opus-4-7", "base_url": "https://api.anthropic.com"},
+        },
+    )]
+
+
+async def test_update_guest_llm_null_spec_clears(srv: _SpyServer):
+    await srv._handle_inbound(
+        {"type": INBOUND_UPDATE_GUEST_LLM, "name": "宝总", "spec": None}, _sink,
+    )
+    assert srv.calls == [("_update_guest_llm", {"name": "宝总", "spec_dict": None})]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_GUEST_LLM, "spec": {"model": "x/y"}},               # 缺 name
+    {"type": INBOUND_UPDATE_GUEST_LLM, "name": "", "spec": None},                # 空 name
+    {"type": INBOUND_UPDATE_GUEST_LLM, "name": "宝总", "spec": "x"},              # spec 是 str
+    {"type": INBOUND_UPDATE_GUEST_LLM, "name": "宝总", "spec": [{"model": "a/b"}]},  # spec 是 list
+])
+async def test_update_guest_llm_bad_payload(srv: _SpyServer, payload):
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0

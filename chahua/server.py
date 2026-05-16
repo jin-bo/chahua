@@ -90,6 +90,8 @@ INBOUND_UPDATE_USER_MD = "update_user_md"
 INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
 INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
 INBOUND_UPDATE_ROOM_ORCHESTRATOR = "update_room_orchestrator"
+INBOUND_UPDATE_ROOM_LLM = "update_room_llm"
+INBOUND_UPDATE_GUEST_LLM = "update_guest_llm"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
@@ -176,6 +178,19 @@ def _require_bool(data: dict, key: str, *, where: str) -> Optional[bool]:
         _log.warning("ignoring %s: %s 必须是 bool，收到 %r", where, key, type(v))
         return None
     return v
+
+
+def _check_optional_dict(data: dict, key: str, *, where: str) -> bool:
+    """``data[key]`` 必须是 dict 或缺/null；其它类型 → WARN + ``False``（让 caller 丢弃帧）。
+    本身不取值 —— 用 ``data.get(key)`` 拿；只表态校验过了。
+    """
+    v = data.get(key)
+    if v is not None and not isinstance(v, dict):
+        _log.warning(
+            "ignoring %s: %s 必须是对象 / null，收到 %r", where, key, type(v)
+        )
+        return False
+    return True
 
 
 def _import_success_text(result: "persona_import.ImportedPersona") -> str:
@@ -612,6 +627,56 @@ class ChahuaServer:
             return
         self._session.swap_room_config(new_rc)
         _log.info("update_room_orchestrator: %r", overrides)
+        self._emit_room_snapshot(sink)
+
+    def _update_room_llm(
+        self, *, section: str, spec_dict: Optional[dict], sink: EnvelopeSink
+    ) -> None:
+        """覆盖 ``[scoring]`` / ``[summary]`` 顶层 LLM 段 + 重装 session + 重发 snapshot。
+
+        session 重装是必要的 —— LLMClient 在装配期注入 IntentScorer / Summarizer / Agentao
+        实例内部，不像 OrchestratorConfig 那样可热替（agentao 没暴露热换 client 接口）。
+        改完即 ``_replace_session`` 让茶客 / scorer / summarizer 全部带新 client 起。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.update_room_llm(
+                paths=self._paths, room_dir=room_dir,
+                section=section, spec_dict=spec_dict,
+            )
+        except Exception:
+            _log.exception(
+                "update_room_llm: section=%r spec=%r 失败", section, spec_dict
+            )
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="update_room_llm"):
+            return
+        _log.info("update_room_llm: section=%r spec=%r", section, spec_dict)
+        self._emit_room_snapshot(sink)
+
+    def _update_guest_llm(
+        self, *, name: str, spec_dict: Optional[dict], sink: EnvelopeSink
+    ) -> None:
+        """覆盖一位茶客的 LLM 字段 + 重装 session + 重发 snapshot。
+
+        ``spec_dict=None`` 即清掉该茶客的 model/base_url/api_key_env，回到房间默认。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.update_guest_llm(
+                paths=self._paths, room_dir=room_dir,
+                name=name, spec_dict=spec_dict,
+            )
+        except Exception:
+            _log.exception(
+                "update_guest_llm: name=%r spec=%r 失败", name, spec_dict
+            )
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="update_guest_llm"):
+            return
+        _log.info("update_guest_llm: name=%r spec=%r", name, spec_dict)
         self._emit_room_snapshot(sink)
 
     def _remove_guest(self, *, name: str, sink: EnvelopeSink) -> None:
@@ -1068,6 +1133,34 @@ class ChahuaServer:
         # 迭代当场生效，无需打断当前发言 / 评分。
         self._update_room_orchestrator(overrides=overrides, sink=sink)
 
+    async def _inbound_update_room_llm(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        section = data.get("section")
+        if section not in ("scoring", "summary"):
+            _log.warning(
+                "ignoring %s: section 必须是 'scoring'/'summary'，收到 %r",
+                INBOUND_UPDATE_ROOM_LLM, section,
+            )
+            return
+        if not _check_optional_dict(data, "spec", where=INBOUND_UPDATE_ROOM_LLM):
+            return
+        await self._cancel_and_drain_inflight()
+        self._update_room_llm(
+            section=section, spec_dict=data.get("spec"), sink=sink
+        )
+
+    async def _inbound_update_guest_llm(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_LLM)
+        if name is None:
+            return
+        if not _check_optional_dict(data, "spec", where=INBOUND_UPDATE_GUEST_LLM):
+            return
+        await self._cancel_and_drain_inflight()
+        self._update_guest_llm(name=name, spec_dict=data.get("spec"), sink=sink)
+
     async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
         room_id = _require_str(data, "room_id", where=INBOUND_CREATE_ROOM)
         if room_id is None:
@@ -1221,6 +1314,8 @@ _INBOUND_HANDLERS: dict[str, _InboundHandler] = {
     INBOUND_UPDATE_USER_MD: ChahuaServer._inbound_update_user_md,
     INBOUND_UPDATE_ROOM_TOML: ChahuaServer._inbound_update_room_toml,
     INBOUND_UPDATE_ROOM_ORCHESTRATOR: ChahuaServer._inbound_update_room_orchestrator,
+    INBOUND_UPDATE_ROOM_LLM: ChahuaServer._inbound_update_room_llm,
+    INBOUND_UPDATE_GUEST_LLM: ChahuaServer._inbound_update_guest_llm,
     INBOUND_UPDATE_USER_AVATAR: ChahuaServer._inbound_update_user_avatar,
     INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
     INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,

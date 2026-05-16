@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from ._paths import Paths, resolve_under
+from .llm_spec import LLM_TOML_FIELDS, LLMSpec
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 
 
@@ -63,16 +64,19 @@ _ALLOWED_ROOM_KEYS: frozenset[str] = (
 )
 # [[guest]] 段允许的键。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
-    {"name", "persona", "permission"}
+    {"name", "persona", "permission", "model", "base_url", "api_key_env"}
 )
-# 显式后压到 P4.x 的字段 —— 用户写了的话报错时点出来。
+# 已移除的字段 —— 不会有未来 phase 接 `provider`（设计 §2.1：用 model = "<provider>/<model>"
+# 合并写法）。出现 → 给定向 hint。
+_REMOVED_GUEST_KEYS: frozenset[str] = frozenset({"provider"})
+# 后续 phase 接入的字段 —— 现在写了报"未实现"。
 _DEFERRED_GUEST_KEYS: frozenset[str] = frozenset(
-    {"provider", "base_url", "model", "isolation", "extra_mcp_servers", "transport"}
+    {"isolation", "extra_mcp_servers", "transport"}
 )
-# 顶层白名单。[scoring] / [summary] 不在这里，走 _DEFERRED_TOPLEVEL_SECTIONS 单独
-# 报"P4.1 的事"，比"未知键"更有信息量。
-_ALLOWED_TOPLEVEL_KEYS: frozenset[str] = frozenset({"room", "guest"})
-_DEFERRED_TOPLEVEL_SECTIONS: frozenset[str] = frozenset({"scoring", "summary"})
+# 顶层白名单。
+_ALLOWED_TOPLEVEL_KEYS: frozenset[str] = frozenset(
+    {"room", "guest", "scoring", "summary"}
+)
 
 
 class RoomConfigError(ValueError):
@@ -87,6 +91,10 @@ class GuestConfig:
 
     permission: str
     """已校验在 :data:`chahua.permissions.VALID_MODES` 内。"""
+
+    llm: Optional[LLMSpec] = None
+    """``[[guest]]`` 里写明的 ``model`` / ``base_url`` / ``api_key_env`` 解析结果；
+    缺即走房间默认（:meth:`LLMSpec.from_env`）。P4.1 起每位茶客可独立配 client。"""
 
     def read_persona(self) -> str:
         return self.persona_path.read_text(encoding="utf-8")
@@ -130,6 +138,13 @@ class RoomConfig:
     ``speaker_cooldown_turns`` / ``onboarding_threshold``）。**只装载用户实际写了的键** ——
     没写 = 不在 dict 里；session 装配时 patch 到 :class:`OrchestratorConfig()` 默认上。
     这样回写 toml 时也只回写用户填的那几个，不会把"默认值"硬塞进文件。"""
+
+    scoring_llm: Optional[LLMSpec] = None
+    """``[scoring]`` 段解析结果；缺 = 走房间默认（:meth:`LLMSpec.from_env`）。打分用
+    便宜模型场景。"""
+
+    summary_llm: Optional[LLMSpec] = None
+    """``[summary]`` 段解析结果；缺 = 复用 :attr:`scoring_llm`（仍缺则走房间默认）。"""
 
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
@@ -198,6 +213,13 @@ def _build(
         room_raw, toml_path=toml_path
     )
 
+    scoring_llm = _build_room_llm_section(
+        data.get("scoring"), section="[scoring]", toml_path=toml_path
+    )
+    summary_llm = _build_room_llm_section(
+        data.get("summary"), section="[summary]", toml_path=toml_path
+    )
+
     guests = _build_guests(
         data.get("guest", []), paths=paths, toml_path=toml_path
     )
@@ -210,7 +232,34 @@ def _build(
         guests=guests,
         user_md_override=user_md_override,
         orchestrator_overrides=orchestrator_overrides,
+        scoring_llm=scoring_llm,
+        summary_llm=summary_llm,
     )
+
+
+def _parse_llm_or_raise(
+    raw: Optional[dict], *, label: str, toml_path: Path
+) -> Optional[LLMSpec]:
+    """:meth:`LLMSpec.from_toml` 的裸 :class:`ValueError` 包成 :class:`RoomConfigError`
+    并叠 toml 路径上下文。``[scoring]`` / ``[summary]`` / ``[[guest]]`` 三处共用。
+    """
+    try:
+        return LLMSpec.from_toml(raw, label=label)
+    except ValueError as exc:
+        raise RoomConfigError(f"{toml_path}: {exc}") from exc
+
+
+def _build_room_llm_section(
+    raw: Any, *, section: str, toml_path: Path
+) -> Optional[LLMSpec]:
+    """解析 ``[scoring]`` / ``[summary]`` 顶层 LLM 段；缺段 → ``None``。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise RoomConfigError(
+            f"{toml_path}: {section} 必须是表（table），得到 {type(raw).__name__}"
+        )
+    return _parse_llm_or_raise(raw, label=section, toml_path=toml_path)
 
 
 def _build_orchestrator_overrides(
@@ -281,6 +330,11 @@ def _build_guests(
             keys=g,
             allowed=_ALLOWED_GUEST_KEYS,
             deferred=_DEFERRED_GUEST_KEYS,
+            removed=_REMOVED_GUEST_KEYS,
+            removed_hint=(
+                "provider 不再作为独立字段；请写 model = \"<provider>/<model>\""
+                "（如 'openai/gpt-5.4'）"
+            ),
             toml_path=toml_path,
         )
 
@@ -315,9 +369,21 @@ def _build_guests(
                 f"不在 {VALID_MODES} 内"
             )
 
+        # LLM 字段从 guest 表里挑出 LLM_TOML_FIELDS 子集再解析 —— 其它键已被
+        # _check_unknown_keys 拦过，这里不会混入。
+        llm_subset = {k: g[k] for k in LLM_TOML_FIELDS if k in g}
+        guest_llm = _parse_llm_or_raise(
+            llm_subset or None,
+            label=f"[[guest]] {name!r}",
+            toml_path=toml_path,
+        )
+
         out.append(
             GuestConfig(
-                name=name, persona_path=persona_path, permission=permission_raw
+                name=name,
+                persona_path=persona_path,
+                permission=permission_raw,
+                llm=guest_llm,
             )
         )
 
@@ -368,18 +434,12 @@ def _as_str(value: Any, *, label: str, toml_path: Path) -> str:
 
 
 def _check_unknown_toplevel(data: dict[str, Any], toml_path: Path) -> None:
-    """顶层只允许 ``room`` / ``guest``。``scoring`` / ``summary`` 单独指向 P4。"""
+    """顶层未知键（含意外的 section / 标量字段）→ 报错并列出允许集。"""
     for key in data:
         if key in _ALLOWED_TOPLEVEL_KEYS:
             continue
-        if key in _DEFERRED_TOPLEVEL_SECTIONS:
-            raise RoomConfigError(
-                f"{toml_path}: [{key}] 段是 P4 的事（模型分流），"
-                f"P1.5 全茶客共用一个 LLMClient；先把这段注释掉。"
-            )
         raise RoomConfigError(
-            f"{toml_path}: 顶层未知键 [{key}]。"
-            f"P1.5 只支持 [room] 和 [[guest]]。"
+            f"{toml_path}: 顶层未知键 [{key}]。允许：{sorted(_ALLOWED_TOPLEVEL_KEYS)}"
         )
 
 
@@ -390,16 +450,27 @@ def _check_unknown_keys(
     allowed: frozenset[str],
     deferred: frozenset[str],
     toml_path: Path,
+    removed: frozenset[str] = frozenset(),
+    removed_hint: str = "",
 ) -> None:
-    """对一个 section 的键做白名单校验，未知键报错并区分 P4 / 真打错。"""
+    """对一个 section 的键做白名单校验。未知键按三类分诊：
+
+    - ``removed``：已知字段但本 phase 不再接受（如 ``provider`` 被合并到 ``model``）
+      —— 出现就给 ``removed_hint`` 引导改写。
+    - ``deferred``：后续 phase 会接入的占位 —— 让用户暂时注释掉。
+    - 其它：拼写错误 —— 列出 ``allowed`` 帮排查。
+    """
     unknown = set(keys) - allowed
     if not unknown:
         return
+    in_removed = sorted(unknown & removed)
     in_deferred = sorted(unknown & deferred)
-    truly_unknown = sorted(unknown - deferred)
+    truly_unknown = sorted(unknown - removed - deferred)
     msgs: list[str] = []
+    if in_removed and removed_hint:
+        msgs.append(removed_hint)
     if in_deferred:
-        msgs.append(f"P4 字段（P1.5 不支持，先注释）：{in_deferred}")
+        msgs.append(f"尚未支持的字段（后续 phase 接入；先注释）：{in_deferred}")
     if truly_unknown:
         msgs.append(
             f"未知字段（拼写错误？）：{truly_unknown}。"

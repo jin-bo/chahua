@@ -23,7 +23,7 @@ import re
 import shutil
 import tomllib
 from pathlib import Path
-from typing import Any, Optional, Sequence, TypedDict
+from typing import Any, Literal, Optional, Sequence, TypedDict
 
 from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
@@ -35,27 +35,32 @@ from .config import (
     load_room_config,
     read_avatar_data_uri,
 )
+from .llm_spec import LLM_TOML_FIELDS, LLMSpec
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 from .persona_assets import persona_relative, search_roots
 
 
 # ── 完整 room.toml 视图（mutator 内部用，对应 docs/P4-专业茶客配置闭环.md §4.4.1）─
 #
-# 当前消费 name / topic / rules / user_md / guests 五个字段位（emit 由 _render_room_toml
-# 实现）；orchestrator_overrides / scoring / summary 字段位留好，由 P4.0+ 各自 PR 一并
-# 加 emit + load —— "schema 与运行时消费绑同一 PR"。
+# 当前消费 name / topic / rules / user_md / orchestrator_overrides / scoring / summary /
+# guests（含 LLM 三件套）；剩 isolation / extra_mcp_servers 字段位留好，由 P4.2+ 在加
+# schema 解析的同 PR 一并加 emit + load —— "schema 与运行时消费绑同一 PR"。
 class GuestSnapshot(TypedDict, total=False):
     """单个 ``[[guest]]`` 表的字段视图。
 
-    ``total=False`` 让 P4.1+ 加新字段时不破现有构造（mutator 只填它知道的字段；
+    ``total=False`` 让后续 phase 加新字段时不破现有构造（mutator 只填它知道的字段；
     snapshot reader 用 ``.get()`` 拿值）。
     """
     name: str
     persona: str
     permission: str
-    # P4.1+: isolation: Literal["room", "global"]
-    # P4.1+: llm: dict  (LLMSpec 序列化结果)
-    # P4.1+: extra_mcp_servers: list[dict]
+    # P4.1 LLM 三件套（all-or-nothing：写 model 才允许 base_url / api_key_env，
+    # 详见 chahua.llm_spec.LLMSpec.from_toml 校验）。
+    model: str
+    base_url: str
+    api_key_env: str
+    # P4.2+: isolation: Literal["room", "global"]
+    # P4.3+: extra_mcp_servers: list[dict]
 
 
 class TomlSnapshot(TypedDict, total=False):
@@ -69,15 +74,10 @@ class TomlSnapshot(TypedDict, total=False):
     guests: list[GuestSnapshot]
 
 
-# render 时认得的 guest 字段；其它字段位（isolation / llm / extra_mcp_servers）由
-# P4.1+ 加 emit 时一并扩这个 set。
-_ALLOWED_GUEST_EMIT: frozenset[str] = frozenset({"name", "persona", "permission"})
-
-# 与 _render_room_toml 一一对应：每个 (label, 取 snapshot 值的 key, owner) 三元组在
-# emit 时若非空就 raise NotImplementedError，等对应 P4.x PR 把 emit 一起加上。
-_DEFERRED_TOP_EMIT: tuple[tuple[str, str, str], ...] = (
-    ("[scoring]", "scoring", "P4.1"),
-    ("[summary]", "summary", "P4.1"),
+# render 时认得的 guest 字段；其它字段位（isolation / extra_mcp_servers）由
+# P4.2+ 加 emit 时一并扩这个 set。
+_ALLOWED_GUEST_EMIT: frozenset[str] = (
+    frozenset({"name", "persona", "permission"}) | frozenset(LLM_TOML_FIELDS)
 )
 
 
@@ -245,6 +245,20 @@ def _toml_basic_string(s: str) -> str:
     return '"' + "".join(out) + '"'
 
 
+def _llm_spec_to_dict(spec: LLMSpec) -> dict[str, str]:
+    """``LLMSpec`` → toml 表层 dict（仅含非 ``None`` 字段）。
+
+    重新拼回 ``provider/model`` 合并写法（设计 §2.1）；``temperature`` 不进 toml schema
+    所以不出现在结果里。
+    """
+    out: dict[str, str] = {"model": f"{spec.provider}/{spec.model}"}
+    if spec.base_url:
+        out["base_url"] = spec.base_url
+    if spec.api_key_env:
+        out["api_key_env"] = spec.api_key_env
+    return out
+
+
 def _format_toml_scalar(value: Any) -> str:
     """TOML 数值字面量。float 走 ``repr`` 保留精度；bool 显式拒避免被当 int 写出 1/0。"""
     if isinstance(value, bool):
@@ -259,18 +273,13 @@ def _format_toml_scalar(value: Any) -> str:
 def _render_room_toml(snapshot: TomlSnapshot) -> str:
     """``TomlSnapshot`` → ``room.toml`` 文本。纯函数（无 IO）。
 
-    当前 emit 范围：``[room].{name, topic, rules, user_md, 编排参数}`` + ``[[guest]].{name,
-    persona, permission}``。其它字段（[scoring] / [summary] / guest isolation/llm/
-    extra_mcp_servers）只有字段位，emit 留给 P4.1+ 在加 schema 解析的同 PR 一并实现 ——
-    现在若 snapshot 携带这些非空字段就 :class:`NotImplementedError` 防御，避免出现
-    "snapshot 接受 / 写盘但 load_room_config 拒" 的中间态写坏 toml。
+    当前 emit 范围：``[room].{name, topic, rules, user_md, 编排参数}``、可选 ``[scoring]``
+    / ``[summary]`` 顶层 LLM 段、``[[guest]].{name, persona, permission, model, base_url,
+    api_key_env}``。剩下的字段位（guest isolation / extra_mcp_servers）由 P4.2+ 加
+    schema 解析的同 PR 一并加 emit —— 若提前出现在 ``[[guest]]`` 里，下方未知键 guard
+    会 :class:`NotImplementedError` 防御，避免 "snapshot 接受 / 写盘但 load_room_config 拒"
+    的中间态写坏 toml。
     """
-    for label, key, owner in _DEFERRED_TOP_EMIT:
-        if snapshot.get(key):
-            raise NotImplementedError(
-                f"{label} 的 toml 写出由 {owner} 加；snapshot 暂不应携带"
-            )
-
     lines: list[str] = ["[room]"]
     lines.append(f"name  = {_toml_basic_string(snapshot['name'])}")
     lines.append(f"topic = {_toml_basic_string(snapshot.get('topic') or '')}")
@@ -287,6 +296,17 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         if key in orch:
             lines.append(f"{key} = {_format_toml_scalar(orch[key])}")
 
+    # [scoring] / [summary] 顶层 LLM 段（§3 示例顺序：room → scoring → summary → guest）。
+    for section in ("scoring", "summary"):
+        spec_dict = snapshot.get(section)
+        if not spec_dict:
+            continue
+        lines.append("")
+        lines.append(f"[{section}]")
+        for key in LLM_TOML_FIELDS:
+            if key in spec_dict:
+                lines.append(f"{key} = {_toml_basic_string(str(spec_dict[key]))}")
+
     for g in snapshot["guests"]:
         gname = str(g["name"])
         unknown = set(g) - _ALLOWED_GUEST_EMIT
@@ -302,6 +322,11 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         lines.append(
             f"permission = {_toml_basic_string(str(g.get('permission') or DEFAULT_MODE))}"
         )
+        # 字段对齐到 11 字符（与上面 name/persona/permission 的视觉宽度匹配，
+        # 让 [[guest]] 段读起来连成一块）；api_key_env 自己 11 字符，会占满。
+        for key in LLM_TOML_FIELDS:
+            if key in g:
+                lines.append(f"{key:<11}= {_toml_basic_string(str(g[key]))}")
     return "\n".join(lines) + "\n"
 
 
@@ -337,26 +362,30 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
     成绝对路径，丢了原始相对写法。回退策略：如果 absolute path 在某个搜索根下，重算
     相对值；否则保留 absolute（兼容用户硬编绝对路径的极少数场景）。
 
-    P4.-1 还原范围：name / topic / rules / user_md_override / guests 三件套。其余字段位
-    （orchestrator_overrides / scoring / summary / guest 新字段）置空 —— config.py 当前
-    白名单仍拒，所以 snapshot 也不可能有非空值；P4.0+ 在加 schema 解析的同 PR 一并填这里。
+    还原范围：name / topic / rules / user_md_override / orchestrator_overrides /
+    scoring_llm / summary_llm + 每位 guest 的 name / persona / permission / LLM 三件套。
+    剩下的 guest 字段位（isolation / extra_mcp_servers）由 P4.2+ 加 schema 解析的同
+    PR 一并填这里。
     """
+    guests: list[GuestSnapshot] = []
+    for gc in rc.guests:
+        g: GuestSnapshot = {
+            "name": gc.name,
+            "persona": _persona_to_relative(gc.persona_path, paths),
+            "permission": gc.permission,
+        }
+        if gc.llm is not None:
+            g.update(_llm_spec_to_dict(gc.llm))
+        guests.append(g)
     return {
         "name": rc.name,
         "topic": rc.topic,
         "rules": rc.rules,
         "user_md": rc.user_md_override,
         "orchestrator_overrides": dict(rc.orchestrator_overrides),
-        "scoring": None,
-        "summary": None,
-        "guests": [
-            {
-                "name": gc.name,
-                "persona": _persona_to_relative(gc.persona_path, paths),
-                "permission": gc.permission,
-            }
-            for gc in rc.guests
-        ],
+        "scoring": _llm_spec_to_dict(rc.scoring_llm) if rc.scoring_llm else None,
+        "summary": _llm_spec_to_dict(rc.summary_llm) if rc.summary_llm else None,
+        "guests": guests,
     }
 
 
@@ -506,6 +535,80 @@ def update_guest_permission(
             new_guests.append(g)
     if not found:
         raise ValueError(f"茶客 {name!r} 不在房间里")
+    snapshot["guests"] = new_guests
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def _validate_llm_spec_dict(
+    spec_dict: dict[str, Any], *, label: str
+) -> dict[str, str]:
+    """走 :meth:`LLMSpec.from_toml` 的 all-or-nothing 校验，回吐规范化后的 dict。
+
+    写盘前 pre-validate 是必要的 —— 否则 bad type（如 bool）会走到
+    :func:`_render_room_toml` 才被 :class:`TypeError` 拦，绕过 :func:`_write_text_and_validate`
+    那条只 catch :class:`RoomConfigError` 的回滚分支。
+    """
+    try:
+        spec = LLMSpec.from_toml(spec_dict, label=label)
+    except ValueError as exc:
+        raise RoomConfigError(str(exc)) from exc
+    if spec is None:
+        # 空 dict / 缺 model（且没非 model 字段触发 all-or-nothing 报错）—— 语义不明。
+        raise RoomConfigError(
+            f"{label}: spec 不含 model 字段（要清掉这段 LLM 配置请传 None，不要传空 dict）"
+        )
+    return _llm_spec_to_dict(spec)
+
+
+def update_room_llm(
+    *, paths: Paths, room_dir: Path,
+    section: Literal["scoring", "summary"],
+    spec_dict: Optional[dict[str, Any]],
+) -> RoomConfig:
+    """覆盖 ``[scoring]`` / ``[summary]`` 顶层 LLM 段。``spec_dict=None`` → 删整段。
+
+    非 None 走 :meth:`LLMSpec.from_toml` 预校验；失败 raise 不动盘。
+    """
+    if section not in ("scoring", "summary"):
+        raise RoomConfigError(
+            f"update_room_llm: section 必须是 'scoring' / 'summary'，得到 {section!r}"
+        )
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    if spec_dict is None:
+        snapshot[section] = None  # type: ignore[literal-required]
+    else:
+        snapshot[section] = _validate_llm_spec_dict(  # type: ignore[literal-required]
+            spec_dict, label=f"[{section}]"
+        )
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def update_guest_llm(
+    *, paths: Paths, room_dir: Path, name: str, spec_dict: Optional[dict[str, Any]]
+) -> RoomConfig:
+    """覆盖一位茶客的 LLM 字段（``model`` / ``base_url`` / ``api_key_env``）；
+    ``spec_dict=None`` → 清掉该茶客的 LLM 三件套，回到房间默认。
+
+    名字不在册 → :class:`ValueError`；spec_dict 非空走 :meth:`LLMSpec.from_toml` 预校验。
+    存在性校验先于 spec 校验 —— 用户既改错名字又写坏 spec 时，先告诉他名字找不到。
+    """
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    if not any(g["name"] == name for g in snapshot["guests"]):
+        raise ValueError(f"茶客 {name!r} 不在房间里")
+    validated: Optional[dict[str, str]] = (
+        _validate_llm_spec_dict(spec_dict, label=f"[[guest]] {name!r}")
+        if spec_dict is not None
+        else None
+    )
+    new_guests: list[GuestSnapshot] = []
+    for g in snapshot["guests"]:
+        if g["name"] != name:
+            new_guests.append(g)
+            continue
+        cleaned: GuestSnapshot = {k: v for k, v in g.items() if k not in LLM_TOML_FIELDS}  # type: ignore[misc]
+        if validated is not None:
+            cleaned.update(validated)  # type: ignore[typeddict-item]
+        new_guests.append(cleaned)
     snapshot["guests"] = new_guests
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
