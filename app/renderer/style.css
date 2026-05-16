@@ -809,6 +809,100 @@ body.disconnected .dblclick-anchor:hover { background: transparent; }
   line-height: 1.4;
 }
 
+/* 茶客详细设置 modal（P4.5）—— 模型 / 权限 / 隔离 / persona+room MCP / skills。
+   modal-wide 宽一点（580px）给三段并排 radio + MCP 行 [name][cmd][args][×] 留宽度。 */
+.modal-wide { max-width: 580px; min-width: 460px; }
+.modal-fieldset {
+  border: 1px solid #e8e3d6;
+  border-radius: 4px;
+  padding: 8px 12px 10px;
+  margin: 0 0 12px;
+}
+.modal-fieldset > legend {
+  font-size: 12px;
+  color: #666;
+  padding: 0 4px;
+}
+.modal-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #444;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.modal-radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.modal-radio-row .modal-radio { padding: 0; }
+/* LLM 字段块 —— custom radio 选中时才展开，default 时折回（hidden 属性）。 */
+.modal-llm-fields { padding-left: 22px; margin-top: 4px; }
+.modal-llm-fields .modal-field { margin-bottom: 8px; }
+.modal-mcp-list {
+  list-style: none;
+  margin: 4px 0 6px;
+  padding: 0;
+  font-size: 12px;
+}
+.modal-mcp-list .modal-mcp-readonly {
+  display: flex;
+  gap: 8px;
+  padding: 3px 4px;
+  color: #555;
+}
+.modal-mcp-list .modal-mcp-empty {
+  padding: 3px 4px;
+  color: #aaa;
+  font-style: italic;
+}
+/* 可编辑行：[name 1/4][command 1/3][args 余下][×]，行内对齐。 */
+.modal-mcp-list.editable .modal-mcp-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 0;
+}
+.modal-mcp-list.editable input[type="text"] {
+  padding: 4px 8px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  background: #fff;
+}
+.modal-mcp-list.editable .modal-mcp-name { flex: 1 1 80px; }
+.modal-mcp-list.editable .modal-mcp-cmd { flex: 1 1 120px; }
+.modal-mcp-list.editable .modal-mcp-args { flex: 2 1 160px; }
+.modal-secondary {
+  padding: 6px 12px;
+  border: 1px solid #d0c8b4;
+  background: #f5efe0;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.modal-secondary:hover { background: #ece5d2; }
+/* popover 末尾"详细设置…"入口 —— 视觉上和上面权限选项分开。 */
+.popover-details-entry {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid #e8e3d6;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: #6b4f2a;
+  cursor: pointer;
+}
+.popover-details-entry:hover { background: #ece5d2; }
+
 /* 导入 persona modal：radio + 输入框 + (本地)选目录按钮 横向排版。 */
 .import-tab {
   display: inline-flex;

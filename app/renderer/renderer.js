@@ -14,7 +14,7 @@
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
-import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION } from "./events.js";
+import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION, PERMISSION_OPTIONS } from "./events.js";
 import {
   positionPopoverByAnchor,
   attachPopoverDismissHandlers,
@@ -37,6 +37,7 @@ import { createMention } from "./mention.js";
 import { createUpload } from "./upload.js";
 import { renderPersonaPicker, createPersonaImport } from "./persona.js";
 import { createSettings } from "./settings.js";
+import { createGuestSettings } from "./guest_settings.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -182,14 +183,9 @@ function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
 
 // ── 权限 popover（点 sidebar 头像）───────────────────────────────────
 //
-// 三档权限文案 + 描述 —— 镜像 chahua/permissions.py 的 VALID_MODES。颜色与
-// .permission-badge 的 [data-permission] 同枚举，read-only 不挂底色（默认浅灰）。
-// 改这里的 value 字符串要跟 chahua/permissions.py::PermissionMode 同步。
-const PERMISSION_OPTIONS = Object.freeze([
-  { value: "read-only", label: "只读", desc: "仅看/搜索，不写文件、不跑 shell" },
-  { value: "workspace-write", label: "工作区可写", desc: "可写茶客工作目录、跑常规命令" },
-  { value: "full-access", label: "完全访问", desc: "放行所有工具（含潜在破坏性，谨慎）" },
-]);
+// 三档权限文案 + 描述 —— 由 events.js::PERMISSION_OPTIONS 单点供给（与 chahua/
+// permissions.py::VALID_MODES 同口径）。.permission-badge 的 [data-permission] 走同一
+// value 枚举，read-only 不挂底色（默认浅灰）。
 
 let permissionPopoverGuest = null;
 let _detachPermissionPopoverDismiss = null;
@@ -264,6 +260,7 @@ function showPermissionPopover(anchor, g) {
   }
   appendMcpSection(pop, g);
   appendSkillsSection(pop, g);
+  appendDetailsEntry(pop, g);
   document.body.appendChild(pop);
   positionPopoverByAnchor(pop, anchor);
   permissionPopoverGuest = g.name;
@@ -369,6 +366,22 @@ function appendSkillsSection(pop, g) {
     items: skills,
     renderItem: (li, s) => { li.textContent = s; },
   });
+}
+
+// 详细设置 modal 入口（P4.5）—— popover 末尾一条；快捷"切 permission / 勾 MCP"
+// 仍保留在 popover 上头（90% 场景一键搞定不必开 modal）。
+function appendDetailsEntry(pop, g) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "popover-option popover-details-entry";
+  btn.textContent = "详细设置…";
+  btn.title = "模型 / 隔离 / 房间级 MCP 一站式编辑";
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    closePermissionPopover();
+    guestSettings.open(g);
+  });
+  pop.appendChild(btn);
 }
 
 // ── 消息流渲染 ───────────────────────────────────────────────────────
@@ -577,6 +590,9 @@ function renderSidebar(roomInfo) {
     userMdSource: roomInfo.user_md_source,
     roomTomlContent: roomInfo.room_toml_content,
     roomTomlSource: roomInfo.room_toml_source,
+  });
+  guestSettings.setSnapshot({
+    roomDefaultLlmModel: roomInfo.room_default_llm?.model || null,
   });
   renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
@@ -1022,6 +1038,12 @@ const settings = createSettings({
   setStatus,
 });
 
+const guestSettings = createGuestSettings({
+  isConnected: () => connected,
+  send,
+  setStatus,
+});
+
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。
 
@@ -1035,7 +1057,8 @@ const upload = createUpload({
 });
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
-const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal, editRoomTomlModal];
+const editGuestModal = document.getElementById("edit-guest-modal");
+const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal, editRoomTomlModal, editGuestModal];
 for (const modal of ALL_MODALS) {
   modal.addEventListener("click", (ev) => {
     if (ev.target === modal) closeModal(modal);

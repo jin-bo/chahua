@@ -486,6 +486,11 @@ class ChahuaServer:
                     # 房间级 LLM section：与 guests[].llm 同构。
                     # ``source`` 是 "room" 表示 [scoring]/[summary] 段在 toml 里有写；
                     # "default" 表示该段缺失走的是房间默认（即 LLM_PROVIDER 环境变量）。
+                    # 房间默认 LLM —— "继承房间默认" UI 标签的字面来源（P4.5 modal）。
+                    # 永远走 env 推断（LLMSpec.from_env），source 固定 "default"。
+                    "room_default_llm": _llm_summary(
+                        spec=self._session.room_default_spec, source="default",
+                    ),
                     "scoring_llm": _llm_summary(
                         spec=self._session.scoring_spec,
                         source="room" if rc.scoring_llm is not None else "default",

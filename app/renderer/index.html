@@ -137,6 +137,90 @@
       </div>
     </div>
 
+    <!-- 茶客详细设置 modal（P4.5）：popover 上"详细设置…"打开。
+         模型 / 权限 / 隔离 / persona+房间级 MCP / skills 一站编辑；表单 diff 提交，单字段
+         非法只回滚那一项，其它不动。室外快捷的「切 permission / 勾 MCP 信任」仍留在
+         popover —— 90% 场景一键搞定不必开 modal。 -->
+    <div id="edit-guest-modal" class="modal-backdrop" hidden>
+      <div class="modal modal-wide">
+        <div class="modal-header">
+          <span id="edit-guest-title">设置茶客</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-hint" id="edit-guest-persona-hint"></div>
+          <div class="modal-hint" id="edit-guest-workspace-hint"></div>
+
+          <fieldset class="modal-fieldset">
+            <legend>模型</legend>
+            <label class="modal-radio">
+              <input type="radio" name="edit-guest-llm-mode" value="default">
+              <span id="edit-guest-llm-default-label">继承房间默认</span>
+            </label>
+            <label class="modal-radio">
+              <input type="radio" name="edit-guest-llm-mode" value="custom">
+              <span>自定义（model 必填）</span>
+            </label>
+            <div class="modal-llm-fields" id="edit-guest-llm-fields" hidden>
+              <label class="modal-field">
+                <span>model（形如 <code>openai/gpt-5.4</code>，第一个 <code>/</code> 拆 provider）</span>
+                <input id="edit-guest-llm-model" type="text" placeholder="openai/gpt-5.4">
+              </label>
+              <label class="modal-field">
+                <span>base_url（可选；已知 provider 留空走默认）</span>
+                <input id="edit-guest-llm-base-url" type="text" placeholder="https://api.openai.com/v1">
+              </label>
+              <label class="modal-field">
+                <span>api_key 环境变量名（可选；缺则 <code>&lt;PROVIDER&gt;_API_KEY</code> 约定）</span>
+                <input id="edit-guest-llm-api-key-env" type="text" placeholder="OPENAI_API_KEY">
+              </label>
+              <div class="modal-hint" id="edit-guest-llm-key-status"></div>
+            </div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>权限</legend>
+            <div class="modal-radio-row" id="edit-guest-permission-row"></div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>隔离</legend>
+            <label class="modal-radio">
+              <input type="radio" name="edit-guest-isolation" value="room">
+              <span>room（房间内失忆，删房间一并清）</span>
+            </label>
+            <label class="modal-radio">
+              <input type="radio" name="edit-guest-isolation" value="global">
+              <span>global（跨房间记得用户；切换会改工作目录）</span>
+            </label>
+            <div class="modal-hint">
+              切换 isolation 会改变工作目录路径。已有的
+              <code>.agentao/memory.db</code> / <code>sessions/</code>
+              不会自动迁移 —— 保留旧记忆请手动把老路径 cp 过去；否则茶客会从空白起步。
+            </div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>MCP 服务器</legend>
+            <div class="modal-hint" id="edit-guest-persona-mcp-hint">persona 自带（mcp.json）</div>
+            <ul class="modal-mcp-list" id="edit-guest-persona-mcp-list"></ul>
+            <div class="modal-hint">房间级 <code>[[guest.extra_mcp_servers]]</code>（自动信任）</div>
+            <ul class="modal-mcp-list editable" id="edit-guest-room-mcp-list"></ul>
+            <button id="edit-guest-room-mcp-add" type="button" class="modal-secondary">+ 添加 server</button>
+          </fieldset>
+
+          <fieldset class="modal-fieldset" id="edit-guest-skills-fieldset" hidden>
+            <legend>Skills（持续加载）</legend>
+            <ul class="modal-mcp-list" id="edit-guest-skills-list"></ul>
+          </fieldset>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="modal-secondary" data-close>取消</button>
+          <button id="edit-guest-submit" type="button" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
     <div id="add-room-modal" class="modal-backdrop" hidden>
       <div class="modal">
         <div class="modal-header">

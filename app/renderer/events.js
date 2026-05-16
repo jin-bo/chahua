@@ -77,6 +77,15 @@ export const Inbound = Object.freeze({
 // "新建房间"提交时给的兜底值，以及"是否显示 V 标"的判定基准（≠ DEFAULT 才显示）。
 export const DEFAULT_PERMISSION = "read-only";
 
+// 三档权限文案 —— 镜像 chahua/permissions.py 的 VALID_MODES。popover（renderer.js）
+// 与 详细设置 modal（guest_settings.js）共享这份描述。``desc`` 给 popover 多行解释用，
+// modal 只读 ``label``。
+export const PERMISSION_OPTIONS = Object.freeze([
+  Object.freeze({ value: "read-only", label: "只读", desc: "仅看/搜索，不写文件、不跑 shell" }),
+  Object.freeze({ value: "workspace-write", label: "工作区可写", desc: "可写茶客工作目录、跑常规命令" }),
+  Object.freeze({ value: "full-access", label: "完全访问", desc: "放行所有工具（含潜在破坏性，谨慎）" }),
+]);
+
 // 镜像 chahua/scoring.py::ScoreKind —— turn_start.data.scores[i].kind 取值。
 // 与 EventType / Status 同性质：wire 协议常量，不是 presentation。
 // label / 颜色 / 是否显示数字这些渲染决定留给 renderer，不污染本文件。
