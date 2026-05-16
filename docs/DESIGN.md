@@ -578,40 +578,56 @@ admin.update_room_toml(room_dir, content, *, paths):
 [room]
 name = "深夜茶话室"
 topic = "随便聊"
+rules = "保持中文、单条不超过 200 字"
+# user_md = "USER.md"             # 可选；默认 rooms/<room>/USER.md → 否则仓库顶层 USER.md
+# 编排参数（缺即走 OrchestratorConfig 默认）
 max_consecutive_ai_turns = 4      # 连续 AI 轮数上限，到了就让麦给用户
-want_threshold = 0.55             # 意愿打分 ≥ 此值才发言
+want_threshold = 0.45             # 意愿打分 ≥ 此值才发言（0~1）
 speaker_cooldown_turns = 1        # 刚发言的茶客冷却轮数（其打分本期自动归零）
 onboarding_threshold = 20         # 增量超过 N 条时触发 onboarding（含房间摘要）
-# user_md = "USER.md"             # 可选；默认 rooms/<room>/USER.md → 否则仓库顶层 USER.md
 
-[scoring]                         # 可选：打分阶段统一用便宜模型，省钱
-provider  = "openai"
-base_url  = "https://api.openai.com/v1"
-model     = "gpt-5.4-mini"
+[scoring]                         # 可选：打分阶段用便宜模型，省钱
+model = "openai/gpt-5.4-mini"     # 第一个 / 拆 provider/model（详见 P4 §2.1）
+# base_url    = "https://api.openai.com/v1"  # 可选；已知 provider 留空走默认
+# api_key_env = "OPENAI_API_KEY"              # 可选；缺则 <PROVIDER>_API_KEY 约定
 
-[summary]                         # 可选：房间摘要用的模型，默认复用 [scoring]
-# provider/base_url/model 同上
+[summary]                         # 可选：房间摘要模型；缺整段 → 复用 [scoring]
+model = "openai/gpt-5.4-mini"
 
 [[guest]]
 name       = "宝总"
-persona    = "personas/宝总.md"   # 注入 project_instructions
-provider   = "anthropic"
-base_url   = "https://api.anthropic.com"
-model      = "claude-opus-4-7"
-permission = "workspace-write"     # 可在自己目录里写笔记
-isolation  = "room"                # room=房间内失忆 / global=跨房间记得用户
+persona    = "chahua/personas/宝总.md"
+permission = "workspace-write"            # read-only / workspace-write / full-access
+isolation  = "room"                       # room=房间内失忆 / global=跨房间记得用户
+# LLM 三件套缺即走房间默认（LLM_PROVIDER 等环境变量）
+model       = "anthropic/claude-opus-4-7"
+base_url    = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# 房间级 inline MCP server —— 自动信任（区别于 persona sidecar mcp.json 走 trust）。
+# 同名时房间级覆盖 persona 一档。
+[[guest.extra_mcp_servers]]
+name = "web-search"
+command = "npx"
+args = ["-y", "@some/web-mcp"]
+# env  = { "API_TOKEN" = "..." }          # 可选
 
 [[guest]]
 name       = "玲子"
-persona    = "personas/玲子.md"
-provider   = "openai"
-base_url   = "https://api.openai.com/v1"
-model      = "gpt-5.4"
-permission = "read-only"           # 纯聊天
-isolation  = "global"
+persona    = "chahua/personas/玲子.md"
+permission = "read-only"
+# isolation / LLM 字段缺 → 走默认（room / 房间默认 client）
 ```
 
-`config.py` 读这个文件，为每个 `[[guest]]` 装配一个 `TeaGuest`（= `Agentao` 实例 + 人格 + 各自 `LLMClient` + 对应 `PermissionEngine` + `working_directory`）。API key 不放在 room.toml 里，走环境变量 / `.env`。
+**字段语义关键点**（详见 [P4-专业茶客配置闭环.md](P4-专业茶客配置闭环.md)）：
+
+- **`model = "<provider>/<model>"`**：必须含 `/`（取第一个分隔 provider）。无 `/` → `RoomConfigError`。OpenRouter / LiteLLM 的二级路径（`openrouter/qwen/qwen3-coder`）保留进 model。
+- **LLM section all-or-nothing**：`[scoring]` / `[summary]` / `[[guest]]` LLM 字段三件套，`base_url` / `api_key_env` 不能单独出现，必须同写 `model`。
+- **API key 不进 toml**：最大让步是 `api_key_env = "VAR_NAME"`。room.toml 经常被 commit / 截图，落明文回不来。
+- **`[[guest.extra_mcp_servers]]` 自动信任**：用户在自己 toml 里手写 = 用户意图。persona sidecar `mcp.json`（GitHub 导入的 `command` 可任意）走 UI trust 门控；两套口径不对称。
+- **`isolation` 切换不自动迁移**：旧 cwd 下的 `.agentao/memory.db` / `sessions/` 保持原样，UI 切换前 confirm 提醒。
+
+`config.py` 读这个文件，为每个 `[[guest]]` 装配一个 `TeaGuest`（= `Agentao` 实例 + 人格 + per-guest `LLMClient` + 对应 `PermissionEngine` + `working_directory`）。`[scoring]` / `[summary]` 各走自己 spec；缺 section 走 fallback 链（`[summary]` → `[scoring]` → 房间默认）。
 
 ## 5. 项目结构
 
@@ -669,7 +685,8 @@ chahua/
 | **P3.2.3 ws 重连退避** | renderer `ws.onclose` 退避重连（1s → 2s → 5s → 10s 上限），状态条显示尝试次数；用户主动关窗 / 退出不触发重连（main 进程关 sidecar 前先 webContents.send 一个 "shutting-down" 信号） | sidecar 中途死或 macOS sleep/wake，App 自动恢复 |
 | **P3.3.1 cancel**（✓ 完工） | wire 加 inbound `cancel`；server 改 in-flight task 模型（`asyncio.create_task` 挂 `_inflight_turn_task`，task.cancel() 收 turn），`switch_room` / `clear_room` 走 `_cancel_and_drain_inflight()` 先收净再切；orchestrator `_run_ai_chain` 加 try/except CancelledError emit `turn_end(status=cancelled, next:"user")`；前端 submitBtn 形变「发送 / 停止」按 `currentTurnId` 切，submit handler 双语义路由，断线本地清 `currentTurnId` | turn 跑到一半能停；停止后 next user_message 还能继续；`switch_room` / `clear_room` 在 turn 跑时先 cancel 再操作 |
 | **P3.3.2 打包前置 + 打包 + 主进程兜底**（部分） | (a) ✓ python 拆 `app_root` / `user_data_root`：`Paths` dataclass + `Paths.from_env()` 读 `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`，persona 双根搜，USER.md 只在 user_data；(b) ✓ Electron 首启动 seed：`app/main/paths.js` 决定双根（dev 同源仓库根 / packaged 拆 `process.resourcesPath` + `app.getPath('userData')`），`app/main/seed.js` 把 `app/templates/{USER.md, .env.example, rooms/p3-黄河路}` 拷到 `userDataRoot` 并写 `.chahua-seeded` marker（幂等 + dev 同源跳过），spawn sidecar 时显式 export `CHAHUA_APP_ROOT` / `CHAHUA_USER_DATA`；(c) ✓ electron-builder 打 macOS .dmg + 内嵌 python-build-standalone：`app/scripts/build-python-bundle.js` 走 `uv python install --install-dir` → 删 `EXTERNALLY-MANAGED` marker → `pip install` agentao + chahua（非 editable 拷源码）；`extraResources` 把 `python-bundle/` 搬到 `Contents/Resources/`；sidecar 运行时走 `python -m chahua.server` 绕开 pip 写的绝对 shebang；`sidecar.js:resolveSidecarCommand` 分 dev / packaged 两路 + Windows seam（Scripts/ vs bin/）；`_paths.py:find_in_data_then_app` 加第三档 fallback ``_package_install_root()`` 让 packaged 模式 `app_root`（.app/Resources）找不到 personas 时落到 chahua 包装根（site-packages/chahua/）；`seed.js` 用手动 readdir 递归替 `fs.cp({recursive:true})`（asar 内 cp 递归会创建空目录但漏文件）；(d) ✓ SIGTERM / SIGINT 路径补全 —— Python 加 `_watch_stdin_eof` 跨平台 graceful shutdown 路径：``connect_read_pipe(sys.stdin)`` 监 EOF，``stdin.isatty()`` 为假（sidecar 模式）才装；sidecar.js ``stdio[0]`` 从 ``ignore`` 改 ``pipe``，``stop()`` 关 ``child.stdin`` 替代 SIGINT（Windows 上 ``child.kill("SIGINT")`` 实际是 TerminateProcess 不 graceful）；signal handlers 保留给 CLI 用户的 Ctrl-C / ``kill``；SIGKILL 仍是 STOP_GRACE_MS 超时兜底；(e) ✓ sidecar stderr/stdout 落盘到 `app.getPath('logs')` —— `app.setName("chahua")` 让路径走 `~/Library/Logs/chahua/sidecar.log`，append + session header（timestamp + pid），exit/error 写 footer 后 idempotent close；顺手吃掉 stdout（之前 `stdio[1]="pipe"` 无 listener 风险） | dev `CHAHUA_USER_DATA=/tmp/x` 起 server 验证；.dmg 双击装可用；后台异常发布版本能拿到日志 |
-| **P4 打磨 + ACP 异构茶客** | 房间配置文件完善、人格画廊、运行时增删茶客、可选「主持人」agent、工具权限预设、删除房间/清茶客记忆 UI；**抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip** | 成品；并接入第一个非 agentao 的 ACP 茶客作为验收 |
+| **P4 专业茶客配置闭环**（✓ 完工，详见 [docs/P4-专业茶客配置闭环.md](P4-专业茶客配置闭环.md)） | P4.-1 抽 `chahua/llm_spec.py`（`LLMSpec` / `from_env` / `from_toml` / `build_client` / `split_model_id`）+ 泛化 `admin._rewrite_and_validate` 走完整 `TomlSnapshot`；P4.0 `[room]` 编排参数（`want_threshold` / `max_consecutive_ai_turns` / `speaker_cooldown_turns` / `onboarding_threshold`）round-trip + 热替；P4.1 `[scoring]` / `[summary]` / `[[guest]]` LLM 接入（`model = "<provider>/<model>"` 合并写法 + all-or-nothing 校验 + fallback 链）；P4.2 `[[guest]].isolation = "room"\|"global"` + cwd 路径解耦；P4.3 `[[guest.extra_mcp_servers]]` 数组段（自动信任 vs persona sidecar 走 trust 的两套口径）；P4.4 server inbound + room_info envelope 扩展（拆 `persona_mcp_servers` / `room_mcp_servers` / `effective_mcp_names` + 每 guest / 房间 LLM 摘要 + `api_key_ready` bool 永不下发 key 本身）；P4.5 / P4.6 茶客 / 房间详细设置 modal（共用 `llm_section_form.js`，raw textarea 保留作 power-user 兜底）。 | room.toml 写 P4 字段后 session 真按它跑；详细设置 modal 表单与 raw 编辑器双路一致；isolation 切换有 confirm；测试 264 → 283（新增 LLMSpec / extra_mcp / room_info envelope 等覆盖） |
+| **P5 ACP 异构茶客 + 主持人 agent**（占位） | 抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip；可选「主持人」agent 替代意愿打分；茶客并行打字 / 分组。 | 接入第一个非 agentao 的 ACP 茶客作为 P5 验收 |
 
 ## 7. 待定 / 后续
 

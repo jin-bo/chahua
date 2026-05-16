@@ -6,6 +6,15 @@
 ## [Unreleased]
 
 ### Added
+- **P4 专业茶客配置闭环**（2026-05-16，详见 [`docs/P4-专业茶客配置闭环.md`](docs/P4-专业茶客配置闭环.md)）：把 P1.5 全数硬拒到 P4 的 `room.toml` 字段一次落地。
+  - `[room]` 编排参数 `want_threshold` / `max_consecutive_ai_turns` / `speaker_cooldown_turns` / `onboarding_threshold` 接入；改值热替不重建茶客。
+  - `[scoring]` / `[summary]` / `[[guest]]` LLM 字段：`model = "<provider>/<model>"` 合并写法（OpenRouter / LiteLLM 二级路径保留）；all-or-nothing 校验（`base_url` / `api_key_env` 不能单独出现）；section 级 fallback 链 `[summary]` → `[scoring]` → 房间默认。每位茶客可独立配 LLM client（之前 P1.5 全茶客共用一个）。
+  - `[[guest]].isolation = "room"|"global"` 决定茶客 cwd：`<room_dir>/guests/<name>/` vs `<user_data_root>/guests/<name>/`。切换不自动迁移 `.agentao/memory.db`（UI 切换前 confirm 提醒）。
+  - `[[guest.extra_mcp_servers]]` 数组段：用户在自己 toml 里手写的 MCP server，**自动信任**（区别于 persona sidecar `mcp.json` 走 trust 门控）；同名时房间级覆盖 persona 同名。
+  - UI：两个新的「详细设置…」modal（茶客 modal `guest_settings.js` + 房间 modal `room_settings.js`，共用 `llm_section_form.js` 工具），从 sidebar popover 入口打开。raw textarea 编辑器保留作 power-user 兜底。表单 diff 提交：单字段非法只回滚那一项。
+  - 新 wire 帧：`update_room_orchestrator` / `update_room_llm` / `update_guest_llm` / `update_guest_isolation` / `update_guest_extra_mcp`。
+  - `room_info` envelope 扩展：拆 `persona_mcp_servers` / `room_mcp_servers` / `effective_mcp_names`（合并后实际装载顺序）；每 guest + 房间级 `llm` / `scoring_llm` / `summary_llm` / `room_default_llm` 摘要（含 `api_key_env` 名 + `api_key_ready` bool；**API key 本身永不下发**）。
+  - 新增模块：`chahua/llm_spec.py`（`LLMSpec` / `from_env` / `from_toml` / `build_client` / `split_model_id`）；`app/renderer/{guest_settings,room_settings,llm_section_form}.js`。
 - **双击 popover + raw room.toml 编辑器**（2026-05-15）：sidebar 删「清空聊天 / 编辑配置 / 换头像」三个按钮；双击房间名弹「更改房间配置 / 清空聊天」、双击用户头像/显示名弹「编辑配置 / 换头像」。「更改房间配置」是新功能：textarea 直接编辑当前房间 `room.toml`，服务端 `load_room_config` 校验失败回滚旧字节 + emit notice。新增 wire 帧上行 `update_room_toml`；`room_info` envelope 携带 `room_toml_content` / `room_toml_source` 给 modal prefill。新增 `admin.update_room_toml(room_dir, content, *, paths)`。详见 `docs/DESIGN.md` §3.11。
 - **persona MCP & skills 装载 + MCP 信任门**（2026-05-15）：persona 目录可放 sibling `mcp.json`（MCP servers）和 `skills/`（agentao skills 目录）。skills 启动时通过 `_fs.link_dir_idempotent` 软链到茶客 `working_directory`；MCP 因为带来「任意可执行」风险**必须用户在 popover 上显式勾选「信任此 persona 的 MCP」才装载**。信任记录跨房间持久化在 `user_data_root/.chahua/persona-trust.json`。room_info envelope 在每位 guest 上附 `mcp_servers`（command + args 摘要）/ `mcp_trusted` / `skills_available`；新 inbound `set_persona_mcp_trust`。新增模块：`chahua/persona_assets.py` / `chahua/trust.py`。
 - **「话题讨论你」打分加档**（2026-05-15）：scoring 阶段检测 transcript 里对**第三方**茶客的提及（非 `@`，是文本里"宝总你怎么看"这种），给被提及的茶客 score 一个额外加成档。让相关茶客更主动接话；@ 直接路由的确定性路径不受影响。
