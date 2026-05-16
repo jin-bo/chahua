@@ -38,6 +38,7 @@ import { createUpload } from "./upload.js";
 import { renderPersonaPicker, createPersonaImport } from "./persona.js";
 import { createSettings } from "./settings.js";
 import { createGuestSettings } from "./guest_settings.js";
+import { createRoomSettings } from "./room_settings.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -594,6 +595,7 @@ function renderSidebar(roomInfo) {
   guestSettings.setSnapshot({
     roomDefaultLlmModel: roomInfo.room_default_llm?.model || null,
   });
+  roomSettings.setSnapshot(roomInfo);
   renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
@@ -1044,6 +1046,14 @@ const guestSettings = createGuestSettings({
   setStatus,
 });
 
+const roomSettings = createRoomSettings({
+  isConnected: () => connected,
+  send,
+  setStatus,
+  openGuestSettings: (g) => guestSettings.open(g),
+  openRawRoomToml: () => settings.openEditRoomToml(),
+});
+
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。
 
@@ -1058,7 +1068,11 @@ const upload = createUpload({
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
 const editGuestModal = document.getElementById("edit-guest-modal");
-const ALL_MODALS = [addGuestModal, addRoomModal, editUserModal, importPersonaModal, editRoomTomlModal, editGuestModal];
+const editRoomModal = document.getElementById("edit-room-modal");
+const ALL_MODALS = [
+  addGuestModal, addRoomModal, editUserModal, importPersonaModal,
+  editRoomTomlModal, editGuestModal, editRoomModal,
+];
 for (const modal of ALL_MODALS) {
   modal.addEventListener("click", (ev) => {
     if (ev.target === modal) closeModal(modal);
@@ -1100,7 +1114,8 @@ function showRoomActionsPopover(anchor) {
   if (!connected) return;
   const roomName = roomNameEl.textContent || "本房间";
   showActionPopover(anchor, `房间「${roomName}」`, [
-    { label: "更改房间配置", desc: "直接编辑 room.toml（topic / rules / guests）", onClick: settings.openEditRoomToml },
+    { label: "详细设置", desc: "编排参数 / 打分 / 摘要模型 / 茶客一览", onClick: () => roomSettings.open() },
+    { label: "更改房间配置", desc: "直接编辑 room.toml（name / topic / rules / [[guest]]）", onClick: settings.openEditRoomToml },
     { label: "导出 markdown", desc: "把本房间历史保存为 .md 文件", onClick: exportCurrentRoom },
     { label: "清空聊天", desc: "重置 transcript / 摘要 / 游标，茶客在场", danger: true, onClick: clearCurrentRoom },
   ]);

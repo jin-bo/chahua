@@ -886,6 +886,36 @@ body.disconnected .dblclick-anchor:hover { background: transparent; }
   font-size: 12px;
 }
 .modal-secondary:hover { background: #ece5d2; }
+/* 房间详细设置 modal：编排参数 4 字段两列网格。 */
+.modal-orch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+.modal-orch-grid .modal-field { margin-bottom: 0; }
+.modal-orch-grid input[type="number"] {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.modal-orch-grid input[type="number"]:focus { outline: none; border-color: #888; }
+/* 当前茶客列表 [名字][meta][设置]，flex 行内对齐。 */
+.modal-room-guests { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.modal-room-guest-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid #f1ecdf;
+}
+.modal-room-guest-row:last-child { border-bottom: none; }
+.modal-room-guest-name { flex: 0 0 auto; min-width: 60px; color: #444; }
+.modal-room-guest-meta { flex: 1; color: #888; font-size: 12px; }
+/* footer spacer 把"打开 raw room.toml"推到左边、取消/保存留右边。 */
+.modal-footer-spacer { flex: 1; }
 /* popover 末尾"详细设置…"入口 —— 视觉上和上面权限选项分开。 */
 .popover-details-entry {
   display: block;

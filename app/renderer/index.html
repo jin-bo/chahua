@@ -137,6 +137,110 @@
       </div>
     </div>
 
+    <!-- 房间详细设置 modal（P4.6）：编排参数 / scoring / summary 一站编辑。
+         name / topic / rules / user_md 改动走"打开 raw room.toml"（已有 modal）—— 表单
+         只暴露 P4 新接的字段，避免在 JS 里手搓 TOML 合成。 -->
+    <div id="edit-room-modal" class="modal-backdrop" hidden>
+      <div class="modal modal-wide">
+        <div class="modal-header">
+          <span id="edit-room-title">房间设置</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-hint" id="edit-room-meta-hint"></div>
+
+          <fieldset class="modal-fieldset">
+            <legend>编排参数</legend>
+            <div class="modal-hint">影响"由谁发言、连续几轮、什么时候等用户"。留空恢复默认。</div>
+            <div class="modal-orch-grid">
+              <label class="modal-field">
+                <span>意愿阈值 want_threshold（0~1，默认 0.45）</span>
+                <input id="edit-room-orch-want-threshold" type="number" step="0.05" min="0" max="1" placeholder="0.45">
+              </label>
+              <label class="modal-field">
+                <span>连续 AI 轮上限 max_consecutive_ai_turns（≥1，默认 4）</span>
+                <input id="edit-room-orch-max-turns" type="number" min="1" step="1" placeholder="4">
+              </label>
+              <label class="modal-field">
+                <span>冷却轮数 speaker_cooldown_turns（≥0，默认 1）</span>
+                <input id="edit-room-orch-cooldown" type="number" min="0" step="1" placeholder="1">
+              </label>
+              <label class="modal-field">
+                <span>onboarding 阈值 onboarding_threshold（≥1，默认 20）</span>
+                <input id="edit-room-orch-onboarding" type="number" min="1" step="1" placeholder="20">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>打分模型 [scoring]</legend>
+            <label class="modal-radio">
+              <input type="radio" name="edit-room-scoring-mode" value="default">
+              <span id="edit-room-scoring-default-label">跟房间默认走</span>
+            </label>
+            <label class="modal-radio">
+              <input type="radio" name="edit-room-scoring-mode" value="custom">
+              <span>单独指定（model 必填）</span>
+            </label>
+            <div class="modal-llm-fields" id="edit-room-scoring-fields" hidden>
+              <label class="modal-field">
+                <span>model</span>
+                <input id="edit-room-scoring-model" type="text" placeholder="openai/gpt-5.4-mini">
+              </label>
+              <label class="modal-field">
+                <span>base_url（可选）</span>
+                <input id="edit-room-scoring-base-url" type="text">
+              </label>
+              <label class="modal-field">
+                <span>api_key 环境变量名（可选）</span>
+                <input id="edit-room-scoring-api-key-env" type="text">
+              </label>
+              <div class="modal-hint" id="edit-room-scoring-key-status"></div>
+            </div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>摘要模型 [summary]</legend>
+            <label class="modal-radio">
+              <input type="radio" name="edit-room-summary-mode" value="default">
+              <span id="edit-room-summary-default-label">复用打分模型</span>
+            </label>
+            <label class="modal-radio">
+              <input type="radio" name="edit-room-summary-mode" value="custom">
+              <span>单独指定（model 必填）</span>
+            </label>
+            <div class="modal-llm-fields" id="edit-room-summary-fields" hidden>
+              <label class="modal-field">
+                <span>model</span>
+                <input id="edit-room-summary-model" type="text" placeholder="openai/gpt-5.4-mini">
+              </label>
+              <label class="modal-field">
+                <span>base_url（可选）</span>
+                <input id="edit-room-summary-base-url" type="text">
+              </label>
+              <label class="modal-field">
+                <span>api_key 环境变量名（可选）</span>
+                <input id="edit-room-summary-api-key-env" type="text">
+              </label>
+              <div class="modal-hint" id="edit-room-summary-key-status"></div>
+            </div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>当前茶客</legend>
+            <ul class="modal-room-guests" id="edit-room-guests-list"></ul>
+            <div class="modal-hint">添加 / 移除走 sidebar；这里只是快捷打开「设置茶客」。</div>
+          </fieldset>
+        </div>
+        <div class="modal-footer">
+          <button id="edit-room-open-raw" type="button" class="modal-secondary">打开 raw room.toml</button>
+          <span class="modal-footer-spacer"></span>
+          <button type="button" class="modal-secondary" data-close>取消</button>
+          <button id="edit-room-submit" type="button" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 茶客详细设置 modal（P4.5）：popover 上"详细设置…"打开。
          模型 / 权限 / 隔离 / persona+房间级 MCP / skills 一站编辑；表单 diff 提交，单字段
          非法只回滚那一项，其它不动。室外快捷的「切 permission / 勾 MCP 信任」仍留在

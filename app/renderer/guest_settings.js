@@ -6,22 +6,13 @@
 // 不发 update_room_toml 整张表。单字段非法只回滚那一项 —— UI 状态更精确（设计 §5.3）。
 
 import { Inbound, DEFAULT_PERMISSION, PERMISSION_OPTIONS } from "./events.js";
+import { $, setRadio, getRadio, createLlmSection } from "./llm_section_form.js";
 
-function $(id) { return document.getElementById(id); }
-
-function setRadio(name, value) {
-  const inputs = document.querySelectorAll(`input[name="${name}"]`);
-  for (const inp of inputs) inp.checked = inp.value === value;
-}
-
-function getRadio(name) {
-  const checked = document.querySelector(`input[name="${name}"]:checked`);
-  return checked ? checked.value : null;
-}
-
-function refreshLlmFieldsVisibility() {
-  $("edit-guest-llm-fields").hidden = getRadio("edit-guest-llm-mode") !== "custom";
-}
+const llmSection = createLlmSection({
+  idPrefix: "edit-guest-llm",
+  customSourceTag: "guest",
+  label: "[[guest]]",
+});
 
 function renderPermissionRow() {
   const row = $("edit-guest-permission-row");
@@ -135,20 +126,10 @@ function fillForm(g, roomDefaultModel) {
   $("edit-guest-persona-hint").textContent = `人格：${g.persona_rel || ""}`;
   $("edit-guest-workspace-hint").textContent = `工作目录：${g.workspace_path || ""}`;
 
-  const llm = g.llm || {};
-  const source = llm.source || "room_default";
-  $("edit-guest-llm-default-label").textContent =
-    roomDefaultModel ? `继承房间默认（${roomDefaultModel}）` : "继承房间默认";
-  setRadio("edit-guest-llm-mode", source === "guest" ? "custom" : "default");
-  // 房间默认时 model 字段留空 —— 切到 custom 时让用户从空白起编辑，避免"已经显示 X /
-  // 我没改也是 X？"的歧义。
-  $("edit-guest-llm-model").value = source === "guest" ? (llm.model || "") : "";
-  $("edit-guest-llm-base-url").value = source === "guest" ? (llm.base_url || "") : "";
-  $("edit-guest-llm-api-key-env").value = source === "guest" ? (llm.api_key_env || "") : "";
-  refreshLlmFieldsVisibility();
-  const ready = !!llm.api_key_ready;
-  $("edit-guest-llm-key-status").textContent =
-    `${llm.api_key_env || "<PROVIDER>_API_KEY"}：${ready ? "✓ 已配置" : "✗ 未配置（缺环境变量）"}`;
+  llmSection.fill(
+    g.llm,
+    roomDefaultModel ? `继承房间默认（${roomDefaultModel}）` : "继承房间默认",
+  );
 
   setRadio("edit-guest-permission", g.permission || DEFAULT_PERMISSION);
   setRadio("edit-guest-isolation", g.isolation || "room");
@@ -170,29 +151,10 @@ function fillForm(g, roomDefaultModel) {
 // 不该把整张表回滚。
 function diffPayloads(g) {
   const out = [];
-  const llmMode = getRadio("edit-guest-llm-mode");
-  const wasCustom = g.llm?.source === "guest";
-  let newSpec = null;
-  if (llmMode === "custom") {
-    const model = $("edit-guest-llm-model").value.trim();
-    if (!model) return { error: "model 必填（形如 openai/gpt-5.4）" };
-    newSpec = { model };
-    const baseUrl = $("edit-guest-llm-base-url").value.trim();
-    if (baseUrl) newSpec.base_url = baseUrl;
-    const apiKeyEnv = $("edit-guest-llm-api-key-env").value.trim();
-    if (apiKeyEnv) newSpec.api_key_env = apiKeyEnv;
-  }
-  // wasCustom 当 sentinel：source=guest 才有 user-explicit api_key_env 概念，default
-  // 时 envelope 里那个字段是 server 端按 <PROVIDER>_API_KEY 推断回填的，不能算"用户写过"。
-  const oldSpec = wasCustom
-    ? {
-        model: g.llm.model,
-        ...(g.llm.base_url ? { base_url: g.llm.base_url } : {}),
-        ...(g.llm.api_key_env ? { api_key_env: g.llm.api_key_env } : {}),
-      }
-    : null;
-  if (JSON.stringify(oldSpec) !== JSON.stringify(newSpec)) {
-    out.push({ type: Inbound.UPDATE_GUEST_LLM, name: g.name, spec: newSpec });
+  const llm = llmSection.read();
+  if (llm.error) return { error: llm.error };
+  if (llmSection.changed(llm.spec, g.llm)) {
+    out.push({ type: Inbound.UPDATE_GUEST_LLM, name: g.name, spec: llm.spec });
   }
 
   const newPerm = getRadio("edit-guest-permission");
@@ -219,9 +181,7 @@ export function createGuestSettings({ isConnected, send, setStatus }) {
   let roomDefaultModel = null;
 
   renderPermissionRow();
-  for (const inp of document.querySelectorAll('input[name="edit-guest-llm-mode"]')) {
-    inp.addEventListener("change", refreshLlmFieldsVisibility);
-  }
+  llmSection.bindModeChange();
   $("edit-guest-room-mcp-add").addEventListener("click", () => {
     appendRoomMcpRow($("edit-guest-room-mcp-list"));
   });
