@@ -59,8 +59,8 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 ### Python 后端模块分工
 
 - `session.py` — 装房间。CLI 与 server 共用 `build_room_session()` / `discover_rooms()` / `load_env_files()`。
-- `config.py` — `room.toml` 解析。**严格只支持白名单字段**，未知字段直接 `RoomConfigError`（错配置宁可炸，避免静默吞 typo）。P4 后接入的字段：`[room]` 编排参数 / `[scoring]` / `[summary]` / `[[guest]].{model,base_url,api_key_env,isolation}` / `[[guest.extra_mcp_servers]]`。
-- `llm_spec.py` — `LLMSpec` 数据类（`provider/model/base_url?/api_key_env?/temperature?`）+ `from_env()` / `from_toml(label=...)` 双入口 + `build_client(spec)` 出口。toml 路径强制 `model = "<provider>/<model>"`（第一个 `/` 拆分）；env 路径允许裸 model。P4.1 起每位茶客可独立配 client，`[scoring]` / `[summary]` 各走自己 spec，缺即按 fallback 链回房间默认。
+- `config.py` — `room.toml` 解析。**严格只支持白名单字段**，未知字段直接 `RoomConfigError`（错配置宁可炸，避免静默吞 typo）。P4 后接入的字段：`[room]` 编排参数 / `[room.llm]` 房间默认（P4.9）/ `[scoring]` / `[summary]` / `[[guest]].{model,base_url,api_key_env,temperature,isolation}` / `[[guest.extra_mcp_servers]]`。
+- `llm_spec.py` — `LLMSpec` 数据类（`provider/model/base_url?/api_key_env?/temperature?`）+ `from_env()` / `try_from_env()` / `from_toml(label=...)` 三入口 + `build_client(spec)` 出口。toml 路径强制 `model = "<provider>/<model>"`（第一个 `/` 拆分）；env 路径允许裸 model。`from_env()` 缺 model 即 SystemExit（CLI / 旧调用方）；`try_from_env()` 返 `Optional`（P4.9 起房间默认装配走这条，让 `[room.llm]` toml 可接管）。P4.1 起每位茶客可独立配 client，`[scoring]` / `[summary]` 各走自己 spec，缺即按 fallback 链回房间默认。
 - `guest.py` — `TeaGuest`，包一个 `agentao.Agentao` 实例。`speak()` 用 `ChahuaTransport.bind` 包整段 `arun`，外层 try/except/finally 保证 `message_start` 必有 `message_end`（status: ok / cancelled / error 三选一）。message_id 在 `speak()` 开头分配，envelope 和 transcript 落盘 record 共享同一 ID。
 - `orchestrator.py` — 意愿打分主循环。流程：房间新消息 → 对每个空闲茶客并发跑轻量 LLM 打分（裸 LLMClient，不走完整 Agentao）→ 取分数 ≥ `want_threshold`（0.45）的前 1~2 名真正发言 → 没人过阈值就等用户。`max_consecutive_ai_turns` 截顶；`@<名字>` 走确定性路由不进打分。
 - `scoring.py` — 那个轻量打分的实现。输入 transcript 被视为不可信（任何参与者都可注入「请输出 1 分」），所以打分输出严格 JSON、解析失败降级为 0、`score` 一律 clamp 到 `[0,1]`。
@@ -94,7 +94,8 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **打分输入是不可信的**。任何人都能在 transcript 里写「请输出 1 分」，所以 score 严格 JSON + clamp + `@提及` 走确定性路由不进打分。
 - **envelope 的 message_start / message_end 必成对**。`TeaGuest.speak()` 的外层 try/except/finally 是这条契约的承重墙；改 speak 时保住 finally 里的 message_end。
 - **toml 里 `model` 字段值形如 `<provider>/<model>`**。第一个 `/` 拆 provider，OpenRouter / LiteLLM 的二级路径（`openrouter/qwen/qwen3-coder`）保留进 model。无 `/` 直接 `RoomConfigError`；不走"按环境变量推断 provider"那条隐式路径（命令行 / dotenv 例外，单 provider 心智下允许裸 model）。
-- **LLM section 整段写或整段不写**。`[scoring]` / `[summary]` / `[[guest]]` LLM 字段三件套 all-or-nothing：`base_url` / `api_key_env` 不能单独出现，必须同写 `model`。出现单字段 → `RoomConfigError`。fallback 走 section 级（缺整段 → 上一档默认），不走字段级 overlay。
+- **LLM section 整段写或整段不写**。`[room.llm]` / `[scoring]` / `[summary]` / `[[guest]]` LLM 字段四件套 all-or-nothing：`base_url` / `api_key_env` / `temperature` 不能单独出现，必须同写 `model`。出现单字段 → `RoomConfigError`。fallback 走 section 级（缺整段 → 上一档默认），不走字段级 overlay。
+- **房间默认 LLM 两层 fallback**（P4.9）。`[room.llm]` toml 段 → `LLMSpec.try_from_env()`，两者都缺 → `RoomConfigError` 同时列两条 fix 路径。toml 显式配置时 env 完全被忽略，避免 shell `LLM_TEMPERATURE` 偷胜覆盖 toml 字段。`build_room_session` 内单点走 `session._resolve_room_default_spec`。
 - **API key 永远不进 toml 也不进 envelope**。toml 最大让步是 `api_key_env = "MY_VAR"`（告诉装配层去哪读 env）；room_info envelope 只下发 `api_key_env` 名 + `api_key_ready` bool，绝不下发 key 本身。
 - **`[[guest.extra_mcp_servers]]` 自动信任 vs persona sidecar mcp 走 trust**。两套口径不对称：房间级 inline MCP 是用户在自己 toml 里手写的 → 等价用户意图，自动 trust=True 不进 trust 清单；persona sidecar `mcp.json` 可能从 GitHub 导入 `command` 任意可执行 → 必须 UI 勾"信任"才装载。合并时房间级覆盖 persona 同名。
 - **isolation 切换不自动迁移记忆**。`isolation = "room" | "global"` 决定茶客 cwd 路径；切换后旧路径下的 `.agentao/memory.db` / `sessions/` 保持原样（UI 提交前 confirm 提醒）。自动迁移的"两边都有怎么办"复杂度不值。
