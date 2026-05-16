@@ -42,7 +42,7 @@ from . import admin, exporter, persona_import, trust
 from ._paths import Paths, resolve_under
 from ._persist import write_bytes_atomic
 from .admin import sanitize_fs_name
-from .config import RoomConfigError
+from .config import ORCH_FIELD_BOUNDS, RoomConfigError
 from .events import (
     ChahuaEnvelope,
     ChahuaEventType,
@@ -50,6 +50,7 @@ from .events import (
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
+from .orchestrator import OrchestratorConfig
 from .permissions import DEFAULT_MODE
 from .persona_assets import discover_assets, persona_relative
 from .session import (
@@ -88,6 +89,7 @@ INBOUND_DELETE_ROOM = "delete_room"
 INBOUND_UPDATE_USER_MD = "update_user_md"
 INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
 INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
+INBOUND_UPDATE_ROOM_ORCHESTRATOR = "update_room_orchestrator"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
@@ -106,6 +108,17 @@ def _read_room_toml(room_dir: Path) -> str:
     except OSError:
         _log.exception("read_room_toml: %s 读盘失败", toml_path)
         return ""
+
+
+def _orchestrator_effective_dict(config: OrchestratorConfig) -> dict[str, object]:
+    """从当前 :class:`OrchestratorConfig` 实例摘出公开给前端的编排字段。
+
+    键集派生自 :data:`chahua.config.ORCH_FIELD_BOUNDS` —— 与 config 解析认得的字段
+    一一对应。其余 ``OrchestratorConfig`` 字段（``threshold_decay_per_turn`` /
+    ``onboarding_recent_messages`` / ``summary_block_size`` 等）是内部调参，不进 toml
+    schema 也不下发 —— 减少 envelope 噪音，避免用户以为它们也可改。
+    """
+    return {k: getattr(config, k) for k in ORCH_FIELD_BOUNDS}
 
 
 def _attach_files_to_text(text: str, files: object) -> str:
@@ -391,6 +404,13 @@ class ChahuaServer:
                     # 读盘失败（理论上不会，session 已经成功 load 过一次）兜底空串。
                     "room_toml_content": _read_room_toml(rc.room_dir),
                     "room_toml_source": str(rc.room_dir / "room.toml"),
+                    # 编排参数：effective = 当前 Orchestrator 实际跑的值（默认 + 用户 override 合并后），
+                    # overrides_keys = room.toml [room] 段里用户实际写过的键。前端按 keys 算出
+                    # "哪些是默认 / 哪些是用户改过的"，无需自己重算默认值。
+                    "orchestrator": _orchestrator_effective_dict(
+                        self._session.orchestrator.config
+                    ),
+                    "orchestrator_overrides_keys": sorted(rc.orchestrator_overrides),
                     "current_room_id": rc.room_dir.name,
                     "rooms_available": discover_rooms(self._paths),
                     # 已在场茶客的 name 也在 personas_available 里 —— 前端按
@@ -567,6 +587,31 @@ class ChahuaServer:
         if not self._replace_session(room_dir, sink, label="update_guest_permission"):
             return
         _log.info("update_guest_permission: %r → %r", name, permission)
+        self._emit_room_snapshot(sink)
+
+    def _update_room_orchestrator(
+        self, *, overrides: dict, sink: EnvelopeSink
+    ) -> None:
+        """整体覆盖 ``[room]`` 段的编排参数键集 + 热替 ``orchestrator.config`` + 重发 snapshot。
+
+        走 :meth:`RoomSession.swap_room_config` 一次 attribute swap —— 编排参数是纯数值
+        声明（``OrchestratorConfig`` 的字段在 Orchestrator 热循环里都靠 ``self.config.X``
+        live 读），无需 cancel in-flight turn / 重建茶客 / 重新 onboarding。校验失败回
+        ``admin.update_room_orchestrator`` 那条路径，磁盘旧 bytes 已回滚，session 不动。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            new_rc = admin.update_room_orchestrator(
+                paths=self._paths, room_dir=room_dir, overrides=overrides
+            )
+        except Exception:
+            _log.exception(
+                "update_room_orchestrator: overrides=%r 失败", overrides
+            )
+            self._emit_room_snapshot(sink)
+            return
+        self._session.swap_room_config(new_rc)
+        _log.info("update_room_orchestrator: %r", overrides)
         self._emit_room_snapshot(sink)
 
     def _remove_guest(self, *, name: str, sink: EnvelopeSink) -> None:
@@ -1009,6 +1054,20 @@ class ChahuaServer:
         await self._cancel_and_drain_inflight()
         self._update_guest_permission(name=name, permission=permission, sink=sink)
 
+    async def _inbound_update_room_orchestrator(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        overrides = data.get("overrides")
+        if not isinstance(overrides, dict):
+            _log.warning(
+                "ignoring %s: overrides 必须是对象，收到 %r",
+                INBOUND_UPDATE_ROOM_ORCHESTRATOR, type(overrides),
+            )
+            return
+        # 不 cancel inflight —— 编排参数走 swap_room_config 热替 self.config，下一轮
+        # 迭代当场生效，无需打断当前发言 / 评分。
+        self._update_room_orchestrator(overrides=overrides, sink=sink)
+
     async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
         room_id = _require_str(data, "room_id", where=INBOUND_CREATE_ROOM)
         if room_id is None:
@@ -1161,6 +1220,7 @@ _INBOUND_HANDLERS: dict[str, _InboundHandler] = {
     INBOUND_DELETE_ROOM: ChahuaServer._inbound_delete_room,
     INBOUND_UPDATE_USER_MD: ChahuaServer._inbound_update_user_md,
     INBOUND_UPDATE_ROOM_TOML: ChahuaServer._inbound_update_room_toml,
+    INBOUND_UPDATE_ROOM_ORCHESTRATOR: ChahuaServer._inbound_update_room_orchestrator,
     INBOUND_UPDATE_USER_AVATAR: ChahuaServer._inbound_update_user_avatar,
     INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
     INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,

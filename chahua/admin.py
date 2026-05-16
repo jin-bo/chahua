@@ -27,7 +27,14 @@ from typing import Any, Optional, Sequence, TypedDict
 
 from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
-from .config import RoomConfig, RoomConfigError, load_room_config, read_avatar_data_uri
+from .config import (
+    ORCH_FIELD_BOUNDS,
+    _build_orchestrator_overrides,
+    RoomConfig,
+    RoomConfigError,
+    load_room_config,
+    read_avatar_data_uri,
+)
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 from .persona_assets import persona_relative, search_roots
 
@@ -69,7 +76,6 @@ _ALLOWED_GUEST_EMIT: frozenset[str] = frozenset({"name", "persona", "permission"
 # 与 _render_room_toml 一一对应：每个 (label, 取 snapshot 值的 key, owner) 三元组在
 # emit 时若非空就 raise NotImplementedError，等对应 P4.x PR 把 emit 一起加上。
 _DEFERRED_TOP_EMIT: tuple[tuple[str, str, str], ...] = (
-    ("orchestrator_overrides", "orchestrator_overrides", "P4.0"),
     ("[scoring]", "scoring", "P4.1"),
     ("[summary]", "summary", "P4.1"),
 )
@@ -239,14 +245,25 @@ def _toml_basic_string(s: str) -> str:
     return '"' + "".join(out) + '"'
 
 
+def _format_toml_scalar(value: Any) -> str:
+    """TOML 数值字面量。float 走 ``repr`` 保留精度；bool 显式拒避免被当 int 写出 1/0。"""
+    if isinstance(value, bool):
+        raise NotImplementedError("bool 字面量当前 schema 不用，请加在需要时再实现")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    raise TypeError(f"_format_toml_scalar 不支持类型 {type(value).__name__}")
+
+
 def _render_room_toml(snapshot: TomlSnapshot) -> str:
     """``TomlSnapshot`` → ``room.toml`` 文本。纯函数（无 IO）。
 
-    当前 emit 范围：``[room].{name, topic, rules, user_md}`` + ``[[guest]].{name,
-    persona, permission}``。其它字段（编排参数 / [scoring] / [summary] / guest
-    isolation/llm/extra_mcp_servers）只有字段位，emit 留给 P4.0+ 在加 schema 解析的同 PR
-    一并实现 —— 现在若 snapshot 携带这些非空字段就 :class:`NotImplementedError` 防御，
-    避免出现 "snapshot 接受 / 写盘但 load_room_config 拒" 的中间态写坏 toml。
+    当前 emit 范围：``[room].{name, topic, rules, user_md, 编排参数}`` + ``[[guest]].{name,
+    persona, permission}``。其它字段（[scoring] / [summary] / guest isolation/llm/
+    extra_mcp_servers）只有字段位，emit 留给 P4.1+ 在加 schema 解析的同 PR 一并实现 ——
+    现在若 snapshot 携带这些非空字段就 :class:`NotImplementedError` 防御，避免出现
+    "snapshot 接受 / 写盘但 load_room_config 拒" 的中间态写坏 toml。
     """
     for label, key, owner in _DEFERRED_TOP_EMIT:
         if snapshot.get(key):
@@ -261,6 +278,14 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
     user_md = snapshot.get("user_md")
     if user_md:
         lines.append(f"user_md = {_toml_basic_string(user_md)}")
+
+    # 编排参数走 [room] 段，按 ORCH_FIELD_BOUNDS 顺序写出（设计文档 §3 示例的顺序，
+    # 用户读 toml 时编排参数总是连成一块好认）。snapshot 只携带用户实际设过的键 ——
+    # 没设的不写，保留 OrchestratorConfig() 默认。
+    orch = snapshot.get("orchestrator_overrides") or {}
+    for key in ORCH_FIELD_BOUNDS:
+        if key in orch:
+            lines.append(f"{key} = {_format_toml_scalar(orch[key])}")
 
     for g in snapshot["guests"]:
         gname = str(g["name"])
@@ -321,7 +346,7 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
         "topic": rc.topic,
         "rules": rc.rules,
         "user_md": rc.user_md_override,
-        "orchestrator_overrides": {},
+        "orchestrator_overrides": dict(rc.orchestrator_overrides),
         "scoring": None,
         "summary": None,
         "guests": [
@@ -482,6 +507,32 @@ def update_guest_permission(
     if not found:
         raise ValueError(f"茶客 {name!r} 不在房间里")
     snapshot["guests"] = new_guests
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def update_room_orchestrator(
+    *, paths: Paths, room_dir: Path, overrides: dict[str, Any]
+) -> RoomConfig:
+    """整体覆盖 ``[room]`` 段的编排参数键集，返回新的 ``RoomConfig``。
+
+    语义是**整体覆盖**而非"merge 进现有 overrides"：传入空 dict 即清掉 ``[room]`` 下
+    所有编排键（让 OrchestratorConfig 默认接管）。这避免"前端只想撤回 X 但忘传 Y =
+    Y 被静默保留"的 surprise。
+
+    校验**写盘前**：未知键 + 越界 / 类型错都在这里报 :class:`RoomConfigError` —— 不依赖
+    "写到 toml 再 load 时被拒 → 回滚旧 bytes"那条路径，因为 bad type（如 bool）会先撞
+    到 :func:`_format_toml_scalar` 的 ``NotImplementedError`` 让错路径绕过回滚 except 分支。
+    """
+    unknown = set(overrides) - set(ORCH_FIELD_BOUNDS)
+    if unknown:
+        raise RoomConfigError(
+            f"update_room_orchestrator: 未知编排键 {sorted(unknown)}；"
+            f"允许：{sorted(ORCH_FIELD_BOUNDS)}"
+        )
+    toml_path = room_dir / "room.toml"
+    validated = _build_orchestrator_overrides(overrides, toml_path=toml_path)
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    snapshot["orchestrator_overrides"] = validated
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
 

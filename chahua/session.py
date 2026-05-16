@@ -13,7 +13,7 @@ import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from agentao.llm import LLMClient
 from dotenv import load_dotenv
@@ -184,6 +184,37 @@ class RoomSession:
         # _display_map 缓存了 USER_SPEAKER_ID → display_name；改名要清缓存才生效。
         self.orchestrator._display_for = None
 
+    def swap_room_config(self, new_rc: RoomConfig) -> None:
+        """热替换 ``room_config`` + 同步 ``orchestrator.config`` —— 编排参数 mutator 用，
+        避免推倒整个 session 重建。
+
+        ``OrchestratorConfig`` 的每个字段都被 :class:`chahua.orchestrator.Orchestrator`
+        在热循环里通过 ``self.config.X`` 读取，所以一次 attribute swap 就让阈值 / 上限
+        / 冷却下次迭代当场生效，无需 cancel in-flight turn / 重建茶客 / 重新 onboarding。
+        ``frozen=True`` 走 ``object.__setattr__`` bypass，与 :meth:`reload_user_config`
+        同口径 —— 纯数据替换不破坏 in-flight 状态。
+
+        **只适合编排参数 / 用户配置之类的"声明性"字段更新**；茶客增减 / persona 切换 /
+        permission 改这些需要重建 ``TeaGuest`` 的，仍走 ``server._replace_session``。
+        """
+        object.__setattr__(self, "room_config", new_rc)
+        self.orchestrator.config = _make_orchestrator_config(new_rc.orchestrator_overrides)
+
+
+def _make_orchestrator_config(
+    overrides: dict[str, Any], *, explicit: Optional[OrchestratorConfig] = None,
+) -> OrchestratorConfig:
+    """显式 SDK 入参优先；其次 patch room.toml [room] 编排字段到默认上；都没有走默认。
+
+    `build_room_session` 与 `RoomSession.swap_room_config` 共用 —— 单点保证装配期 vs
+    热更新期 走同一 OrchestratorConfig 派生口径。
+    """
+    if explicit is not None:
+        return explicit
+    if overrides:
+        return dataclasses.replace(OrchestratorConfig(), **overrides)
+    return OrchestratorConfig()
+
 
 def discover_rooms(paths: Paths) -> list[dict]:
     """扫 ``user_data_root/rooms/*/room.toml``，返回 ``[{room_id, name, topic}, ...]``，
@@ -259,13 +290,17 @@ def build_room_session(
     guest_entries = _build_guests(room_config, llm_client, room, paths)
     guests = [g for g, _ in guest_entries]
 
+    effective_orch_config = _make_orchestrator_config(
+        room_config.orchestrator_overrides, explicit=orchestrator_config
+    )
+
     orchestrator = Orchestrator(
         room=room,
         user_config=user_config,
         scorer=IntentScorer(llm_client),
         summarizer=Summarizer(llm_client, summary_path=summary_path),
         cursor=GuestCursor(cursor_path=cursor_path),
-        config=orchestrator_config or OrchestratorConfig(),
+        config=effective_orch_config,
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)

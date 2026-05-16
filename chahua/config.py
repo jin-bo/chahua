@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import base64
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -46,28 +46,31 @@ def read_avatar_data_uri(persona_path: Path) -> Optional[str]:
         return None
     return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
 
-# [room] 段允许的键。P1.5 故意保持小。
-_ALLOWED_ROOM_KEYS: frozenset[str] = frozenset(
-    {"name", "topic", "rules", "user_md"}
+# 编排参数的范围校验。值越界一律 RoomConfigError —— 用户配错宁可炸。
+# 元组 (type, min_inclusive, max_inclusive_or_None)。bool 也是 int 子类故先剔除。
+# 公开（无下划线）—— admin.py / server.py 都从这里取键名 / 顺序，单点声明避免漂移。
+ORCH_FIELD_BOUNDS: dict[str, tuple[type, float, Optional[float]]] = {
+    "want_threshold": (float, 0.0, 1.0),
+    "max_consecutive_ai_turns": (int, 1, None),
+    "speaker_cooldown_turns": (int, 0, None),
+    "onboarding_threshold": (int, 1, None),
+}
+
+# [room] 段允许的键 = 固定四件套 + 编排参数（派生自 ORCH_FIELD_BOUNDS）。
+_ALLOWED_ROOM_KEYS: frozenset[str] = (
+    frozenset({"name", "topic", "rules", "user_md"})
+    | frozenset(ORCH_FIELD_BOUNDS)
 )
 # [[guest]] 段允许的键。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
     {"name", "persona", "permission"}
 )
-# 显式后压到 P4 的字段 —— 用户写了的话报错时点出来。
+# 显式后压到 P4.x 的字段 —— 用户写了的话报错时点出来。
 _DEFERRED_GUEST_KEYS: frozenset[str] = frozenset(
     {"provider", "base_url", "model", "isolation", "extra_mcp_servers", "transport"}
 )
-_DEFERRED_ROOM_KEYS: frozenset[str] = frozenset(
-    {
-        "max_consecutive_ai_turns",
-        "want_threshold",
-        "speaker_cooldown_turns",
-        "onboarding_threshold",
-    }
-)
 # 顶层白名单。[scoring] / [summary] 不在这里，走 _DEFERRED_TOPLEVEL_SECTIONS 单独
-# 报"P4 的事"，比"未知键"更有信息量。
+# 报"P4.1 的事"，比"未知键"更有信息量。
 _ALLOWED_TOPLEVEL_KEYS: frozenset[str] = frozenset({"room", "guest"})
 _DEFERRED_TOPLEVEL_SECTIONS: frozenset[str] = frozenset({"scoring", "summary"})
 
@@ -122,6 +125,12 @@ class RoomConfig:
     已在加载期校验存在 —— 如果用户在 toml 里显式给了 ``user_md``，那个路径必须真存在
     （typo 不会静默回退到默认 USER.md）。"""
 
+    orchestrator_overrides: dict[str, Any] = field(default_factory=dict)
+    """``[room]`` 段里出现的编排参数（``want_threshold`` / ``max_consecutive_ai_turns`` /
+    ``speaker_cooldown_turns`` / ``onboarding_threshold``）。**只装载用户实际写了的键** ——
+    没写 = 不在 dict 里；session 装配时 patch 到 :class:`OrchestratorConfig()` 默认上。
+    这样回写 toml 时也只回写用户填的那几个，不会把"默认值"硬塞进文件。"""
+
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
@@ -168,7 +177,7 @@ def _build(
         section="[room]",
         keys=room_raw,
         allowed=_ALLOWED_ROOM_KEYS,
-        deferred=_DEFERRED_ROOM_KEYS,
+        deferred=frozenset(),
         toml_path=toml_path,
     )
 
@@ -185,6 +194,10 @@ def _build(
         toml_path=toml_path,
     )
 
+    orchestrator_overrides = _build_orchestrator_overrides(
+        room_raw, toml_path=toml_path
+    )
+
     guests = _build_guests(
         data.get("guest", []), paths=paths, toml_path=toml_path
     )
@@ -196,7 +209,48 @@ def _build(
         rules=rules,
         guests=guests,
         user_md_override=user_md_override,
+        orchestrator_overrides=orchestrator_overrides,
     )
+
+
+def _build_orchestrator_overrides(
+    room_raw: dict[str, Any], *, toml_path: Path
+) -> dict[str, Any]:
+    """从 ``[room]`` raw 取出编排参数；不写的键不进 dict（保留 OrchestratorConfig 默认）。
+
+    类型与范围校验按 :data:`ORCH_FIELD_BOUNDS`：``int`` 字段拒绝 ``float``（避免 0.5
+    被静默取整成 0）；``float`` 字段允许 ``int`` 输入（TOML 1.0 没有 "0.45 vs 0" 歧义，
+    数值能向上 promote）。bool 是 int 子类，所有字段都先剔除 bool 避免 ``True`` 被当 1。
+    """
+    out: dict[str, Any] = {}
+    for key, (expected_type, lo, hi) in ORCH_FIELD_BOUNDS.items():
+        if key not in room_raw:
+            continue
+        raw = room_raw[key]
+        label = f"[room].{key}"
+        if isinstance(raw, bool):
+            raise RoomConfigError(
+                f"{toml_path}: {label} 必须是 {expected_type.__name__}，得到 bool"
+            )
+        if expected_type is float:
+            if not isinstance(raw, (int, float)):
+                raise RoomConfigError(
+                    f"{toml_path}: {label} 必须是数值，得到 {type(raw).__name__}"
+                )
+            value: Any = float(raw)
+        else:
+            if not isinstance(raw, int):
+                raise RoomConfigError(
+                    f"{toml_path}: {label} 必须是整数，得到 {type(raw).__name__}"
+                )
+            value = raw
+        if value < lo or (hi is not None and value > hi):
+            bound = f"[{lo}, {hi}]" if hi is not None else f">= {lo}"
+            raise RoomConfigError(
+                f"{toml_path}: {label}={raw!r} 越界，要求 {bound}"
+            )
+        out[key] = value
+    return out
 
 
 def _build_guests(

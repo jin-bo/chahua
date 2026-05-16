@@ -425,6 +425,117 @@ def test_update_user_avatar_clears_lru_cache(paths, tmp_path):
     assert second == first  # 内容真同，结果同；但已是 fresh 计算
 
 
+# ── [room] 编排参数 round-trip / mutator（P4.0）────────────────────────────
+
+
+def _seed_room_for_orch(paths):
+    return admin.create_room(
+        paths=paths, room_id="orch", name="orch",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+
+
+def test_orchestrator_overrides_round_trip(paths):
+    """用户在 toml 写编排参数 → load_room_config 解析进 RoomConfig.orchestrator_overrides
+    → mutator 写回去再 load 也保留。"""
+    rc = _seed_room_for_orch(paths)
+    rc2 = admin.update_room_orchestrator(
+        paths=paths, room_dir=rc.room_dir,
+        overrides={"want_threshold": 0.9, "max_consecutive_ai_turns": 8},
+    )
+    assert rc2.orchestrator_overrides == {
+        "want_threshold": 0.9, "max_consecutive_ai_turns": 8,
+    }
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.orchestrator_overrides == rc2.orchestrator_overrides
+
+
+def test_orchestrator_overrides_applied_via_dataclasses_replace(paths):
+    """RoomConfig.orchestrator_overrides ↔ OrchestratorConfig 字段类型对得上 ——
+    session.build_room_session 用 dataclasses.replace(OrchestratorConfig(), **overrides)
+    patch 时不会因类型不兼容炸。"""
+    import dataclasses
+    from chahua.orchestrator import OrchestratorConfig
+
+    rc = _seed_room_for_orch(paths)
+    rc2 = admin.update_room_orchestrator(
+        paths=paths, room_dir=rc.room_dir,
+        overrides={"want_threshold": 0.7, "speaker_cooldown_turns": 2},
+    )
+    cfg = dataclasses.replace(OrchestratorConfig(), **rc2.orchestrator_overrides)
+    assert cfg.want_threshold == 0.7
+    assert cfg.speaker_cooldown_turns == 2
+    # 没设的字段保留 OrchestratorConfig 默认。
+    assert cfg.max_consecutive_ai_turns == OrchestratorConfig().max_consecutive_ai_turns
+
+
+def test_orchestrator_overrides_empty_clears(paths):
+    """传 {} 即清掉所有 [room] 段下的编排键 —— 让 OrchestratorConfig 默认接管。"""
+    rc = _seed_room_for_orch(paths)
+    admin.update_room_orchestrator(
+        paths=paths, room_dir=rc.room_dir,
+        overrides={"want_threshold": 0.9, "max_consecutive_ai_turns": 8},
+    )
+    rc_after_clear = admin.update_room_orchestrator(
+        paths=paths, room_dir=rc.room_dir, overrides={},
+    )
+    assert rc_after_clear.orchestrator_overrides == {}
+    # toml 里也不应再含这些键。
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "want_threshold" not in text
+    assert "max_consecutive_ai_turns" not in text
+
+
+def test_orchestrator_overrides_replace_semantics(paths):
+    """update_room_orchestrator 是**整体覆盖**，不与现有 merge。"""
+    rc = _seed_room_for_orch(paths)
+    admin.update_room_orchestrator(
+        paths=paths, room_dir=rc.room_dir,
+        overrides={"want_threshold": 0.9},
+    )
+    rc2 = admin.update_room_orchestrator(
+        paths=paths, room_dir=rc.room_dir,
+        overrides={"max_consecutive_ai_turns": 8},
+    )
+    # want_threshold 被撤回，只有 max_consecutive_ai_turns 在册。
+    assert rc2.orchestrator_overrides == {"max_consecutive_ai_turns": 8}
+
+
+@pytest.mark.parametrize("overrides,match", [
+    ({"want_threshold": 1.5}, r"越界"),                            # 上限超
+    ({"want_threshold": -0.1}, r"越界"),                            # 下限超
+    ({"max_consecutive_ai_turns": 0}, r"越界"),                     # >= 1 违反
+    ({"speaker_cooldown_turns": -1}, r"越界"),                      # >= 0 违反
+    ({"onboarding_threshold": 0}, r"越界"),                         # >= 1 违反
+    ({"max_consecutive_ai_turns": 1.5}, r"必须是整数"),              # 类型错
+    ({"want_threshold": "0.5"}, r"必须是数值"),                      # 字符串
+    ({"want_threshold": True}, r"得到 bool"),                       # bool 不当数值
+])
+def test_orchestrator_overrides_bounds_enforced(paths, overrides, match):
+    rc = _seed_room_for_orch(paths)
+    original = (rc.room_dir / "room.toml").read_text("utf-8")
+    with pytest.raises(RoomConfigError, match=match):
+        admin.update_room_orchestrator(
+            paths=paths, room_dir=rc.room_dir, overrides=overrides,
+        )
+    # 越界 / 类型错 → 校验失败回滚到旧 bytes（与 update_room_toml 同口径）。
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == original
+
+
+def test_orchestrator_overrides_unknown_key_rejected(paths):
+    """未知键 → _check_unknown_keys 报错（避免静默吞 typo）。"""
+    rc = _seed_room_for_orch(paths)
+    # 通过 raw editor 路径塞未知键 —— update_room_orchestrator 自身不挡未知键
+    # （挡的是值范围），_check_unknown_keys 在 load 校验时挡。
+    bad_toml = (
+        '[room]\nname = "x"\n'
+        'nonexistent_orch_field = 0.5\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+    )
+    with pytest.raises(RoomConfigError):
+        admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
+
+
 def test_toml_writer_escapes_quotes_and_backslashes(paths):
     """name / topic / rules 含特殊字符也要能 round-trip 过 tomllib。"""
     rc = admin.create_room(

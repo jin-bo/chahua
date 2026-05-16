@@ -36,6 +36,7 @@ from chahua.server import (
     INBOUND_SET_PERSONA_MCP_TRUST,
     INBOUND_SWITCH_ROOM,
     INBOUND_UPDATE_GUEST_PERMISSION,
+    INBOUND_UPDATE_ROOM_ORCHESTRATOR,
     INBOUND_UPDATE_ROOM_TOML,
     INBOUND_UPDATE_USER_AVATAR,
     INBOUND_UPDATE_USER_MD,
@@ -128,6 +129,9 @@ class _SpyServer(ChahuaServer):
 
     def _update_room_toml(self, *, content, sink):  # type: ignore[override]
         self.calls.append(("_update_room_toml", {"content": content}))
+
+    def _update_room_orchestrator(self, *, overrides, sink):  # type: ignore[override]
+        self.calls.append(("_update_room_orchestrator", {"overrides": overrides}))
 
     def _update_user_avatar(self, *, data_uri, sink):  # type: ignore[override]
         self.calls.append(("_update_user_avatar", {"data_uri": data_uri}))
@@ -304,6 +308,45 @@ async def test_update_guest_permission_ok(srv: _SpyServer):
 async def test_update_guest_permission_bad_payload(srv: _SpyServer, payload):
     await srv._handle_inbound(payload, _sink)
     assert srv.calls == []
+
+
+# ── update_room_orchestrator（P4.0）────────────────────────────────────────
+
+
+async def test_update_room_orchestrator_ok(srv: _SpyServer):
+    """编排参数热替 ——`swap_room_config` 一次属性赋值生效，不需 cancel in-flight。"""
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_ROOM_ORCHESTRATOR,
+            "overrides": {"want_threshold": 0.7, "max_consecutive_ai_turns": 6},
+        },
+        _sink,
+    )
+    assert srv.cancel_drain_count == 0
+    assert srv.calls == [(
+        "_update_room_orchestrator",
+        {"overrides": {"want_threshold": 0.7, "max_consecutive_ai_turns": 6}},
+    )]
+
+
+async def test_update_room_orchestrator_empty_overrides_dispatches(srv: _SpyServer):
+    """空 dict 是合法 payload —— 语义"清掉所有 override，让默认值接管"。"""
+    await srv._handle_inbound(
+        {"type": INBOUND_UPDATE_ROOM_ORCHESTRATOR, "overrides": {}}, _sink,
+    )
+    assert srv.calls == [("_update_room_orchestrator", {"overrides": {}})]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_ROOM_ORCHESTRATOR},                          # 没 overrides
+    {"type": INBOUND_UPDATE_ROOM_ORCHESTRATOR, "overrides": None},        # null
+    {"type": INBOUND_UPDATE_ROOM_ORCHESTRATOR, "overrides": [0.5]},       # list
+    {"type": INBOUND_UPDATE_ROOM_ORCHESTRATOR, "overrides": "want=0.5"},  # str
+])
+async def test_update_room_orchestrator_bad_payload(srv: _SpyServer, payload):
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0
 
 
 # ── persona mcp trust ────────────────────────────────────────────────────
