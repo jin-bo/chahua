@@ -62,11 +62,12 @@ _ALLOWED_ROOM_KEYS: frozenset[str] = (
     frozenset({"name", "topic", "rules", "user_md"})
     | frozenset(ORCH_FIELD_BOUNDS)
 )
-# [[guest]] 段允许的键。
+# [[guest]] 段允许的键。LLM 四件套（model/base_url/api_key_env/temperature）的具体校验
+# 在 LLMSpec.from_toml；这里只是顶层白名单。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
     {
         "name", "persona", "permission", "isolation",
-        "model", "base_url", "api_key_env",
+        "model", "base_url", "api_key_env", "temperature",
         "extra_mcp_servers",
     }
 )

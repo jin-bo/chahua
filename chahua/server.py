@@ -144,6 +144,9 @@ def _llm_summary(*, spec, source: LlmSource) -> dict:
     **绝不下发 ``api_key`` 本身**：envelope 一旦塞 key，前端 devtools / log dump 都能
     看到，跨用户 user_data 共享更糟（设计 §2.2）。``api_key_ready`` 是 server 端探测
     出的 bool —— ``ollama`` 本地不强鉴权所以永远 ready。
+
+    ``temperature`` 走 ``spec.temperature``（原始值，None 表示本段没显式写 → UI 看到
+    "继承默认"语义；custom 模式才填具体值）。
     """
     api_key_env = spec.default_api_key_env()
     api_key_ready = spec.provider == "ollama" or bool(os.environ.get(api_key_env))
@@ -152,6 +155,7 @@ def _llm_summary(*, spec, source: LlmSource) -> dict:
         "base_url": spec.base_url,
         "api_key_env": api_key_env,
         "api_key_ready": api_key_ready,
+        "temperature": spec.temperature,
         "source": source,
     }
 

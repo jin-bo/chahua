@@ -195,6 +195,10 @@
                 <span>api_key 环境变量名（可选）</span>
                 <input id="edit-room-scoring-api-key-env" type="text">
               </label>
+              <label class="modal-field">
+                <span>temperature（可选，0~2；留空走 LLM_TEMPERATURE / 默认 1.0）</span>
+                <input id="edit-room-scoring-temperature" type="number" step="0.1" min="0" max="2" placeholder="0~2">
+              </label>
               <div class="modal-hint" id="edit-room-scoring-key-status"></div>
             </div>
           </fieldset>
@@ -221,6 +225,10 @@
               <label class="modal-field">
                 <span>api_key 环境变量名（可选）</span>
                 <input id="edit-room-summary-api-key-env" type="text">
+              </label>
+              <label class="modal-field">
+                <span>temperature（可选，0~2；留空走 LLM_TEMPERATURE / 默认 1.0）</span>
+                <input id="edit-room-summary-temperature" type="number" step="0.1" min="0" max="2" placeholder="0~2">
               </label>
               <div class="modal-hint" id="edit-room-summary-key-status"></div>
             </div>
@@ -277,6 +285,10 @@
               <label class="modal-field">
                 <span>api_key 环境变量名（可选；缺则 <code>&lt;PROVIDER&gt;_API_KEY</code> 约定）</span>
                 <input id="edit-guest-llm-api-key-env" type="text" placeholder="OPENAI_API_KEY">
+              </label>
+              <label class="modal-field">
+                <span>temperature（可选，0~2；留空走 <code>LLM_TEMPERATURE</code> / 默认 1.0）</span>
+                <input id="edit-guest-llm-temperature" type="number" step="0.1" min="0" max="2" placeholder="0~2">
               </label>
               <div class="modal-hint" id="edit-guest-llm-key-status"></div>
             </div>

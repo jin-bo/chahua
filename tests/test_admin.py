@@ -342,10 +342,11 @@ def test_update_room_llm_empty_dict_rejected(paths):
 
 
 @pytest.mark.parametrize("spec,match", [
-    ({"base_url": "http://x"}, r"base_url / api_key_env 不能单独出现"),
+    ({"base_url": "http://x"}, r"base_url / api_key_env / temperature 不能单独出现"),
     ({"model": "gpt-4"}, r"必须形如 '<provider>/<model>'"),
     ({"model": "weirdprovider/m"}, r"不在已知列表"),
-    ({"model": "openai/gpt-4", "temperature": 0.5}, r"未知字段"),
+    ({"model": "openai/gpt-4", "temperature": 2.5}, r"越界"),
+    ({"model": "openai/gpt-4", "novelfield": 1}, r"未知字段"),
 ])
 def test_update_room_llm_invalid_spec_rejected(paths, spec, match):
     rc = _seed_room_for_llm(paths)
@@ -372,6 +373,36 @@ def test_guest_llm_round_trip(paths):
     assert spec is not None and spec.provider == "anthropic"
     rc3 = load_room_config(rc.room_dir, paths=paths)
     assert rc3.guests[0].llm == spec
+
+
+def test_guest_llm_temperature_round_trip(paths):
+    """P4.8：temperature 进 toml schema 后 round-trip 不丢精度（admin → 写盘 → reload）。
+    并验证 toml 里写的是 scalar（不带引号），用户手编时一眼能看出是数值。"""
+    rc = _seed_room_for_llm(paths)
+    rc2 = admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        spec_dict={"model": "openai/gpt-4", "temperature": 0.2},
+    )
+    spec = rc2.guests[0].llm
+    assert spec is not None and spec.temperature == pytest.approx(0.2)
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.guests[0].llm == spec
+    # scalar 而非 basic string —— 否则 from_toml 会以 "必须是数值" 报错。
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "temperature= 0.2" in text
+
+
+def test_room_llm_scoring_temperature_round_trip(paths):
+    """[scoring] 段也认 temperature；reload 后 spec 完整。"""
+    rc = _seed_room_for_llm(paths)
+    rc2 = admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="scoring",
+        spec_dict={"model": "openai/gpt-5.4-mini", "temperature": 0.0},
+    )
+    assert rc2.scoring_llm is not None
+    assert rc2.scoring_llm.temperature == pytest.approx(0.0)
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.scoring_llm == rc2.scoring_llm
 
 
 def test_update_guest_llm_null_clears(paths):

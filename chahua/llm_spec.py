@@ -29,6 +29,9 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
     "siliconflow": "https://api.siliconflow.cn/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "ollama": "http://localhost:11434/v1",
+    # 阿里云 DashScope 的 OpenAI 兼容端点。国际版走 dashscope-intl.aliyuncs.com，
+    # 国内用户绝大多数走主域，差异让用户在 toml 里显式写 base_url 覆盖即可。
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 }
 
 # 闲聊场景调高，比 agentao 自带的 0.2 暖；可被 LLM_TEMPERATURE 覆盖。
@@ -66,13 +69,22 @@ def split_model_id(value: str) -> tuple[str, str]:
     return provider.strip().lower(), model.strip()
 
 
-# toml 表层 LLM 字段的写出 / 解析顺序（model 在前 + 可选两项在后，与设计 §3 示例对齐
+# toml 表层 LLM 字段的写出 / 解析顺序（model 在前 + 可选三项在后，与设计 §3 示例对齐
 # 让用户读 toml 时形态稳定）。公开（无下划线）—— admin 端 emit / 校验都从这里取，
 # 避免与 _TOML_LLM_KEYS 漂移。
-LLM_TOML_FIELDS: tuple[str, ...] = ("model", "base_url", "api_key_env")
+LLM_TOML_FIELDS: tuple[str, ...] = ("model", "base_url", "api_key_env", "temperature")
+
+# 非字符串字段集 —— admin 端 _render_room_toml 走 scalar literal（数值不引号）。
+# 当前只有 temperature 是数值；新增数值字段时这里加，emit 路径自然分流。
+LLM_TOML_NUMERIC_FIELDS: frozenset[str] = frozenset({"temperature"})
 
 # from_toml 容忍的字段集。出现其它键 → ValueError（防 typo 静默吞）。
 _TOML_LLM_KEYS: frozenset[str] = frozenset(LLM_TOML_FIELDS)
+
+# temperature 合法范围。OpenAI / Anthropic / DeepSeek 都接受 [0, 2]；超出 → 行为不一致
+# (有的报 422，有的截断到 1) → 解析期就拒。0 也接受（部分推理模型支持 deterministic）。
+_TEMPERATURE_MIN: float = 0.0
+_TEMPERATURE_MAX: float = 2.0
 
 
 def _resolve_temperature_from_env() -> Optional[float]:
@@ -171,16 +183,18 @@ class LLMSpec:
         §2.3 all-or-nothing：
 
         - ``data is None`` / ``data == {}`` → ``None``（让调用方走 fallback 链）。
-        - ``base_url`` / ``api_key_env`` 出现但缺 ``model`` → :class:`ValueError`。
+        - ``base_url`` / ``api_key_env`` / ``temperature`` 出现但缺 ``model`` →
+          :class:`ValueError`（temperature 也是 model 的可选附加，不允许单独飞）。
         - ``model`` 缺 ``/`` 或两侧为空 → :class:`ValueError`。
         - 未知 provider 且没显式 ``base_url`` → :class:`ValueError`。
         - 出现 :data:`_TOML_LLM_KEYS` 之外的键 → :class:`ValueError`（防 typo 静默吞）。
+        - ``temperature`` 非数值 / 越界 [0, 2] / bool → :class:`ValueError`。
 
         ``label`` 是 ``"[scoring]"`` / ``"[[guest]] 宝总"`` 等人话定位，进异常信息让用户
         一眼能定位 toml 里哪一段错了。
 
-        ``temperature`` 不进 toml schema（设计 §3 示例不暴露），spec 留 None；运行时由
-        :func:`build_client` 走 ``LLM_TEMPERATURE`` env / 默认。
+        ``temperature`` 在 P4.8 起接入 toml schema（UI 可编辑），spec 留 None 表示
+        "本段没写温度，走 :func:`build_client` 的 ``LLM_TEMPERATURE`` env / 默认"。
         """
         if not data:
             return None
@@ -192,10 +206,13 @@ class LLMSpec:
         model_raw = data.get("model")
         base_url_raw = data.get("base_url")
         api_key_env_raw = data.get("api_key_env")
+        temperature_raw = data.get("temperature")
 
-        if not model_raw and (base_url_raw or api_key_env_raw):
+        if not model_raw and (
+            base_url_raw or api_key_env_raw or temperature_raw is not None
+        ):
             raise ValueError(
-                f"{label}: base_url / api_key_env 不能单独出现，需同写 model"
+                f"{label}: base_url / api_key_env / temperature 不能单独出现，需同写 model"
             )
         if not model_raw:
             return None
@@ -227,11 +244,33 @@ class LLMSpec:
                 f"已知：{known}"
             )
 
+        # bool 是 int 子类，先剔除避免 True 被当 1.0；TOML 1.0 整数 / 浮点都给。
+        temperature: Optional[float]
+        if temperature_raw is None:
+            temperature = None
+        elif isinstance(temperature_raw, bool):
+            raise ValueError(
+                f"{label}: temperature 必须是数值，得到 bool"
+            )
+        elif isinstance(temperature_raw, (int, float)):
+            temperature = float(temperature_raw)
+            if temperature < _TEMPERATURE_MIN or temperature > _TEMPERATURE_MAX:
+                raise ValueError(
+                    f"{label}: temperature={temperature_raw!r} 越界，要求 "
+                    f"[{_TEMPERATURE_MIN}, {_TEMPERATURE_MAX}]"
+                )
+        else:
+            raise ValueError(
+                f"{label}: temperature 必须是数值，得到 "
+                f"{type(temperature_raw).__name__}"
+            )
+
         return cls(
             provider=provider,
             model=bare_model,
             base_url=base_url,
             api_key_env=api_key_env,
+            temperature=temperature,
         )
 
 

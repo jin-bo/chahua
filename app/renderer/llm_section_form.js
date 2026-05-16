@@ -1,13 +1,18 @@
 "use strict";
 
-// LLM section 表单工具 —— 模型 / base_url / api_key_env 三件套 + "继承默认 vs 自定义"
-// radio + 提交时 diff。guest_settings.js（茶客 LLM）与 room_settings.js（[scoring] /
-// [summary]）共用同一形态。
+// LLM section 表单工具 —— 模型 / base_url / api_key_env / temperature 四件套
+// + "继承默认 vs 自定义" radio + 提交时 diff。guest_settings.js（茶客 LLM）与
+// room_settings.js（[scoring] / [summary]）共用同一形态。
 //
 // 约定的 DOM id：``${idPrefix}-mode`` (radio name) / ``${idPrefix}-fields`` (custom 字段
 // 块容器) / ``${idPrefix}-model`` / ``${idPrefix}-base-url`` / ``${idPrefix}-api-key-env``
-// / ``${idPrefix}-default-label`` / ``${idPrefix}-key-status``。两个 modal 的 HTML 都按
-// 这个 prefix 写就能复用。
+// / ``${idPrefix}-temperature`` / ``${idPrefix}-default-label`` / ``${idPrefix}-key-status``。
+// 两个 modal 的 HTML 都按这个 prefix 写就能复用。
+
+// 与 chahua.llm_spec._TEMPERATURE_MIN/MAX 同口径 —— 客户端拦掉越界提前给用户红字提示，
+// 避免来回 echo 等服务端 RoomConfigError。
+const TEMPERATURE_MIN = 0;
+const TEMPERATURE_MAX = 2;
 
 export function $(id) { return document.getElementById(id); }
 
@@ -45,6 +50,13 @@ export function createLlmSection({ idPrefix, customSourceTag, label }) {
       $(`${idPrefix}-model`).value = isCustom ? (spec?.model || "") : "";
       $(`${idPrefix}-base-url`).value = isCustom ? (spec?.base_url || "") : "";
       $(`${idPrefix}-api-key-env`).value = isCustom ? (spec?.api_key_env || "") : "";
+      // temperature: spec.temperature 是 number 或 null；null 表示本段没显式写温度
+      // → custom 模式留空让用户自填（提交时不带这个键，spec.temperature 仍 None）。
+      const tempInput = $(`${idPrefix}-temperature`);
+      if (tempInput) {
+        tempInput.value =
+          isCustom && spec?.temperature != null ? String(spec.temperature) : "";
+      }
       refresh();
       const ready = !!spec?.api_key_ready;
       $(`${idPrefix}-key-status`).textContent =
@@ -59,6 +71,22 @@ export function createLlmSection({ idPrefix, customSourceTag, label }) {
       if (baseUrl) spec.base_url = baseUrl;
       const apiKeyEnv = $(`${idPrefix}-api-key-env`).value.trim();
       if (apiKeyEnv) spec.api_key_env = apiKeyEnv;
+      const tempInput = $(`${idPrefix}-temperature`);
+      if (tempInput) {
+        const tempRaw = tempInput.value.trim();
+        if (tempRaw) {
+          const temperature = Number(tempRaw);
+          if (!Number.isFinite(temperature)) {
+            return { error: `${label} temperature 必须是数值（如 0.7）` };
+          }
+          if (temperature < TEMPERATURE_MIN || temperature > TEMPERATURE_MAX) {
+            return {
+              error: `${label} temperature=${tempRaw} 越界，要求 [${TEMPERATURE_MIN}, ${TEMPERATURE_MAX}]`,
+            };
+          }
+          spec.temperature = temperature;
+        }
+      }
       return { spec };
     },
     // "default" 永远 ≠ "custom"，即便 model 字面相同 —— 用户显式 pin 住不随房间默认漂移。
@@ -69,6 +97,7 @@ export function createLlmSection({ idPrefix, customSourceTag, label }) {
             model: oldSpec.model,
             ...(oldSpec.base_url ? { base_url: oldSpec.base_url } : {}),
             ...(oldSpec.api_key_env ? { api_key_env: oldSpec.api_key_env } : {}),
+            ...(oldSpec.temperature != null ? { temperature: oldSpec.temperature } : {}),
           }
         : null;
       return JSON.stringify(newSpec) !== JSON.stringify(old);

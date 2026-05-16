@@ -79,11 +79,34 @@ def test_from_toml_unknown_provider_with_explicit_base_url_ok():
     assert spec is not None and spec.provider == "anthropic"
 
 
-def test_from_toml_temperature_not_in_schema():
-    """temperature 不在 toml schema —— env / build_client 默认接管。"""
-    with pytest.raises(ValueError, match="未知字段"):
+def test_from_toml_temperature_accepted():
+    """P4.8 起 temperature 进 toml schema —— UI 可编辑，spec 直接持值，build_client
+    走 spec.temperature 优先于 LLM_TEMPERATURE env / _DEFAULT_TEMPERATURE。"""
+    spec = LLMSpec.from_toml(
+        {"model": "openai/gpt-4", "temperature": 0.2}, label="[scoring]"
+    )
+    assert spec is not None
+    assert spec.temperature == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("raw", [0, 0.0, 1, 2, 2.0])
+def test_from_toml_temperature_bounds_inclusive(raw):
+    spec = LLMSpec.from_toml(
+        {"model": "openai/gpt-4", "temperature": raw}, label="[scoring]"
+    )
+    assert spec is not None and spec.temperature == pytest.approx(float(raw))
+
+
+@pytest.mark.parametrize("bad,match", [
+    (-0.1, r"越界"),
+    (2.01, r"越界"),
+    ("0.5", r"必须是数值"),
+    (True, r"必须是数值，得到 bool"),
+])
+def test_from_toml_temperature_invalid(bad, match):
+    with pytest.raises(ValueError, match=match):
         LLMSpec.from_toml(
-            {"model": "openai/gpt-4", "temperature": 0.5}, label="[scoring]"
+            {"model": "openai/gpt-4", "temperature": bad}, label="[scoring]"
         )
 
 
@@ -91,9 +114,10 @@ def test_from_toml_temperature_not_in_schema():
 
 
 @pytest.mark.parametrize("data,match", [
-    ({"base_url": "http://x"}, r"base_url / api_key_env 不能单独出现"),
-    ({"api_key_env": "K"}, r"base_url / api_key_env 不能单独出现"),
-    ({"base_url": "http://x", "api_key_env": "K"}, r"base_url / api_key_env 不能单独出现"),
+    ({"base_url": "http://x"}, r"base_url / api_key_env / temperature 不能单独出现"),
+    ({"api_key_env": "K"}, r"base_url / api_key_env / temperature 不能单独出现"),
+    ({"base_url": "http://x", "api_key_env": "K"}, r"base_url / api_key_env / temperature 不能单独出现"),
+    ({"temperature": 0.5}, r"base_url / api_key_env / temperature 不能单独出现"),
 ])
 def test_from_toml_all_or_nothing(data, match):
     with pytest.raises(ValueError, match=match):

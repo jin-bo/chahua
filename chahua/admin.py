@@ -39,7 +39,7 @@ from .config import (
     load_room_config,
     read_avatar_data_uri,
 )
-from .llm_spec import LLM_TOML_FIELDS, LLMSpec
+from .llm_spec import LLM_TOML_FIELDS, LLM_TOML_NUMERIC_FIELDS, LLMSpec
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 from .persona_assets import persona_relative, search_roots
 
@@ -58,11 +58,13 @@ class GuestSnapshot(TypedDict, total=False):
     persona: str
     permission: str
     isolation: str
-    # LLM 三件套（all-or-nothing：写 model 才允许 base_url / api_key_env，
-    # 详见 chahua.llm_spec.LLMSpec.from_toml 校验）。
+    # LLM 四件套（all-or-nothing：写 model 才允许 base_url / api_key_env / temperature，
+    # 详见 chahua.llm_spec.LLMSpec.from_toml 校验）。temperature 是 float（非字符串），
+    # render 时走 scalar literal —— 见 _render_llm_field。
     model: str
     base_url: str
     api_key_env: str
+    temperature: float
     # `[[guest.extra_mcp_servers]]` 数组表 —— snapshot 内部按 list[dict]（与 toml 形态
     # 一致），每项含 name / command 必给，args / env 可选。空 list / 缺键 = 不写 toml。
     extra_mcp_servers: list[dict[str, Any]]
@@ -269,18 +271,31 @@ def _extra_mcp_dict_to_list(
     return out
 
 
-def _llm_spec_to_dict(spec: LLMSpec) -> dict[str, str]:
+def _llm_spec_to_dict(spec: LLMSpec) -> dict[str, Any]:
     """``LLMSpec`` → toml 表层 dict（仅含非 ``None`` 字段）。
 
-    重新拼回 ``provider/model`` 合并写法（设计 §2.1）；``temperature`` 不进 toml schema
-    所以不出现在结果里。
+    重新拼回 ``provider/model`` 合并写法（设计 §2.1）；``temperature`` 走 P4.8 起的 UI
+    可编辑字段，非 None 时出现在结果里（值是 ``float``，与其它 ``str`` 字段混居 —— emit
+    路径靠 :data:`LLM_TOML_NUMERIC_FIELDS` 分流走 scalar literal）。
     """
-    out: dict[str, str] = {"model": spec.model_id}
+    out: dict[str, Any] = {"model": spec.model_id}
     if spec.base_url:
         out["base_url"] = spec.base_url
     if spec.api_key_env:
         out["api_key_env"] = spec.api_key_env
+    if spec.temperature is not None:
+        out["temperature"] = spec.temperature
     return out
+
+
+def _render_llm_field(key: str, value: Any) -> str:
+    """单个 LLM 字段的 TOML 字面量：``temperature`` 走 scalar（数值不引号），其它走
+    basic string。:data:`LLM_TOML_NUMERIC_FIELDS` 单点声明谁是数值，加新数值字段时
+    只动那里。
+    """
+    if key in LLM_TOML_NUMERIC_FIELDS:
+        return _format_toml_scalar(value)
+    return _toml_basic_string(str(value))
 
 
 def _format_toml_scalar(value: Any) -> str:
@@ -348,7 +363,7 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         lines.append(f"[{section}]")
         for key in LLM_TOML_FIELDS:
             if key in spec_dict:
-                lines.append(f"{key} = {_toml_basic_string(str(spec_dict[key]))}")
+                lines.append(f"{key} = {_render_llm_field(key, spec_dict[key])}")
 
     for g in snapshot["guests"]:
         gname = str(g["name"])
@@ -371,7 +386,7 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
             lines.append(f"isolation  = {_toml_basic_string(str(g['isolation']))}")
         for key in LLM_TOML_FIELDS:
             if key in g:
-                lines.append(f"{key:<11}= {_toml_basic_string(str(g[key]))}")
+                lines.append(f"{key:<11}= {_render_llm_field(key, g[key])}")
         for entry in g.get("extra_mcp_servers") or []:
             lines.append("")
             lines.append("[[guest.extra_mcp_servers]]")
@@ -622,7 +637,7 @@ def update_guest_permission(
 
 def _validate_llm_spec_dict(
     spec_dict: dict[str, Any], *, label: str
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """走 :meth:`LLMSpec.from_toml` 的 all-or-nothing 校验，回吐规范化后的 dict。
 
     写盘前 pre-validate 是必要的 —— 否则 bad type（如 bool）会走到
@@ -676,7 +691,7 @@ def update_guest_llm(
     snapshot = _read_existing_for_mutate(room_dir, paths)
     if not any(g["name"] == name for g in snapshot["guests"]):
         raise ValueError(f"茶客 {name!r} 不在房间里")
-    validated: Optional[dict[str, str]] = (
+    validated: Optional[dict[str, Any]] = (
         _validate_llm_spec_dict(spec_dict, label=f"[[guest]] {name!r}")
         if spec_dict is not None
         else None
