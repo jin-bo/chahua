@@ -332,6 +332,45 @@ def test_update_room_llm_bad_section_rejected(paths):
         )
 
 
+def test_room_default_llm_round_trip(paths):
+    """P4.9：[room.llm] 段 round-trip。写入 → reload → 字段一致；同时验 toml 写出
+    用的是 dotted section ``[room.llm]``（不是 ``[room_llm]``、也不是 inline）。"""
+    rc = _seed_room_for_llm(paths)
+    rc2 = admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="room",
+        spec_dict={
+            "model": "openai/gpt-5.4",
+            "api_key_env": "OPENAI_API_KEY",
+            "temperature": 0.8,
+        },
+    )
+    assert rc2.room_llm is not None
+    assert rc2.room_llm.provider == "openai"
+    assert rc2.room_llm.model == "gpt-5.4"
+    assert rc2.room_llm.api_key_env == "OPENAI_API_KEY"
+    assert rc2.room_llm.temperature == pytest.approx(0.8)
+    # reload 也保留。
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.room_llm == rc2.room_llm
+    # 物理写入是 [room.llm] dotted table。
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "[room.llm]" in text
+
+
+def test_update_room_default_llm_null_clears(paths):
+    """传 None 清掉 [room.llm] 段 —— toml 里整段消失。"""
+    rc = _seed_room_for_llm(paths)
+    admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="room",
+        spec_dict={"model": "openai/gpt-5.4"},
+    )
+    rc_after = admin.update_room_llm(
+        paths=paths, room_dir=rc.room_dir, section="room", spec_dict=None,
+    )
+    assert rc_after.room_llm is None
+    assert "[room.llm]" not in (rc.room_dir / "room.toml").read_text("utf-8")
+
+
 def test_update_room_llm_empty_dict_rejected(paths):
     """{} 语义模糊（"清整段"应该传 None）—— 拒。"""
     rc = _seed_room_for_llm(paths)

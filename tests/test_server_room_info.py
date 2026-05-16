@@ -181,6 +181,30 @@ def test_emit_room_info_room_llm_sections(env_paths):
     assert data["summary_llm"]["model"] == "openai/gpt-5.4-mini"
 
 
+def test_emit_room_info_room_default_llm_from_env(env_paths):
+    """P4.9：默认情况（toml 没写 [room.llm]）→ room_default_llm.source = "default"
+    表示走 env 推断；UI 据此把 "在 room.toml 写明" radio 显示为 unchecked。"""
+    data = _capture_room_info(env_paths)
+    assert data["room_default_llm"]["source"] == "default"
+    assert data["room_default_llm"]["model"] == "openai/gpt-5.4"
+
+
+def test_emit_room_info_room_default_llm_from_toml(env_paths):
+    """[room.llm] 在 toml 里写过 → source = "room"，model 反映 toml 段，不是 env。"""
+    rc = admin.create_room(
+        paths=env_paths, room_id="rdef", name="rdef",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+    admin.update_room_llm(
+        paths=env_paths, room_dir=rc.room_dir, section="room",
+        spec_dict={"model": "openai/gpt-5.4-mini", "temperature": 0.3},
+    )
+    data = _emit_and_capture(env_paths, rc.room_dir)
+    assert data["room_default_llm"]["source"] == "room"
+    assert data["room_default_llm"]["model"] == "openai/gpt-5.4-mini"
+    assert data["room_default_llm"]["temperature"] == pytest.approx(0.3)
+
+
 def test_emit_room_info_does_not_leak_api_key(env_paths, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "leaky-sk-secret-DONT-LEAK")
     data = _capture_room_info(env_paths)

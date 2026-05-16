@@ -135,34 +135,34 @@ class LLMSpec:
         return self.api_key_env or f"{provider_env_prefix(self.provider)}_API_KEY"
 
     @classmethod
-    def from_env(cls) -> "LLMSpec":
-        """从环境变量构造 spec：
+    def try_from_env(cls) -> Optional["LLMSpec"]:
+        """从环境变量构造 spec；缺 ``<PREFIX>_MODEL`` 返 ``None``（不炸）。
+
+        P4.9 引入 —— ``[room.llm]`` 可在 toml 里独立配房间默认；env 只是 fallback。
+        :meth:`from_env` 仍保留"缺 model 即 SystemExit"语义给老调用方（CLI 端不希望
+        默默拿 None 跑），新代码（``build_room_session`` 装配房间默认时）走这条返回
+        ``Optional`` 的版本。
+
+        参数语义与 :meth:`from_env` 一致：
 
         - ``LLM_PROVIDER`` 决定 prefix（未设或空 → ``openai``）。
-        - ``<PREFIX>_MODEL`` 必给（缺 → :class:`SystemExit`）。env 路径允许**裸 model**
-          （无 ``/`` 前缀），与 toml 路径强制 ``<provider>/<model>`` 的策略故意不一致 ——
-          命令行 / dotenv 是单人单 provider 入口，按 ``LLM_PROVIDER`` 推 prefix 已够。
+        - ``<PREFIX>_MODEL`` 缺即返 ``None``。env 路径允许**裸 model**（无 ``/`` 前缀），
+          与 toml 路径强制 ``<provider>/<model>`` 的策略故意不一致 —— 命令行 / dotenv
+          是单人单 provider 入口，按 ``LLM_PROVIDER`` 推 prefix 已够。
         - ``<PREFIX>_BASE_URL`` 显式给则带入 spec，否则留 ``None`` 让 :func:`build_client`
           按 provider 默认解析。
         - ``<PREFIX>_API_KEY`` / ``LLM_TEMPERATURE`` 留给 :func:`build_client`（缺 key 等
-          失败都在那里）；``LLM_TEMPERATURE`` 在这里只读一次存进 spec，避免 build_client
-          再读一遍。
+          失败都在那里）；``LLM_TEMPERATURE`` 在这里只读一次存进 spec。
 
         本方法返回的 spec ``api_key_env=None`` —— ``room_info`` 渲染时能看出"这是 env
-        推断的默认 spec"。
+        推断的默认 spec"（与 ``[room.llm]`` toml 显式配置形成对照）。
         """
         provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
         prefix = provider_env_prefix(provider)
 
         model = os.environ.get(f"{prefix}_MODEL")
         if not model:
-            known = ", ".join(sorted(_DEFAULT_BASE_URLS.keys()))
-            raise SystemExit(
-                f"LLM_PROVIDER={provider!r}：缺少环境变量 {prefix}_MODEL。\n"
-                f"先复制 .env.example → .env 并填入真实值，或写到 ~/.env，或 shell export。\n"
-                f"已知 provider（自带默认 base_url）：{known}。\n"
-                f"其它 provider 可用，但 BASE_URL 必须显式给。"
-            )
+            return None
 
         base_url = (os.environ.get(f"{prefix}_BASE_URL") or "").strip() or None
 
@@ -172,6 +172,26 @@ class LLMSpec:
             base_url=base_url,
             api_key_env=None,
             temperature=_resolve_temperature_from_env(),
+        )
+
+    @classmethod
+    def from_env(cls) -> "LLMSpec":
+        """:meth:`try_from_env` 的"缺 model 即 SystemExit"版本 —— CLI / 旧调用方专用。
+
+        新代码（``build_room_session``）应走 :meth:`try_from_env`，让 ``[room.llm]``
+        toml 配置接管"房间默认"的语义，env 只做 fallback。
+        """
+        spec = cls.try_from_env()
+        if spec is not None:
+            return spec
+        provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
+        prefix = provider_env_prefix(provider)
+        known = ", ".join(sorted(_DEFAULT_BASE_URLS.keys()))
+        raise SystemExit(
+            f"LLM_PROVIDER={provider!r}：缺少环境变量 {prefix}_MODEL。\n"
+            f"先复制 .env.example → .env 并填入真实值，或写到 ~/.env，或 shell export。\n"
+            f"已知 provider（自带默认 base_url）：{known}。\n"
+            f"其它 provider 可用，但 BASE_URL 必须显式给。"
         )
 
     @classmethod

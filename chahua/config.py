@@ -57,9 +57,12 @@ ORCH_FIELD_BOUNDS: dict[str, tuple[type, float, Optional[float]]] = {
     "onboarding_threshold": (int, 1, None),
 }
 
-# [room] 段允许的键 = 固定四件套 + 编排参数（派生自 ORCH_FIELD_BOUNDS）。
+# [room] 段允许的键 = 固定四件套 + 编排参数（派生自 ORCH_FIELD_BOUNDS）+ ``llm``
+# 子表（P4.9 起，房间默认 LLM 段，对应 toml 里的 ``[room.llm]`` dotted table）。
+# ``llm`` 是 dict 而非标量，平面 key 校验不限制其内部字段；具体字段走
+# :meth:`LLMSpec.from_toml`。
 _ALLOWED_ROOM_KEYS: frozenset[str] = (
-    frozenset({"name", "topic", "rules", "user_md"})
+    frozenset({"name", "topic", "rules", "user_md", "llm"})
     | frozenset(ORCH_FIELD_BOUNDS)
 )
 # [[guest]] 段允许的键。LLM 四件套（model/base_url/api_key_env/temperature）的具体校验
@@ -185,8 +188,12 @@ class RoomConfig:
     没写 = 不在 dict 里；session 装配时 patch 到 :class:`OrchestratorConfig()` 默认上。
     这样回写 toml 时也只回写用户填的那几个，不会把"默认值"硬塞进文件。"""
 
+    room_llm: Optional[LLMSpec] = None
+    """``[room.llm]`` 段解析结果（P4.9 起）；缺 = 走 env 推断
+    （:meth:`LLMSpec.try_from_env`）。"""
+
     scoring_llm: Optional[LLMSpec] = None
-    """``[scoring]`` 段解析结果；缺 = 走房间默认（:meth:`LLMSpec.from_env`）。打分用
+    """``[scoring]`` 段解析结果；缺 = 走房间默认（:attr:`room_llm` 或 env）。打分用
     便宜模型场景。"""
 
     summary_llm: Optional[LLMSpec] = None
@@ -259,6 +266,11 @@ def _build(
         room_raw, toml_path=toml_path
     )
 
+    # P4.9：``[room.llm]`` 走 [room] 下的 dotted-table 子表。tomllib 解析后是
+    # ``room_raw["llm"] = {...}``；缺即 None，让装配层 fall back 到 env。
+    room_llm = _build_room_llm_section(
+        room_raw.get("llm"), section="[room.llm]", toml_path=toml_path
+    )
     scoring_llm = _build_room_llm_section(
         data.get("scoring"), section="[scoring]", toml_path=toml_path
     )
@@ -278,6 +290,7 @@ def _build(
         guests=guests,
         user_md_override=user_md_override,
         orchestrator_overrides=orchestrator_overrides,
+        room_llm=room_llm,
         scoring_llm=scoring_llm,
         summary_llm=summary_llm,
     )

@@ -134,7 +134,9 @@ def _mcp_summary_list(
 
 
 # `_llm_summary` 的 ``source`` 字段：guest 段是 ``guest``/``room_default``，房间段是
-# ``room``/``default``。串字面挪到一处 + Literal 注解 → IDE 能挡 typo。
+# ``room``/``default``。``room`` = toml 里有写 / ``default`` = 走上游 fallback（room 默认段
+# 自身的 default 表示 env 推断，scoring/summary 的 default 表示落到 room_default）。
+# 串字面挪到一处 + Literal 注解 → IDE 能挡 typo。
 LlmSource = Literal["guest", "room_default", "room", "default"]
 
 
@@ -489,11 +491,14 @@ class ChahuaServer:
                     "orchestrator_overrides_keys": sorted(rc.orchestrator_overrides),
                     # 房间级 LLM section：与 guests[].llm 同构。
                     # ``source`` 是 "room" 表示 [scoring]/[summary] 段在 toml 里有写；
-                    # "default" 表示该段缺失走的是房间默认（即 LLM_PROVIDER 环境变量）。
+                    # "default" 表示该段缺失走的是房间默认。
                     # 房间默认 LLM —— "继承房间默认" UI 标签的字面来源（P4.5 modal）。
-                    # 永远走 env 推断（LLMSpec.from_env），source 固定 "default"。
+                    # P4.9 起 source = "room" 表示 [room.llm] 在 toml 里有写；"default"
+                    # 表示走 env 推断（LLMSpec.try_from_env）。UI 据此区分"用户在房间
+                    # 里配的默认" vs "全局 env 默认"。
                     "room_default_llm": _llm_summary(
-                        spec=self._session.room_default_spec, source="default",
+                        spec=self._session.room_default_spec,
+                        source="room" if rc.room_llm is not None else "default",
                     ),
                     "scoring_llm": _llm_summary(
                         spec=self._session.scoring_spec,
@@ -1268,9 +1273,9 @@ class ChahuaServer:
         self, data: dict, sink: EnvelopeSink
     ) -> None:
         section = data.get("section")
-        if section not in ("scoring", "summary"):
+        if section not in ("room", "scoring", "summary"):
             _log.warning(
-                "ignoring %s: section 必须是 'scoring'/'summary'，收到 %r",
+                "ignoring %s: section 必须是 'room'/'scoring'/'summary'，收到 %r",
                 INBOUND_UPDATE_ROOM_LLM, section,
             )
             return

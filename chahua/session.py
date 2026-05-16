@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from ._fs import link_dir_idempotent
 from ._paths import Paths
-from .config import RoomConfig, load_room_config
+from .config import RoomConfig, RoomConfigError, load_room_config
 from .cursor import GuestCursor
 from .guest import TeaGuest
 from .llm_spec import LLMSpec, build_client
@@ -154,10 +154,12 @@ class RoomSession:
     user_config: UserConfig
     room_config: RoomConfig
     room_default_spec: LLMSpec
-    """房间默认 LLM spec（env 推断的 :meth:`LLMSpec.from_env`）。
+    """房间默认 LLM spec。P4.9 起优先取 ``[room.llm]`` toml 段，缺则 fall back 到 env
+    推断（:meth:`LLMSpec.try_from_env`）。两者都缺 → ``build_room_session`` 抛
+    :class:`RoomConfigError`。
 
     "单 provider 字符串"在 P4 多 client 后表达不了"每茶客可异构"的事实；这里持 spec
-    是 banner / 启动日志 / 未来 envelope 展示房间默认配置的唯一数据源。**不缓存
+    是 banner / 启动日志 / room_info envelope 展示房间默认配置的唯一数据源。**不缓存
     :class:`LLMClient` 对象引用** —— 茶客实例本身已持 client（agentao 内部），
     ``RoomSession`` 只持声明性 spec。"""
 
@@ -216,6 +218,29 @@ class RoomSession:
         """
         object.__setattr__(self, "room_config", new_rc)
         self.orchestrator.config = _make_orchestrator_config(new_rc.orchestrator_overrides)
+
+
+def _resolve_room_default_spec(room_config: RoomConfig) -> LLMSpec:
+    """房间默认 LLM 的两层 fallback：``[room.llm]`` toml 段 → env 推断。
+
+    两者都缺 → :class:`RoomConfigError` 提示"二选一"。错误信息列两条路径让用户一眼
+    知道修哪里，不让默认空缺时下游再炸 ``build_client``（那一炸只指向 OPENAI_MODEL
+    缺失，没提"也可以在 room.toml 写 [room.llm]"这条路）。
+
+    `[room.llm]` 显式配置时 env 完全被忽略 —— 同 toml 文件里写 ``temperature=0.5``，
+    shell 里再 export ``LLM_TEMPERATURE=1.5`` 不应"偷偷胜"覆盖用户在 toml 的意图。
+    """
+    if room_config.room_llm is not None:
+        return room_config.room_llm
+    env_spec = LLMSpec.try_from_env()
+    if env_spec is not None:
+        return env_spec
+    raise RoomConfigError(
+        f"{room_config.room_dir / 'room.toml'}: 房间默认 LLM 未配置。\n"
+        f"二选一：(1) 在 room.toml 里写 [room.llm]，至少含 model = "
+        f"\"<provider>/<model>\"；(2) 设环境变量 LLM_PROVIDER + <PREFIX>_MODEL（如 "
+        f"OPENAI_MODEL）。详见 .env.example。"
+    )
 
 
 def _make_orchestrator_config(
@@ -287,11 +312,12 @@ def build_room_session(
         explicit=room_config.user_md_override,
     )
     # P4.1：按 room.toml 装多套 client。fallback 链：
+    #   - room_default: rc.room_llm or env（P4.9）
     #   - guest:    gc.llm or room_default
     #   - scoring:  rc.scoring_llm or room_default
     #   - summary:  rc.summary_llm or scoring（仍缺则 → room_default，由前一行链上来）
     # `build_client` 在缺 api_key 等时 SystemExit —— 让用户早炸而不是跑到第一次发言才出问题。
-    room_default_spec = LLMSpec.from_env()
+    room_default_spec = _resolve_room_default_spec(room_config)
     scoring_spec = room_config.scoring_llm or room_default_spec
     summary_spec = room_config.summary_llm or scoring_spec
 

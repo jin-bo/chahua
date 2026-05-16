@@ -76,6 +76,7 @@ class TomlSnapshot(TypedDict, total=False):
     rules: str
     user_md: Optional[str]                       # [room].user_md；None / "" = 不写
     orchestrator_overrides: dict[str, Any]       # 空 dict = 不写编排字段（P4.0 消费）
+    room_llm: Optional[dict]                     # None = 不写 [room.llm]（P4.9）
     scoring: Optional[dict]                      # None = 不写 [scoring]（P4.1）
     summary: Optional[dict]                      # None = 不写 [summary]（P4.1）
     guests: list[GuestSnapshot]
@@ -354,6 +355,17 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         if key in orch:
             lines.append(f"{key} = {_format_toml_scalar(orch[key])}")
 
+    # [room.llm] 房间默认 LLM 段（P4.9）。写在 [room] 标量字段之后、其它 section 之前 ——
+    # tomllib 把 ``[room.llm]`` 解析为 ``room["llm"] = {...}`` 子表，物理顺序与 "[room]
+    # 标量字段后再开 dotted 子表" 一致，用户读 toml 时 LLM 段不会切断 [room] 标量块。
+    room_llm_dict = snapshot.get("room_llm")
+    if room_llm_dict:
+        lines.append("")
+        lines.append("[room.llm]")
+        for key in LLM_TOML_FIELDS:
+            if key in room_llm_dict:
+                lines.append(f"{key} = {_render_llm_field(key, room_llm_dict[key])}")
+
     # [scoring] / [summary] 顶层 LLM 段（§3 示例顺序：room → scoring → summary → guest）。
     for section in ("scoring", "summary"):
         spec_dict = snapshot.get(section)
@@ -436,8 +448,8 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
     相对值；否则保留 absolute（兼容用户硬编绝对路径的极少数场景）。
 
     还原范围：name / topic / rules / user_md_override / orchestrator_overrides /
-    scoring_llm / summary_llm + 每位 guest 的 name / persona / permission / isolation /
-    LLM 三件套 + extra_mcp_servers。
+    room_llm / scoring_llm / summary_llm + 每位 guest 的 name / persona / permission /
+    isolation / LLM 三件套 + extra_mcp_servers。
 
     ``isolation`` 走"默认值不进 snapshot"约定 —— 等于 ``"room"`` 时键不出现，emit 路径
     不写到 toml，保留用户那条 toml 行的简洁度。``extra_mcp_servers`` 同理 —— 内部 dict
@@ -463,6 +475,7 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
         "rules": rc.rules,
         "user_md": rc.user_md_override,
         "orchestrator_overrides": dict(rc.orchestrator_overrides),
+        "room_llm": _llm_spec_to_dict(rc.room_llm) if rc.room_llm else None,
         "scoring": _llm_spec_to_dict(rc.scoring_llm) if rc.scoring_llm else None,
         "summary": _llm_spec_to_dict(rc.summary_llm) if rc.summary_llm else None,
         "guests": guests,
@@ -656,25 +669,37 @@ def _validate_llm_spec_dict(
     return _llm_spec_to_dict(spec)
 
 
+_ROOM_LLM_SECTIONS: dict[str, tuple[str, str]] = {
+    # section param → (snapshot key, toml label)
+    "room": ("room_llm", "[room.llm]"),
+    "scoring": ("scoring", "[scoring]"),
+    "summary": ("summary", "[summary]"),
+}
+
+
 def update_room_llm(
     *, paths: Paths, room_dir: Path,
-    section: Literal["scoring", "summary"],
+    section: Literal["room", "scoring", "summary"],
     spec_dict: Optional[dict[str, Any]],
 ) -> RoomConfig:
-    """覆盖 ``[scoring]`` / ``[summary]`` 顶层 LLM 段。``spec_dict=None`` → 删整段。
+    """覆盖 ``[room.llm]`` / ``[scoring]`` / ``[summary]`` 顶层 LLM 段。
+    ``spec_dict=None`` → 删整段（房间默认段被删后 fallback 到 env，
+    见 :func:`chahua.session._resolve_room_default_spec`）。
 
     非 None 走 :meth:`LLMSpec.from_toml` 预校验；失败 raise 不动盘。
     """
-    if section not in ("scoring", "summary"):
+    if section not in _ROOM_LLM_SECTIONS:
         raise RoomConfigError(
-            f"update_room_llm: section 必须是 'scoring' / 'summary'，得到 {section!r}"
+            f"update_room_llm: section 必须是 "
+            f"{sorted(_ROOM_LLM_SECTIONS)}，得到 {section!r}"
         )
+    snapshot_key, label = _ROOM_LLM_SECTIONS[section]
     snapshot = _read_existing_for_mutate(room_dir, paths)
     if spec_dict is None:
-        snapshot[section] = None  # type: ignore[literal-required]
+        snapshot[snapshot_key] = None  # type: ignore[literal-required]
     else:
-        snapshot[section] = _validate_llm_spec_dict(  # type: ignore[literal-required]
-            spec_dict, label=f"[{section}]"
+        snapshot[snapshot_key] = _validate_llm_spec_dict(  # type: ignore[literal-required]
+            spec_dict, label=label,
         )
     return _rewrite_and_validate(room_dir, snapshot, paths)
 

@@ -6,6 +6,8 @@ env 路径与 ``build_client`` 的 SystemExit 由 session 端 / CLI 启动跑实
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from chahua.llm_spec import LLMSpec, split_model_id
@@ -147,3 +149,37 @@ def test_from_toml_type_errors(data, match):
 def test_from_toml_label_threaded_into_error():
     with pytest.raises(ValueError, match=r"\[\[guest\]\] 宝总"):
         LLMSpec.from_toml({"model": "gpt-4"}, label="[[guest]] 宝总")
+
+
+# ── LLMSpec.try_from_env（P4.9）────────────────────────────────────────────
+
+
+def _clear_llm_env(monkeypatch):
+    """剔掉所有可能让 ``try_from_env`` 拿到值的 env —— host shell 里 export 的
+    ``LLM_TEMPERATURE`` / ``OPENAI_MODEL`` 等会污染测试，必须 unset 才能让断言
+    确定性地比较 ``LLMSpec`` 默认值。"""
+    for k in list(os.environ):
+        if (
+            k == "LLM_PROVIDER"
+            or k == "LLM_TEMPERATURE"
+            or k.endswith("_MODEL")
+            or k.endswith("_BASE_URL")
+        ):
+            monkeypatch.delenv(k, raising=False)
+
+
+def test_try_from_env_missing_model_returns_none(monkeypatch):
+    """缺 <PREFIX>_MODEL → None（让装配层 fall back 到 [room.llm] toml）；
+    不像 from_env 直接 SystemExit。"""
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    assert LLMSpec.try_from_env() is None
+
+
+def test_try_from_env_with_model_returns_spec(monkeypatch):
+    """带 model 时返回完整 spec —— 与 from_env 同结果。"""
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    spec = LLMSpec.try_from_env()
+    assert spec == LLMSpec(provider="openai", model="gpt-5.4")

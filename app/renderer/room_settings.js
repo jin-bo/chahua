@@ -2,13 +2,14 @@
 
 // 房间详细设置 modal（P4.6，对应 docs/P4-专业茶客配置闭环.md §5.2）。
 //
-// **scope**：表单只暴露 P4 新接的"声明性"字段 —— 编排参数 / [scoring] / [summary]。
-// name / topic / rules / user_md 改动走 raw textarea（"打开 raw room.toml"按钮），
-// 避免在 JS 里搓 TOML 合成。
+// **scope**：表单只暴露 P4 新接的"声明性"字段 —— 房间默认 LLM（P4.9）/ 编排参数 /
+// [scoring] / [summary]。name / topic / rules / user_md 改动走 raw textarea
+// （"打开 raw room.toml"按钮），避免在 JS 里搓 TOML 合成。
 //
 // **diff 提交**：每段一条 inbound。编排走 update_room_orchestrator（整体覆盖语义，
 // 与 admin.update_room_orchestrator 一致 —— 空 dict = 清掉所有 override）；
-// scoring/summary 走 update_room_llm（spec=null = 清整段）。
+// room.llm / scoring / summary 走 update_room_llm（section 字段分流，spec=null =
+// 清整段）。
 
 import { Inbound } from "./events.js";
 import { $, createLlmSection } from "./llm_section_form.js";
@@ -27,6 +28,14 @@ const ORCH_INPUT_IDS = Object.freeze({
   max_consecutive_ai_turns: "edit-room-orch-max-turns",
   speaker_cooldown_turns: "edit-room-orch-cooldown",
   onboarding_threshold: "edit-room-orch-onboarding",
+});
+
+// 房间默认 LLM —— customSourceTag = "room" 表示 toml 里有 [room.llm]；server 端
+// envelope source = "default" 时表示走 env 推断。
+const roomDefaultSection = createLlmSection({
+  idPrefix: "edit-room-default",
+  customSourceTag: "room",
+  label: "[room.llm]",
 });
 
 const scoringSection = createLlmSection({
@@ -103,6 +112,7 @@ export function createRoomSettings({ isConnected, send, setStatus, openGuestSett
   const modal = $("edit-room-modal");
   let snapshot = null;
 
+  roomDefaultSection.bindModeChange();
   scoringSection.bindModeChange();
   summarySection.bindModeChange();
 
@@ -118,6 +128,11 @@ export function createRoomSettings({ isConnected, send, setStatus, openGuestSett
       window.alert(orch.error);
       return;
     }
+    const roomDefault = roomDefaultSection.read();
+    if (roomDefault.error) {
+      window.alert(roomDefault.error);
+      return;
+    }
     const scoring = scoringSection.read();
     if (scoring.error) {
       window.alert(scoring.error);
@@ -130,6 +145,13 @@ export function createRoomSettings({ isConnected, send, setStatus, openGuestSett
     }
 
     const payloads = [];
+    // 房间默认 LLM 先发 —— 切到 custom 时 scoring/summary 的 "继承默认" 应该指向
+    // 新的房间默认值；先发让 server 重装 session 后再 emit room_info / 跑后续 diff
+    // 时已经能看到新默认。但 server 一次只能跑一个 session 重装，这里只控制顺序，
+    // 真正的"串行投递"靠 ws 单连接 inbound 顺序保证。
+    if (roomDefaultSection.changed(roomDefault.spec, snapshot.room_default_llm)) {
+      payloads.push({ type: Inbound.UPDATE_ROOM_LLM, section: "room", spec: roomDefault.spec });
+    }
     if (orchestratorChanged(orch.overrides, snapshot.orchestrator, snapshot.orchestrator_overrides_keys)) {
       payloads.push({ type: Inbound.UPDATE_ROOM_ORCHESTRATOR, overrides: orch.overrides });
     }
@@ -155,6 +177,13 @@ export function createRoomSettings({ isConnected, send, setStatus, openGuestSett
         `话题：${snapshot.topic || "（无）"}  ·  规则与 name 改动请走"打开 raw room.toml"`;
 
       fillOrchestrator(snapshot.orchestrator, snapshot.orchestrator_overrides_keys);
+
+      // 房间默认 LLM 自己的 "default" 模式 = 走 env 推断；label 顺手把 env 当前
+      // 解析到的 model 露出来，便于用户判断 env 是否就绪。
+      const envLabel = snapshot.room_default_llm?.model
+        ? `按环境变量推断（当前：${snapshot.room_default_llm.model}）`
+        : "按环境变量推断（LLM_PROVIDER / <PREFIX>_MODEL）";
+      roomDefaultSection.fill(snapshot.room_default_llm, envLabel);
 
       const roomDefaultLabel = snapshot.room_default_llm?.model
         ? `跟房间默认走（${snapshot.room_default_llm.model}）`
