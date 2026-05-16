@@ -25,7 +25,7 @@ import tomllib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from ._paths import Paths, resolve_under
 from .llm_spec import LLM_TOML_FIELDS, LLMSpec
@@ -64,15 +64,26 @@ _ALLOWED_ROOM_KEYS: frozenset[str] = (
 )
 # [[guest]] 段允许的键。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
-    {"name", "persona", "permission", "model", "base_url", "api_key_env"}
+    {
+        "name", "persona", "permission", "isolation",
+        "model", "base_url", "api_key_env",
+    }
 )
 # 已移除的字段 —— 不会有未来 phase 接 `provider`（设计 §2.1：用 model = "<provider>/<model>"
 # 合并写法）。出现 → 给定向 hint。
 _REMOVED_GUEST_KEYS: frozenset[str] = frozenset({"provider"})
 # 后续 phase 接入的字段 —— 现在写了报"未实现"。
 _DEFERRED_GUEST_KEYS: frozenset[str] = frozenset(
-    {"isolation", "extra_mcp_servers", "transport"}
+    {"extra_mcp_servers", "transport"}
 )
+
+# isolation 合法值 + 默认值。公开 —— admin 端 mutator 校验 / server 端 envelope 渲染都用
+# 同一 set；DEFAULT_ISOLATION 在 GuestConfig 默认 / 解析 fallback / 写盘"默认不 emit"
+# 等 5 处共用，避免字面字符串漂移。
+ISOLATION_ROOM: Literal["room"] = "room"
+ISOLATION_GLOBAL: Literal["global"] = "global"
+DEFAULT_ISOLATION: Literal["room"] = ISOLATION_ROOM
+VALID_ISOLATION: frozenset[str] = frozenset({ISOLATION_ROOM, ISOLATION_GLOBAL})
 # 顶层白名单。
 _ALLOWED_TOPLEVEL_KEYS: frozenset[str] = frozenset(
     {"room", "guest", "scoring", "summary"}
@@ -92,6 +103,12 @@ class GuestConfig:
     permission: str
     """已校验在 :data:`chahua.permissions.VALID_MODES` 内。"""
 
+    isolation: Literal["room", "global"] = DEFAULT_ISOLATION
+    """``"room"``（默认）/ ``"global"`` —— 决定 :meth:`workspace_in` 选哪个根。
+    设计 §2.5：room 跟着房间走（删房间一起清）；global 跨房间共享。切换不自动迁移
+    旧 ``.agentao/memory.db``（单机本地、用户最懂自己干净不干净，自动迁移要处理
+    "两边都有"的 ambiguity 复杂度不值）。"""
+
     llm: Optional[LLMSpec] = None
     """``[[guest]]`` 里写明的 ``model`` / ``base_url`` / ``api_key_env`` 解析结果；
     缺即走房间默认（:meth:`LLMSpec.from_env`）。P4.1 起每位茶客可独立配 client。"""
@@ -109,12 +126,19 @@ class GuestConfig:
         """
         return read_avatar_data_uri(self.persona_path.with_suffix(".png"))
 
-    def workspace_in(self, room_dir: Path) -> Path:
-        """茶客的 ``working_directory`` 约定 = ``<room_dir>/guests/<name>/``。
+    def workspace_in(self, *, paths: Paths, room_dir: Path) -> Path:
+        """茶客的 ``working_directory``：
+
+        - ``isolation == "room"``（默认）→ ``<room_dir>/guests/<name>/``：跟着房间走，
+          删房间一起清；茶客记忆只在本房间留底。
+        - ``isolation == "global"`` → ``<user_data_root>/guests/<name>/``：跨房间共享
+          的 cwd（包括 ``.agentao/memory.db``）。同一茶客在不同房间装配会复用同 cwd。
 
         单点定义这个路径 —— 之前 cli.py 的 _build_guests、.gitignore 注释、
         RoomConfig 文档都各自拼一遍，三处口径要同步。
         """
+        if self.isolation == ISOLATION_GLOBAL:
+            return paths.user_data_root / "guests" / self.name
         return room_dir / "guests" / self.name
 
 
@@ -369,6 +393,17 @@ def _build_guests(
                 f"不在 {VALID_MODES} 内"
             )
 
+        isolation_raw = _as_str(
+            g.get("isolation") or DEFAULT_ISOLATION,
+            label=f"[[guest]] {name!r} isolation",
+            toml_path=toml_path,
+        )
+        if isolation_raw not in VALID_ISOLATION:
+            raise RoomConfigError(
+                f"{toml_path}: [[guest]] {name!r} isolation={isolation_raw!r} "
+                f"不在 {sorted(VALID_ISOLATION)} 内"
+            )
+
         # LLM 字段从 guest 表里挑出 LLM_TOML_FIELDS 子集再解析 —— 其它键已被
         # _check_unknown_keys 拦过，这里不会混入。
         llm_subset = {k: g[k] for k in LLM_TOML_FIELDS if k in g}
@@ -383,6 +418,7 @@ def _build_guests(
                 name=name,
                 persona_path=persona_path,
                 permission=permission_raw,
+                isolation=isolation_raw,
                 llm=guest_llm,
             )
         )

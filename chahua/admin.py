@@ -23,12 +23,14 @@ import re
 import shutil
 import tomllib
 from pathlib import Path
-from typing import Any, Literal, Optional, Sequence, TypedDict
+from typing import Any, Callable, Literal, Optional, Sequence, TypedDict
 
 from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
 from .config import (
+    DEFAULT_ISOLATION,
     ORCH_FIELD_BOUNDS,
+    VALID_ISOLATION,
     _build_orchestrator_overrides,
     RoomConfig,
     RoomConfigError,
@@ -54,12 +56,12 @@ class GuestSnapshot(TypedDict, total=False):
     name: str
     persona: str
     permission: str
-    # P4.1 LLM 三件套（all-or-nothing：写 model 才允许 base_url / api_key_env，
+    isolation: str
+    # LLM 三件套（all-or-nothing：写 model 才允许 base_url / api_key_env，
     # 详见 chahua.llm_spec.LLMSpec.from_toml 校验）。
     model: str
     base_url: str
     api_key_env: str
-    # P4.2+: isolation: Literal["room", "global"]
     # P4.3+: extra_mcp_servers: list[dict]
 
 
@@ -74,10 +76,11 @@ class TomlSnapshot(TypedDict, total=False):
     guests: list[GuestSnapshot]
 
 
-# render 时认得的 guest 字段；其它字段位（isolation / extra_mcp_servers）由
-# P4.2+ 加 emit 时一并扩这个 set。
+# render 时认得的 guest 字段；其它字段位（extra_mcp_servers）由 P4.3+ 加 emit 时
+# 一并扩这个 set。
 _ALLOWED_GUEST_EMIT: frozenset[str] = (
-    frozenset({"name", "persona", "permission"}) | frozenset(LLM_TOML_FIELDS)
+    frozenset({"name", "persona", "permission", "isolation"})
+    | frozenset(LLM_TOML_FIELDS)
 )
 
 
@@ -324,6 +327,8 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         )
         # 字段对齐到 11 字符（与上面 name/persona/permission 的视觉宽度匹配，
         # 让 [[guest]] 段读起来连成一块）；api_key_env 自己 11 字符，会占满。
+        if "isolation" in g:
+            lines.append(f"isolation  = {_toml_basic_string(str(g['isolation']))}")
         for key in LLM_TOML_FIELDS:
             if key in g:
                 lines.append(f"{key:<11}= {_toml_basic_string(str(g[key]))}")
@@ -363,9 +368,12 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
     相对值；否则保留 absolute（兼容用户硬编绝对路径的极少数场景）。
 
     还原范围：name / topic / rules / user_md_override / orchestrator_overrides /
-    scoring_llm / summary_llm + 每位 guest 的 name / persona / permission / LLM 三件套。
-    剩下的 guest 字段位（isolation / extra_mcp_servers）由 P4.2+ 加 schema 解析的同
+    scoring_llm / summary_llm + 每位 guest 的 name / persona / permission / isolation /
+    LLM 三件套。剩下的 guest 字段位（extra_mcp_servers）由 P4.3+ 加 schema 解析的同
     PR 一并填这里。
+
+    ``isolation`` 走"默认值不进 snapshot"约定 —— 等于 ``"room"`` 时键不出现，emit 路径
+    不写到 toml，保留用户那条 toml 行的简洁度。
     """
     guests: list[GuestSnapshot] = []
     for gc in rc.guests:
@@ -374,6 +382,8 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
             "persona": _persona_to_relative(gc.persona_path, paths),
             "permission": gc.permission,
         }
+        if gc.isolation != DEFAULT_ISOLATION:
+            g["isolation"] = gc.isolation
         if gc.llm is not None:
             g.update(_llm_spec_to_dict(gc.llm))
         guests.append(g)
@@ -511,6 +521,29 @@ def remove_guest(*, paths: Paths, room_dir: Path, name: str) -> RoomConfig:
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
 
+def _mutate_guest_in_snapshot(
+    snapshot: TomlSnapshot,
+    *,
+    name: str,
+    transform: Callable[[GuestSnapshot], GuestSnapshot],
+) -> None:
+    """``snapshot["guests"]`` 里找名为 ``name`` 的茶客，用 ``transform`` 出的新 dict 替换。
+    没找到 → :class:`ValueError`。``update_guest_*`` 三个 mutator 共用 —— 共享 "find +
+    replace + 404 raise" 骨架，只让调用方负责字段级 transform。
+    """
+    new_guests: list[GuestSnapshot] = []
+    found = False
+    for g in snapshot["guests"]:
+        if g["name"] == name:
+            new_guests.append(transform(g))
+            found = True
+        else:
+            new_guests.append(g)
+    if not found:
+        raise ValueError(f"茶客 {name!r} 不在房间里")
+    snapshot["guests"] = new_guests
+
+
 def update_guest_permission(
     *, paths: Paths, room_dir: Path, name: str, permission: str
 ) -> RoomConfig:
@@ -525,17 +558,10 @@ def update_guest_permission(
     if not is_valid_mode(permission):
         raise ValueError(f"permission={permission!r} 不在 {VALID_MODES} 内")
     snapshot = _read_existing_for_mutate(room_dir, paths)
-    new_guests: list[dict] = []
-    found = False
-    for g in snapshot["guests"]:
-        if g["name"] == name:
-            new_guests.append({**g, "permission": permission})
-            found = True
-        else:
-            new_guests.append(g)
-    if not found:
-        raise ValueError(f"茶客 {name!r} 不在房间里")
-    snapshot["guests"] = new_guests
+    _mutate_guest_in_snapshot(
+        snapshot, name=name,
+        transform=lambda g: {**g, "permission": permission},
+    )
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
 
@@ -600,16 +626,44 @@ def update_guest_llm(
         if spec_dict is not None
         else None
     )
-    new_guests: list[GuestSnapshot] = []
-    for g in snapshot["guests"]:
-        if g["name"] != name:
-            new_guests.append(g)
-            continue
+
+    def _patch(g: GuestSnapshot) -> GuestSnapshot:
         cleaned: GuestSnapshot = {k: v for k, v in g.items() if k not in LLM_TOML_FIELDS}  # type: ignore[misc]
         if validated is not None:
             cleaned.update(validated)  # type: ignore[typeddict-item]
-        new_guests.append(cleaned)
-    snapshot["guests"] = new_guests
+        return cleaned
+
+    _mutate_guest_in_snapshot(snapshot, name=name, transform=_patch)
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def update_guest_isolation(
+    *, paths: Paths, room_dir: Path, name: str,
+    isolation: Literal["room", "global"],
+) -> RoomConfig:
+    """改一位茶客的 ``isolation``（``"room"`` / ``"global"`` 二选一）。
+
+    切换会改变工作目录路径：``room`` → ``<room_dir>/guests/<name>/``；``global`` →
+    ``<user_data_root>/guests/<name>/``。旧路径下的 ``.agentao/memory.db`` /
+    ``sessions/`` **不会自动迁移**（设计 §2.5：单机本地、用户最懂自己的 .agentao
+    干净不干净；自动迁移要处理"两边都有"的 ambiguity 复杂度不值）。
+
+    名字不在册 → :class:`ValueError`；isolation 非法 → :class:`RoomConfigError`。
+    """
+    if isolation not in VALID_ISOLATION:
+        raise RoomConfigError(
+            f"isolation={isolation!r} 不在 {sorted(VALID_ISOLATION)} 内"
+        )
+
+    def _patch(g: GuestSnapshot) -> GuestSnapshot:
+        # 默认值不进 snapshot —— 让回写 toml 时省一行。
+        cleaned: GuestSnapshot = {k: v for k, v in g.items() if k != "isolation"}  # type: ignore[misc]
+        if isolation != DEFAULT_ISOLATION:
+            cleaned["isolation"] = isolation
+        return cleaned
+
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    _mutate_guest_in_snapshot(snapshot, name=name, transform=_patch)
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
 

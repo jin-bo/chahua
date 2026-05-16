@@ -441,6 +441,110 @@ def test_legacy_provider_field_rejected_with_hint(paths):
         admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
 
 
+# ── isolation round-trip + mutator（P4.2）────────────────────────────────
+
+
+def _seed_room_for_isolation(paths):
+    return admin.create_room(
+        paths=paths, room_id="iso", name="iso",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+
+
+def test_isolation_default_is_room(paths):
+    rc = _seed_room_for_isolation(paths)
+    assert rc.guests[0].isolation == "room"
+    # 默认值不进 toml —— 让 [[guest]] 段保持简洁。
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "isolation" not in text
+
+
+def test_update_guest_isolation_round_trip(paths):
+    rc = _seed_room_for_isolation(paths)
+    rc2 = admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="global",
+    )
+    assert rc2.guests[0].isolation == "global"
+    # 重 load 也保留。
+    rc3 = load_room_config(rc.room_dir, paths=paths)
+    assert rc3.guests[0].isolation == "global"
+
+
+def test_update_guest_isolation_back_to_room_drops_field(paths):
+    rc = _seed_room_for_isolation(paths)
+    admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="global",
+    )
+    admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="room",
+    )
+    text = (rc.room_dir / "room.toml").read_text("utf-8")
+    assert "isolation" not in text  # 回默认即省一行
+
+
+def test_workspace_in_room_vs_global(paths):
+    rc = _seed_room_for_isolation(paths)
+    gc_room = rc.guests[0]
+    rc2 = admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="global",
+    )
+    gc_global = rc2.guests[0]
+    ws_room = gc_room.workspace_in(paths=paths, room_dir=rc.room_dir)
+    ws_global = gc_global.workspace_in(paths=paths, room_dir=rc2.room_dir)
+    assert ws_room == rc.room_dir / "guests" / "宝总"
+    assert ws_global == paths.user_data_root / "guests" / "宝总"
+
+
+def test_update_guest_isolation_invalid_rejected(paths):
+    rc = _seed_room_for_isolation(paths)
+    original = (rc.room_dir / "room.toml").read_text("utf-8")
+    with pytest.raises(RoomConfigError, match=r"不在"):
+        admin.update_guest_isolation(
+            paths=paths, room_dir=rc.room_dir, name="宝总", isolation="rogue",
+        )
+    # 写盘前 pre-validate —— 磁盘不动。
+    assert (rc.room_dir / "room.toml").read_text("utf-8") == original
+
+
+def test_update_guest_isolation_unknown_name(paths):
+    rc = _seed_room_for_isolation(paths)
+    with pytest.raises(ValueError, match="不在房间"):
+        admin.update_guest_isolation(
+            paths=paths, room_dir=rc.room_dir, name="路人", isolation="global",
+        )
+
+
+def test_legacy_isolation_load_rejected_bad_value(paths):
+    """raw editor 写非法 isolation → config 拒 + 回滚。"""
+    rc = _seed_room_for_isolation(paths)
+    bad = (
+        '[room]\nname = "x"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+        'isolation = "rogue"\n'
+    )
+    with pytest.raises(RoomConfigError, match=r"isolation="):
+        admin.update_room_toml(rc.room_dir, bad, paths=paths)
+
+
+def test_isolation_preserved_alongside_llm_mutator(paths):
+    """切 isolation 后再改 LLM 不应丢 isolation，反之亦然。"""
+    rc = _seed_room_for_isolation(paths)
+    admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="global",
+    )
+    rc2 = admin.update_guest_llm(
+        paths=paths, room_dir=rc.room_dir, name="宝总",
+        spec_dict={"model": "openai/gpt-4"},
+    )
+    assert rc2.guests[0].isolation == "global"
+    assert rc2.guests[0].llm is not None  # type: ignore[union-attr]
+    rc3 = admin.update_guest_isolation(
+        paths=paths, room_dir=rc.room_dir, name="宝总", isolation="room",
+    )
+    assert rc3.guests[0].llm is not None  # type: ignore[union-attr]
+    assert rc3.guests[0].llm.model == "gpt-4"  # type: ignore[union-attr]
+
+
 # ── TOML 字面写出 ────────────────────────────────────────────────────────
 
 

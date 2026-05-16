@@ -92,6 +92,7 @@ INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
 INBOUND_UPDATE_ROOM_ORCHESTRATOR = "update_room_orchestrator"
 INBOUND_UPDATE_ROOM_LLM = "update_room_llm"
 INBOUND_UPDATE_GUEST_LLM = "update_guest_llm"
+INBOUND_UPDATE_GUEST_ISOLATION = "update_guest_isolation"
 INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
@@ -383,10 +384,14 @@ class ChahuaServer:
                         "command": str(cfg.get("command", "")),
                         "args": [str(a) for a in (cfg.get("args") or [])],
                     })
+            workspace_path = gc.workspace_in(
+                paths=self._paths, room_dir=rc.room_dir,
+            )
             guests.append({
                 "name": gc.name,
                 "permission": gc.permission,
-                "isolation": "room",
+                "isolation": gc.isolation,
+                "workspace_path": str(workspace_path),
                 "avatar_data_uri": gc.read_avatar_data_uri(),
                 "persona_rel": persona_rel,
                 "mcp_trusted": mcp_trusted,
@@ -653,6 +658,32 @@ class ChahuaServer:
         if not self._replace_session(room_dir, sink, label="update_room_llm"):
             return
         _log.info("update_room_llm: section=%r spec=%r", section, spec_dict)
+        self._emit_room_snapshot(sink)
+
+    def _update_guest_isolation(
+        self, *, name: str, isolation: str, sink: EnvelopeSink
+    ) -> None:
+        """改一位茶客的 isolation + 重装 session + 重发 snapshot。
+
+        session 重装是必要的 —— cwd 路径变了，TeaGuest 持的 ``working_directory`` 是
+        agentao 工具 sandbox 边界（无法热改）。改完即 ``_replace_session`` 让那位
+        茶客以新 cwd 起。旧路径下的 ``.agentao/memory.db`` 不自动 rm（设计 §2.5）。
+        """
+        room_dir = self._session.room_config.room_dir
+        try:
+            admin.update_guest_isolation(
+                paths=self._paths, room_dir=room_dir,
+                name=name, isolation=isolation,
+            )
+        except Exception:
+            _log.exception(
+                "update_guest_isolation: name=%r isolation=%r 失败", name, isolation
+            )
+            self._emit_room_snapshot(sink)
+            return
+        if not self._replace_session(room_dir, sink, label="update_guest_isolation"):
+            return
+        _log.info("update_guest_isolation: %r → %r", name, isolation)
         self._emit_room_snapshot(sink)
 
     def _update_guest_llm(
@@ -1161,6 +1192,20 @@ class ChahuaServer:
         await self._cancel_and_drain_inflight()
         self._update_guest_llm(name=name, spec_dict=data.get("spec"), sink=sink)
 
+    async def _inbound_update_guest_isolation(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_ISOLATION)
+        if name is None:
+            return
+        isolation = _require_str(
+            data, "isolation", where=INBOUND_UPDATE_GUEST_ISOLATION
+        )
+        if isolation is None:
+            return
+        await self._cancel_and_drain_inflight()
+        self._update_guest_isolation(name=name, isolation=isolation, sink=sink)
+
     async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
         room_id = _require_str(data, "room_id", where=INBOUND_CREATE_ROOM)
         if room_id is None:
@@ -1316,6 +1361,7 @@ _INBOUND_HANDLERS: dict[str, _InboundHandler] = {
     INBOUND_UPDATE_ROOM_ORCHESTRATOR: ChahuaServer._inbound_update_room_orchestrator,
     INBOUND_UPDATE_ROOM_LLM: ChahuaServer._inbound_update_room_llm,
     INBOUND_UPDATE_GUEST_LLM: ChahuaServer._inbound_update_guest_llm,
+    INBOUND_UPDATE_GUEST_ISOLATION: ChahuaServer._inbound_update_guest_isolation,
     INBOUND_UPDATE_USER_AVATAR: ChahuaServer._inbound_update_user_avatar,
     INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
     INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,

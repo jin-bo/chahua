@@ -88,10 +88,13 @@ def _build_guests(
 ) -> list[tuple[TeaGuest, str]]:
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
-    每位茶客的 ``working_directory`` 走 :meth:`GuestConfig.workspace_in`（约定
-    ``<room_dir>/guests/<name>/``）。同时把 ``work_dir/share`` 链到房间共享目录
+    每位茶客的 ``working_directory`` 走 :meth:`GuestConfig.workspace_in` ——
+    ``isolation == "room"`` 时 ``<room_dir>/guests/<name>/``、``"global"`` 时
+    ``<user_data_root>/guests/<name>/``。同时把 ``work_dir/share`` 软链到房间共享目录
     ``<room_dir>/share/`` —— 用户上传的文件落房间根，茶客在自己 cwd 下用 ``./share/xxx``
     就能 Read（agentao 工具受 working_directory 约束，share 必须挂在 cwd 子树）。
+    isolation=global 茶客在不同房间装配时 ``link_dir_idempotent`` 会自动 retarget 这个
+    share 软链到当前房间。
 
     persona sibling 的 ``mcp.json`` / ``skills/`` 走两套不同的信任策略：
 
@@ -122,7 +125,9 @@ def _build_guests(
             name=gc.name,
             persona_md=persona_md,
             llm_client=guest_clients[gc.name],
-            working_directory=gc.workspace_in(room_config.room_dir),
+            working_directory=gc.workspace_in(
+                paths=paths, room_dir=room_config.room_dir,
+            ),
             room=room,
             permission=gc.permission,
             assets=assets,

@@ -35,6 +35,7 @@ from chahua.server import (
     INBOUND_REMOVE_GUEST,
     INBOUND_SET_PERSONA_MCP_TRUST,
     INBOUND_SWITCH_ROOM,
+    INBOUND_UPDATE_GUEST_ISOLATION,
     INBOUND_UPDATE_GUEST_LLM,
     INBOUND_UPDATE_GUEST_PERMISSION,
     INBOUND_UPDATE_ROOM_LLM,
@@ -143,6 +144,11 @@ class _SpyServer(ChahuaServer):
     def _update_guest_llm(self, *, name, spec_dict, sink):  # type: ignore[override]
         self.calls.append((
             "_update_guest_llm", {"name": name, "spec_dict": spec_dict},
+        ))
+
+    def _update_guest_isolation(self, *, name, isolation, sink):  # type: ignore[override]
+        self.calls.append((
+            "_update_guest_isolation", {"name": name, "isolation": isolation},
         ))
 
     def _update_user_avatar(self, *, data_uri, sink):  # type: ignore[override]
@@ -726,6 +732,40 @@ async def test_update_guest_llm_null_spec_clears(srv: _SpyServer):
     {"type": INBOUND_UPDATE_GUEST_LLM, "name": "宝总", "spec": [{"model": "a/b"}]},  # spec 是 list
 ])
 async def test_update_guest_llm_bad_payload(srv: _SpyServer, payload):
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0
+
+
+# ── update_guest_isolation（P4.2）─────────────────────────────────────────
+
+
+async def test_update_guest_isolation_ok(srv: _SpyServer):
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_GUEST_ISOLATION,
+            "name": "宝总",
+            "isolation": "global",
+        },
+        _sink,
+    )
+    assert srv.cancel_drain_count == 1
+    assert srv.calls == [(
+        "_update_guest_isolation",
+        {"name": "宝总", "isolation": "global"},
+    )]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_GUEST_ISOLATION, "isolation": "room"},   # 缺 name
+    {"type": INBOUND_UPDATE_GUEST_ISOLATION, "name": "宝总"},          # 缺 isolation
+    {"type": INBOUND_UPDATE_GUEST_ISOLATION, "name": "", "isolation": "room"},
+    {"type": INBOUND_UPDATE_GUEST_ISOLATION, "name": "宝总", "isolation": ""},
+    {"type": INBOUND_UPDATE_GUEST_ISOLATION, "name": "宝总", "isolation": 1},
+])
+async def test_update_guest_isolation_bad_payload(srv: _SpyServer, payload):
+    """非法 isolation 值（如 'rogue'）由 admin 层在 _update_guest_isolation 内拒；
+    这里只盯 wire 层的"必字段缺 / 类型错"。"""
     await srv._handle_inbound(payload, _sink)
     assert srv.calls == []
     assert srv.cancel_drain_count == 0
