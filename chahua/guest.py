@@ -24,6 +24,8 @@ from typing import Optional
 from agentao import Agentao
 from agentao.cancellation import CancellationToken
 from agentao.llm import LLMClient
+from agentao.mcp import load_mcp_config
+from agentao.paths import user_root
 from agentao.permissions import PermissionEngine
 
 from .events import (
@@ -34,12 +36,36 @@ from .events import (
     EnvelopeSink,
     new_message_id,
 )
+from .mcp_thread import ThreadedMcpClientManager
 from .permissions import apply_permission_mode
 from .persona_assets import PersonaAssets
 from .room import Message, Room
 from .transport_bridge import ChahuaTransport
 
 _log = logging.getLogger(__name__)
+
+
+def _merged_mcp_configs(
+    working_directory: Path,
+    persona_servers: Optional[dict],
+) -> dict:
+    """Load workspace/user MCP and overlay trusted persona sidecar MCP."""
+    try:
+        configs = load_mcp_config(
+            project_root=working_directory,
+            user_root=user_root(),
+        )
+    except Exception:
+        _log.exception("Failed to load MCP config for %s", working_directory)
+        configs = {}
+    if not persona_servers:
+        return configs
+    merged = dict(configs)
+    for name, cfg in persona_servers.items():
+        if name in merged:
+            _log.info("persona MCP server %r overrides file-loaded config", name)
+        merged[name] = {**cfg, "trust": cfg.get("trust", True)}
+    return merged
 
 
 class TeaGuest:
@@ -75,13 +101,31 @@ class TeaGuest:
         if assets is not None:
             assets.materialize_skills(self.working_directory)
 
+        mcp_manager = None
+        mcp_configs = _merged_mcp_configs(
+            self.working_directory,
+            assets.mcp_servers if assets is not None else None,
+        )
+        if mcp_configs:
+            # chahua constructs TeaGuest inside the websocket event loop.  The
+            # default agentao sync MCP manager nests run_until_complete there,
+            # so use a background-loop manager and inject it as already-owned.
+            # Keep agentao's original file-loaded + persona-extra merge order.
+            mcp_manager = ThreadedMcpClientManager(mcp_configs)
+            try:
+                mcp_manager.connect_all()
+            except Exception:
+                _log.exception("%s: MCP connection failed", self.name)
+                mcp_manager.disconnect_all()
+                mcp_manager = None
+
         self.agent = Agentao(
             working_directory=self.working_directory,
             llm_client=llm_client,
             project_instructions=persona_md,
             transport=self._transport,
             permission_engine=permission_engine,
-            extra_mcp_servers=assets.mcp_servers if assets else None,
+            mcp_manager=mcp_manager,
         )
 
         # tool_runner 是 Agentao.__init__ 里装的，read-only 拦截必须在那之后才能套上。

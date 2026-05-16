@@ -1,14 +1,11 @@
 {
   "mcpServers": {
-    "chrome-devtools": {
+    "amap-maps": {
       "command": "npx",
-      "args": [
-        "-y",
-        "chrome-devtools-mcp@latest",
-	"--no-performance-crux",
-	"--no-usage-statistics",
-        "--autoConnect"
-      ]
+      "args": ["-y", "@amap/amap-maps-mcp-server"],
+      "env": {
+        "AMAP_MAPS_API_KEY": "你的高德地图API密钥"
+      }
     }
   }
 }
