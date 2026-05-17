@@ -29,6 +29,7 @@ from .tasks_store import (
     NON_TERMINAL_STATUSES,
     TaskAlreadyClosedError,
     TaskNotFoundError,
+    build_task_info_payload,
 )
 
 _log = logging.getLogger(__name__)
@@ -101,26 +102,14 @@ class TaskHandlers:
         """下发 ``task_info`` envelope —— 权威快照，前端任务状态以此为准（docs §4.2）。
 
         每次任务状态变更（open / update / decision / artifact）后重发整份
-        ``{tasks, active_task_id}``。task entry 字段沿 :meth:`Task.to_jsonl_dict`，外加
-        ``artifacts`` / ``decisions`` 子列表，让前端一次拿全。空房间也下发（空 tasks），
-        前端用这帧确认任务协议生效。
+        ``{tasks, active_task_id}``。空房间也下发（空 tasks），前端用这帧确认任务协议生效。
+        Payload shape 集中在 :func:`tasks_store.build_task_info_payload`，与
+        :meth:`Orchestrator._kick_detect_new_artifacts` 共享。
         """
-        store = self.server._session.tasks_store
-        tasks_payload = [
-            {
-                **t.to_jsonl_dict(),
-                "artifacts": store.list_artifacts(t.id),
-                "decisions": [d.to_jsonl_dict() for d in store.list_decisions(t.id)],
-            }
-            for t in store.list_tasks()
-        ]
         self._emit_task_envelope(
             sink,
             type=ChahuaEventType.TASK_INFO,
-            data={
-                "tasks": tasks_payload,
-                "active_task_id": store.active_task_id,
-            },
+            data=build_task_info_payload(self.server._session.tasks_store),
         )
 
     async def _inbound_open_task(self, data: dict, sink: EnvelopeSink) -> None:

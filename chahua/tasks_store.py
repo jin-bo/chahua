@@ -611,3 +611,21 @@ class TasksStore:
         }
 
 
+def build_task_info_payload(store: TasksStore) -> dict:
+    """``task_info`` envelope 的 data payload 单点构造（docs §4.2）。
+
+    被两条路径共用：``TaskHandlers._emit_task_info``（每次入站任务变更后重发）
+    和 ``Orchestrator._kick_detect_new_artifacts``（pick 周期末尾扫到新 artifact 后）。
+    两边都依赖同一 shape —— 加字段时改这一处，避免漏改导致前端收到两种 shape。
+    """
+    return {
+        "tasks": [
+            {
+                **t.to_jsonl_dict(),
+                "artifacts": store.list_artifacts(t.id),
+                "decisions": [d.to_jsonl_dict() for d in store.list_decisions(t.id)],
+            }
+            for t in store.list_tasks()
+        ],
+        "active_task_id": store.active_task_id,
+    }

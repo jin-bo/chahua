@@ -36,7 +36,13 @@ _VALID_STATUSES: frozenset[str] = frozenset(typing.get_args(TaskStatus))
 TASK_STATUS_OPEN: TaskStatus = "open"
 MARKED_BY_USER = "user"
 """decisions.marked_by 的唯一合法值（P5.1）；P5.3 起茶客的 propose 也仍通过 UI"采纳"
-转译成 user 入库（设计文档 §6.3 / §8 不变量 #3）。"""
+转译成 user 入库（设计文档 §6.3 / §8 不变量 #3）。也是 ``task_artifact_added.created_by``
+envelope 字段的"用户上传"值（与 :data:`ARTIFACT_CREATED_BY_GUEST` 对称）。"""
+
+ARTIFACT_CREATED_BY_GUEST = "guest"
+"""``task_artifact_added.created_by`` envelope 字段的"茶客自动归集"值（P5.4）。
+茶客直接写 ``./task/<name>`` 后由 ``Orchestrator._kick_detect_new_artifacts`` emit。
+"用户上传"对应值复用 :data:`MARKED_BY_USER`（同 wire 字面 "user"）。"""
 
 TASK_UNTITLED = "(无标题)"
 """title 为空时的展示 fallback。与 ``app/renderer/events.js::TASK_UNTITLED`` 同源
