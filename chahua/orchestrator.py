@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterator, Optional
 
 # Sentinel for "task_id arg not passed" —— 区分 None（显式无任务）vs 缺省（要内部 snapshot）。
@@ -47,7 +48,8 @@ from .events import (
 from .guest import TeaGuest
 from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
-from .summarizer import Summarizer, TaskSummaries
+from .summarizer import SummarySpan, Summarizer, TaskSummaries
+from .task import Decision, Task
 from .tasks_store import TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 
@@ -727,6 +729,104 @@ class Orchestrator:
             await self.task_summaries.kick(
                 self.room, display, block_size=self.config.summary_block_size,
             )
+
+
+# ── task 块渲染（P5.3.1，docs §6.1）──────────────────────────────────────────
+#
+# 纯字符串 renderer：不读 store、不接 self、不背状态分支。closed task / task 不存在的
+# 判断全部在调用方 ``_build_context_for``（P5.3.2）里做 —— 取到不该注入的 task 时调用方
+# 直接跳过本函数，本函数只负责"把已取好的纯数据拼成喂 LLM 的字符串"。
+#
+# 两态：``compact=False`` 走 onboarding 完整块（在"近期梗概"与"最近原文"之间插入）；
+# ``compact=True`` 走 incremental 短 header（1-3 行）。预算控制见模块顶 _FULL_*_CAP 常量。
+# ``task.owner`` 直接渲染原值（raw speaker_id，"user" 或茶客名）—— display name 映射不
+# 属于渲染层，调用方按需在传入前做。
+
+_FULL_DECISIONS_CAP = 5
+"""完整块最多渲染几条决策（取最近 N 条）；超出截断。预算 ≈ 5 × 50 字。"""
+
+_FULL_ARTIFACTS_CAP = 10
+"""完整块 artifact 清单条数上限（首 N 个按名字排序的产物）。"""
+
+_FULL_SUMMARY_TAIL_CAP = 3
+"""完整块"任务近期进展"取 task summary 末几段。"""
+
+_STATUS_DISPLAY: dict[str, str] = {
+    "open": "未开始",
+    "in_progress": "进行中",
+    "blocked": "被阻塞",
+    "done": "已完成",
+    "abandoned": "已放弃",
+}
+"""task.status 字面值 → 中文 label。与前端 ``app/renderer/events.js`` ``TASK_STATUS_OPTIONS``
+同源（手抄但单测会撞，新增 status 时两边都补）。"""
+
+
+def _format_artifact_size(size: int) -> str:
+    """字节数 → 人眼可读（B / KB / MB），artifact 清单展示用。"""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _format_artifact_mtime(mtime_ms: int) -> str:
+    """``YYYY-MM-DD HH:MM`` 本地时区；artifact 清单展示用。"""
+    return datetime.fromtimestamp(mtime_ms / 1000).strftime("%Y-%m-%d %H:%M")
+
+
+def _render_task_block(
+    task: Task,
+    decisions: list[Decision],
+    artifacts: list[dict],
+    summary_tail: list[SummarySpan],
+    *,
+    compact: bool,
+) -> str:
+    """把任务上下文渲染成给茶客 LLM 的文本块（P5.3.1）。
+
+    纯函数：不读 store、不接 self、不背状态分支。closed task / 不存在 task 的判断由
+    调用方 ``_build_context_for``（P5.3.2）处理，调用方决定是否调本函数。
+    """
+    title = task.title or "(无标题)"
+    if compact:
+        first_line = task.goal.split("\n", 1)[0].strip() if task.goal else ""
+        lines = [f"当前任务：{title}"]
+        if first_line:
+            lines.append(f"目标：{first_line}")
+        lines.append("产物可从 ./task/ 读取。")
+        return "\n".join(lines)
+
+    parts: list[str] = [f"当前任务：{title}"]
+    if task.goal:
+        parts.append(f"目标：\n{task.goal}")
+    status_display = _STATUS_DISPLAY.get(task.status, task.status)
+    if task.owner:
+        parts.append(f"状态：{status_display}，负责人：{task.owner}")
+    else:
+        parts.append(f"状态：{status_display}")
+
+    if decisions:
+        cap = decisions[-_FULL_DECISIONS_CAP:]
+        bullets = "\n".join(f"- {d.summary}" for d in cap)
+        parts.append(f"近期决策（最近 {len(cap)} 条）：\n{bullets}")
+
+    if artifacts:
+        cap = artifacts[:_FULL_ARTIFACTS_CAP]
+        bullets = "\n".join(
+            f"- {a['name']} ({_format_artifact_size(a['size'])}, "
+            f"{_format_artifact_mtime(a['mtime_ms'])})"
+            for a in cap
+        )
+        parts.append(f"当前产物清单（不嵌内容，按需走 ./task/ 读取）：\n{bullets}")
+
+    if summary_tail:
+        cap = summary_tail[-_FULL_SUMMARY_TAIL_CAP:]
+        bullets = "\n\n".join(s.text for s in cap)
+        parts.append(f"任务近期进展：\n{bullets}")
+
+    return "\n\n".join(parts)
 
 
 # ── 序列化 ───────────────────────────────────────────────────────────────────
