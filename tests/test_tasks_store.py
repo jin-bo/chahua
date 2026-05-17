@@ -76,6 +76,54 @@ def test_open_task_state_lost_still_resets_active(tmp_path: Path):
     assert store2.active_task_id == t2.id
 
 
+def test_bidirectional_repair_multi_tasks_no_active(tmp_path: Path):
+    """P5.2.6 修复 ③：state 缺 + >1 task → 保持 active=None + 记 warning。"""
+    # 先开两个 task 让盘上有 2 个 task.json
+    store = TasksStore(room_dir=tmp_path)
+    a = store.open_task(title="A", goal="g")
+    b = store.open_task(title="B", goal="g")
+    # 模拟 state.json 丢失
+    (tmp_path / "tasks" / "state.json").unlink()
+    # 重装：不自动选；记 warning
+    store2 = TasksStore(room_dir=tmp_path)
+    assert store2.active_task_id is None
+    warnings = store2.consume_load_warnings()
+    assert len(warnings) == 1
+    assert "2" in warnings[0]  # task 数被报出
+    # 第二次 consume 是空（一次性）
+    assert store2.consume_load_warnings() == []
+    # 两个 task 都还在 —— 用户可在 UI 选 active
+    ids = {t.id for t in store2.list_tasks()}
+    assert ids == {a.id, b.id}
+
+
+def test_bidirectional_repair_multi_tasks_invalid_active(tmp_path: Path):
+    """state.json 指向不存在 task + 仍有 >1 个有效 task → 同样保持 None + warning。"""
+    store = TasksStore(room_dir=tmp_path)
+    store.open_task(title="A", goal="g")
+    store.open_task(title="B", goal="g")
+    # 写一个非法 state.json（指 ghost）
+    (tmp_path / "tasks" / "state.json").write_text(
+        json.dumps({"active_task_id": "task_ghost"}), encoding="utf-8",
+    )
+    store2 = TasksStore(room_dir=tmp_path)
+    assert store2.active_task_id is None
+    warnings = store2.consume_load_warnings()
+    assert len(warnings) == 1
+    # state.json 被重写为 None
+    state = json.loads((tmp_path / "tasks" / "state.json").read_text(encoding="utf-8"))
+    assert state["active_task_id"] is None
+
+
+def test_no_warning_when_single_task_auto_recovers(tmp_path: Path):
+    """修复 ②（state 缺 + 单 task → auto active）不产生 warning。"""
+    store = TasksStore(room_dir=tmp_path)
+    store.open_task(title="t", goal="g")
+    (tmp_path / "tasks" / "state.json").unlink()
+    store2 = TasksStore(room_dir=tmp_path)
+    assert store2.consume_load_warnings() == []
+
+
 def test_bidirectional_repair_state_points_to_missing_task(tmp_path: Path, caplog):
     """① state.json 指向不存在 task → 清回 None + 回写。"""
     (tmp_path / "tasks").mkdir(parents=True)

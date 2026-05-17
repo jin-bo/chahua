@@ -123,6 +123,10 @@ class TasksStore:
     避免 ``list_decisions`` 在每次 ``_emit_task_info`` 时重读 decisions.jsonl。"""
 
     _active_task_id: Optional[str] = field(default=None, init=False, repr=False)
+    _load_warnings: list[str] = field(default_factory=list, init=False, repr=False)
+    """加载期发现但需用户感知的状态（非 fatal）。当前只有 P5.2.6 的"多 task + state.json
+    未指 active" 一项。Server 在首次 ``_emit_room_snapshot`` / ``_replace_session`` 后
+    通过 :meth:`consume_load_warnings` 取走 + emit NOTICE info；每条只 emit 一次。"""
 
     def __post_init__(self) -> None:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -203,6 +207,13 @@ class TasksStore:
         return out
 
     def _resolve_and_repair_active(self) -> None:
+        """双向修复 state.json ↔ task.json（§7.1 / §7.2，docs §10）：
+
+        ① state.json 指向不存在 task → 清回 None + 回写
+        ② state.json 缺 + 唯一 task → 自动设 active + 回写
+        ③ state.json 缺 + 多 task（P5.2 起会发生）→ 保持 None + 记 NOTICE info 让
+           用户在 UI 指定 active；不自动选第一个，避免"用户以为在 A 但消息写到 B"
+        """
         state = read_json_or_none(self.state_path)
         active_raw = (
             state.get("active_task_id")
@@ -217,8 +228,8 @@ class TasksStore:
                 "state.json.active_task_id=%r 不在已加载任务中，清回 None",
                 active_raw,
             )
-        # 双向修复 ②：state 空 + 唯一 task → 恢复
         if len(self._tasks) == 1:
+            # 修复 ②
             (only_id,) = self._tasks.keys()
             self._active_task_id = only_id
             _log.info(
@@ -226,9 +237,24 @@ class TasksStore:
                 only_id,
             )
             self._write_state()
-        elif isinstance(active_raw, str):
-            # ①：state 指向不存在 → 清回 None 并回写
-            self._write_state()
+            return
+        if len(self._tasks) > 1:
+            # 修复 ③：不自动选，让用户在 UI 二次确认。state.json 仍把 None 落盘
+            # （若刚才 active_raw 是非法 str 还得清回，没多写）。
+            if isinstance(active_raw, str):
+                self._write_state()
+            self._load_warnings.append(
+                f"加载发现 {len(self._tasks)} 个任务但 state.json 未指定 active；"
+                "请在任务面板选一个继续，新消息暂归房间级。"
+            )
+            _log.warning(
+                "tasks/state.json 缺 active 且有 %d 个 task.json，保持 active=None 等用户选",
+                len(self._tasks),
+            )
+            return
+        # len == 0
+        if isinstance(active_raw, str):
+            self._write_state()  # 修复 ①
 
     def _write_state(self) -> None:
         """落 state.json。``active_task_id == None`` 时写 ``{"active_task_id": null}`` —— 显式
@@ -276,6 +302,17 @@ class TasksStore:
     def list_decisions(self, task_id: str) -> list[Decision]:
         """返回任务的全部决策（按追加顺序）。从内存镜像取 —— 不再每次重读 decisions.jsonl。"""
         return list(self._decisions.get(task_id, ()))
+
+    def consume_load_warnings(self) -> list[str]:
+        """取走加载期累积的 warnings（清空内部缓冲）。每条 warning 只能被取走一次。
+
+        Server 在 ``_emit_room_snapshot`` 末尾调一次，把每条转成 NOTICE info envelope
+        emit 给前端。:meth:`_resolve_and_repair_active` 当前唯一来源（P5.2.6 多任务无
+        active 的情况）。
+        """
+        out = self._load_warnings
+        self._load_warnings = []
+        return out
 
     def list_events(self, task_id: str) -> list[dict]:
         """返回任务的全部 events.jsonl 记录（按追加顺序）。从盘读 —— 该 API 给 UI / 测试

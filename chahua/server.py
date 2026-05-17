@@ -49,6 +49,7 @@ from .events import (
     ChahuaEventType,
     EnvelopeSink,
     NOTICE_LEVEL_ERROR,
+    NOTICE_LEVEL_INFO,
 )
 from .orchestrator import OrchestratorConfig
 from .persona_assets import discover_assets, persona_relative
@@ -582,10 +583,15 @@ class ChahuaServer:
 
         ``task_info`` 即使房间没任务也下发（空 ``{tasks: [], active_task_id: null}``），
         让前端用这帧确认"P5.1 任务协议生效"，避免老 sidecar 不下发的情况下前端误判。
+
+        P5.2.6 起末尾追发 ``TasksStore`` 加载期累积的 warnings（如"多 task 但无 active"），
+        每条转 NOTICE info envelope。warning 是 consume 一次性的，不会重复 emit。
         """
         self._emit_room_info(sink)
         self._emit_room_history(sink)
         self.task._emit_task_info(sink)
+        for warning in self._session.tasks_store.consume_load_warnings():
+            self._emit_notice(sink, level=NOTICE_LEVEL_INFO, text=warning)
 
     def _clear_room(self, sink: EnvelopeSink) -> None:
         """清空当前房间公共状态 + 重发 room snapshot 让前端复位。
