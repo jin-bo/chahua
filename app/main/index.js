@@ -60,8 +60,10 @@ async function createWindow(wsUrl) {
   // Electron 内部维持 BrowserWindow 引用，模块级 mainWindow 不必要（避免 P3.3+
   // 真要 webContents.send 时再加回来）。
   const win = new BrowserWindow({
-    width: 880,
-    height: 640,
+    width: 1180,
+    height: 760,
+    minWidth: 960,
+    minHeight: 640,
     title: "茶话室",
     webPreferences: {
       preload: PRELOAD_PATH,
