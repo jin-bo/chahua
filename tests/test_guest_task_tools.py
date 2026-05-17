@@ -1,19 +1,16 @@
-"""P5.3.5：TeaGuest 装配 ``register_task_tools`` —— 端到端验证。
+"""TeaGuest 装配 ``register_task_tools`` —— 端到端验证（docs §13 P5.3.5）。
 
-§13 P5.3.5 验收：
+验收：
 ① 装配后 ``agent.tools.tools`` 含三个 ``task_*``
-② 三档权限下（read-only / workspace-write / full-access）三工具均可调（is_read_only=True）
-③ propose 工具调用后 sink 里有 TASK_PROPOSAL envelope
-④ 不破老 P5.2 测试（add_guest / remove_guest / 设权限）—— 通过全套 pytest 不挂
-⑤ guest.py diff 净增不超过 5 行 —— 不在本测试覆盖（commit 自验）
+② 三档权限下（read-only / workspace-write / full-access）三工具均存在且 is_read_only=True
+③ propose 工具调用后 sink 里有 TASK_PROPOSAL envelope（proposer / kind / payload / task_id 都对）
 
-不测 LLM 真调（agentao.arun 要 LLM client）；只测装配后 agent.tools 注册情况 +
-工具实例的 transport.emit_chahua 路径。
+不测 LLM 真调（``agentao.arun`` 要 LLM client）；只验工具注册 + transport.emit_chahua 路径。
+``env_paths`` 走 conftest 共享版本。
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,22 +18,6 @@ import pytest
 from chahua import admin
 from chahua.events import ChahuaEventType
 from chahua.session import build_room_session
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-@pytest.fixture
-def env_paths(tmp_path, monkeypatch):
-    user_data = tmp_path / "userdata"
-    user_data.mkdir()
-    monkeypatch.setenv("CHAHUA_APP_ROOT", str(REPO_ROOT))
-    monkeypatch.setenv("CHAHUA_USER_DATA", str(user_data))
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
-    from chahua._paths import Paths
-    return Paths.from_env()
 
 
 def _build_session(env_paths, *, permission: str = "read-only"):
