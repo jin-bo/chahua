@@ -141,6 +141,18 @@ export function taskStatusLabel(status) {
 // 区分：placeholder 鼓励用户填，本常量是 fallback。
 export const TASK_UNTITLED = "(无标题)";
 
+// owner 选 null 时的展示文案；wire 层 owner = null，UI 层 "全员"。下拉 / meta 都从这里取。
+export const TASK_OWNER_ALL = "全员";
+
+// owner 下拉的选项数据 —— 新任务 modal 与活跃任务卡 owner select 共用同一份 shape，
+// 避免两边各自手抄 "全员" + guest names。返回纯数据让调用方按需挂 DOM / framework。
+export function buildOwnerOptionData(guestNames) {
+  return [
+    { value: "", label: TASK_OWNER_ALL },
+    ...guestNames.map((name) => ({ value: name, label: name })),
+  ];
+}
+
 // 镜像 chahua/tasks_store.py::CLOSED_STATUSES —— 终结态白名单。
 // 渲染层 / inbound 校验都共享这份单一真理源，避免 JS 与 Python 各自手抄 "done" / "abandoned"
 // 字面值，将来加 / 改终结态时漏改一边。

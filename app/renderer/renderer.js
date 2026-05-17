@@ -22,6 +22,7 @@ import {
   NoticeLevel,
   DEFAULT_PERMISSION,
   TASK_UNTITLED,
+  buildOwnerOptionData,
   isTaskClosed,
   taskStatusLabel,
 } from "./events.js";
@@ -973,19 +974,22 @@ const taskPanel = createTaskPanel({
   panelEl: taskPanelEl,
   toggleBtnEl: taskPanelToggleBtn,
   bodyEl: taskPanelBodyEl,
+  // 任务卡所有写都走这里 —— title / goal / owner / status 都打成 patch；按 status 是否
+  // 终结态在本层 smart-route 到 close_task vs update_task wire frame。task_panel.js 对
+  // wire 协议零感知。
   onPatchTask: (taskId, patch) => {
     if (!connected) return;
+    if (patch.status && isTaskClosed(patch.status)) {
+      send({ type: Inbound.CLOSE_TASK, task_id: taskId, status: patch.status });
+      setStatus("", patch.status === "done" ? "标记完成…" : "放弃任务…");
+      return;
+    }
     send({ type: Inbound.UPDATE_TASK, task_id: taskId, patch });
   },
   // 点"其它任务"折叠区的卡片 / composer chip dropdown 都走同一入口。server 端
   // _inbound_set_active_task 走前 cancel inflight turn，前端不必再判 connected 之外
   // 的状态。
   onSetActive: sendSetActiveTask,
-  onCloseTask: (taskId, status) => {
-    if (!connected) return;
-    send({ type: Inbound.CLOSE_TASK, task_id: taskId, status });
-    setStatus("", status === "done" ? "标记完成…" : "放弃任务…");
-  },
   // 每次重渲都 fresh 拉 —— 茶客加 / 删后 owner 下拉同步刷新（room_info 回环会触发
   // taskState 重渲，guests 已先一步在 renderSidebar 里更新）。
   getGuestNames: () => guests.map((g) => g.name),
@@ -1099,16 +1103,12 @@ taskPanelNewBtn.addEventListener("click", () => {
   if (!connected || taskPanelNewBtn.disabled) return;
   newTaskTitleEl.value = "";
   newTaskGoalEl.value = "";
-  // owner 选项：当前 guests + "全员"。submit 时 "" 字符串 → null（语义"不指定"）。
+  // owner 选项与任务卡 owner 下拉同源 —— "" 表示全员，submit 时再 normalize 回 null。
   newTaskOwnerEl.replaceChildren();
-  const noneOpt = document.createElement("option");
-  noneOpt.value = "";
-  noneOpt.textContent = "全员";
-  newTaskOwnerEl.appendChild(noneOpt);
-  for (const g of guests) {
+  for (const data of buildOwnerOptionData(guests.map((g) => g.name))) {
     const opt = document.createElement("option");
-    opt.value = g.name;
-    opt.textContent = g.name;
+    opt.value = data.value;
+    opt.textContent = data.label;
     newTaskOwnerEl.appendChild(opt);
   }
   newTaskOwnerEl.value = "";

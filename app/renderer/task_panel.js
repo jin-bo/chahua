@@ -16,8 +16,10 @@
 import { renderMarkdown } from "./chat_view.js";
 import {
   EventType,
+  TASK_OWNER_ALL,
   TASK_STATUS_OPTIONS,
   TASK_UNTITLED,
+  buildOwnerOptionData,
   isTaskClosed,
   taskStatusLabel,
 } from "./events.js";
@@ -93,20 +95,16 @@ export function createTaskPanel({
   panelEl,
   toggleBtnEl,
   bodyEl,
-  // (taskId, patch) → 发 update_task inbound 的回调。title / goal blur 后调；调用方
-  // 自己判断是否真的有变化（这里只在前后值不同时调）。无 callback 时不挂 inline 编辑。
-  // P5.2.9 起 patch 也可含 owner / status（非终结态）。
+  // (taskId, patch) → 发 update_task / close_task inbound 的回调。任务卡所有写都走
+  // 这条 —— 调用方按 patch.status 是否终结态自己路由到对应 wire frame（让本模块对
+  // 任务房间 wire 协议零感知）。title / goal 也走它。无 callback 时不挂 inline 编辑 +
+  // 不渲染 controls / close 按钮。
   onPatchTask = null,
   // (taskId | null) → 发 set_active_task inbound（P5.2.5）。"其它任务" 折叠区里点
   // 卡片调；无 callback 时该区卡片仍渲染但不响应点击（用作纯只读概览）。
   onSetActive = null,
-  // (taskId, "done" | "abandoned") → 发 close_task inbound（P5.2.5）。任务卡上 "完成
-  // / 放弃" 按钮 + status 下拉选到终结态都走这条，没 callback 时按钮 / 终结态 option
-  // 隐起来。
-  onCloseTask = null,
   // () => string[] —— 当前房间茶客名列表，给 owner 下拉用。每次重渲都 fresh 拉，避免
-  // sidebar 加 / 删茶客后 owner 下拉里漏掉 / 残留人名。无 callback 时 owner 下拉只暴
-  // 露"全员"。
+  // sidebar 加 / 删茶客后 owner 下拉里漏掉 / 残留人名。
   getGuestNames = null,
 }) {
   let collapsed = collapsedPref.read();
@@ -223,9 +221,9 @@ export function createTaskPanel({
 
     if (onPatchTask) {
       card.appendChild(renderTaskCardControls(task));
-    }
-    if (onCloseTask && !isTaskClosed(task.status)) {
-      card.appendChild(renderTaskCardCloseActions(task));
+      if (!isTaskClosed(task.status)) {
+        card.appendChild(renderTaskCardCloseActions(task));
+      }
     }
 
     const meta = document.createElement("dl");
@@ -233,7 +231,7 @@ export function createTaskPanel({
     if (!onPatchTask) {
       // 只读视图保留这两行；可编辑模式下 controls row 已经把 status / owner 暴露成下拉，
       // 再写在 meta 里反而冗余。
-      appendMetaRow(meta, "负责人", task.owner || "全员");
+      appendMetaRow(meta, "负责人", task.owner || TASK_OWNER_ALL);
       appendMetaRow(meta, "状态", taskStatusLabel(task.status));
     }
     if (task.created_at_ms) {
@@ -249,40 +247,26 @@ export function createTaskPanel({
     return card;
   }
 
-  // 任务卡 controls row：status 下拉 + owner 下拉。两个 select 都同步走 onPatchTask，
-  // status 选到终结态时 smart-route 到 onCloseTask（让 "下拉直接选完成" 与 "点完成按钮"
-  // 殊途同归，不强迫用户分两个 UI 路径学）。无 onCloseTask 时终结态 option 被禁用，
-  // 让用户走外部 close_task 路径而不是把状态卡在 update_task 拒收的态。
+  // 任务卡 controls row：status / owner 两个 select。所有写都打成 onPatchTask({patch})
+  // —— 调用方（renderer）按 patch.status 是否终结态再路由到 close_task / update_task。
   function renderTaskCardControls(task) {
     const wrap = document.createElement("div");
     wrap.className = "task-card-controls";
     wrap.appendChild(makeSelectField({
       label: "状态",
       value: task.status,
-      options: TASK_STATUS_OPTIONS.map((o) => ({
-        value: o.value,
-        label: o.label,
-        // 没 onCloseTask 时禁用终结态选项，避免 update_task 抛 NOTICE error。
-        disabled: !onCloseTask && isTaskClosed(o.value),
-      })),
+      options: TASK_STATUS_OPTIONS,
       onChange: (next) => {
         if (next === task.status) return;
-        if (isTaskClosed(next) && onCloseTask) {
-          onCloseTask(task.id, next);
-        } else {
-          onPatchTask(task.id, { status: next });
-        }
+        onPatchTask(task.id, { status: next });
       },
     }));
     const guestNames = getGuestNames ? getGuestNames() : [];
     wrap.appendChild(makeSelectField({
       label: "负责人",
-      // owner 为 null 时 select 显示空 value option = "全员"。
       value: task.owner ?? "",
-      options: [
-        { value: "", label: "全员" },
-        ...guestNames.map((name) => ({ value: name, label: name })),
-      ],
+      options: buildOwnerOptionData(guestNames),
+      staleLabel: (v) => `${v}（已不在房间）`,
       onChange: (next) => {
         const normalized = next === "" ? null : next;
         if (normalized === task.owner) return;
@@ -292,7 +276,10 @@ export function createTaskPanel({
     return wrap;
   }
 
-  function makeSelectField({ label, value, options, onChange }) {
+  // makeSelectField 是 domain-neutral 的 select 助手；status / owner / 未来 LLM 模型
+  // 等下拉共用。staleLabel 让调用方决定"value 不在 options 列表时怎么显示" —— owner
+  // 拼"（已不在房间）"，其它场景默认 raw value。
+  function makeSelectField({ label, value, options, onChange, staleLabel = (v) => v }) {
     const fieldLabel = document.createElement("label");
     fieldLabel.className = "task-card-control";
     const labelEl = document.createElement("span");
@@ -308,13 +295,13 @@ export function createTaskPanel({
       if (opt.disabled) option.disabled = true;
       select.appendChild(option);
     }
-    // value 不在 options 列表里时 select.value 会回到空 —— 显式找一遍兜底 owner 是某个
-    // 已离开的茶客名这种边界情况（保留原 label 但不让用户误以为 active=全员）。
+    // value 不在 options 列表 → select.value 会回到空。挂一个 ghost option 兜底
+    // （owner 是某个已离开茶客名时不让用户误以为 active=全员）。
     select.value = value;
     if (select.value !== value) {
       const ghost = document.createElement("option");
       ghost.value = value;
-      ghost.textContent = `${value}（已不在房间）`;
+      ghost.textContent = staleLabel(value);
       select.appendChild(ghost);
       select.value = value;
     }
@@ -326,21 +313,19 @@ export function createTaskPanel({
   function renderTaskCardCloseActions(task) {
     const wrap = document.createElement("div");
     wrap.className = "task-card-actions";
-    const doneBtn = document.createElement("button");
-    doneBtn.type = "button";
-    doneBtn.className = "task-card-close-btn task-card-close-done";
-    doneBtn.textContent = "✓ 完成";
-    doneBtn.title = "把任务推到终结态 done";
-    doneBtn.addEventListener("click", () => onCloseTask(task.id, "done"));
-    wrap.appendChild(doneBtn);
-    const abandonBtn = document.createElement("button");
-    abandonBtn.type = "button";
-    abandonBtn.className = "task-card-close-btn task-card-close-abandoned";
-    abandonBtn.textContent = "✗ 放弃";
-    abandonBtn.title = "把任务推到终结态 abandoned";
-    abandonBtn.addEventListener("click", () => onCloseTask(task.id, "abandoned"));
-    wrap.appendChild(abandonBtn);
+    wrap.appendChild(makeCloseBtn(task, "done", "✓ 完成"));
+    wrap.appendChild(makeCloseBtn(task, "abandoned", "✗ 放弃"));
     return wrap;
+  }
+
+  function makeCloseBtn(task, status, label) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `task-card-close-btn task-card-close-${status}`;
+    btn.textContent = label;
+    btn.title = `把任务推到终结态 ${status}`;
+    btn.addEventListener("click", () => onPatchTask(task.id, { status }));
+    return btn;
   }
 
   // contenteditable inline 编辑器 —— focus 时记原值，blur 时若文本变了就调
