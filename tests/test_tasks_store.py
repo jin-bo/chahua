@@ -17,6 +17,7 @@ import pytest
 
 from chahua.tasks_store import (
     ArtifactSourceMissingError,
+    TaskAlreadyClosedError,
     TaskNotFoundError,
     TasksStore,
 )
@@ -126,6 +127,135 @@ def test_update_task_not_found(tmp_path: Path):
     store = TasksStore(room_dir=tmp_path)
     with pytest.raises(TaskNotFoundError):
         store.update_task("task_nope", title="x")
+
+
+# ── P5.2.2: set_active / close_task / events.jsonl ─────────────────────────
+
+
+def test_set_active_to_missing_task_raises(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    store.open_task(title="t", goal="g")
+    with pytest.raises(TaskNotFoundError):
+        store.set_active("task_ghost")
+
+
+def test_set_active_to_same_is_noop(tmp_path: Path):
+    """切换到当前 active：不写 state.json 也不发 events.jsonl 记录。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    # open_task 已经写过 became_active 一行
+    events_before = store.list_events(t.id)
+    store.set_active(t.id)
+    events_after = store.list_events(t.id)
+    assert events_after == events_before
+
+
+def test_set_active_logs_both_sides(tmp_path: Path):
+    """切换 A → B：A 落 became_inactive，B 落 became_active；state.json 指向 B。"""
+    store = TasksStore(room_dir=tmp_path)
+    a = store.open_task(title="A", goal="g")
+    b = store.open_task(title="B", goal="g")  # 自动成为 active
+    # open_task(b) 已经把 a 切走 + b 接上 —— 验证两边都有相应事件
+    a_kinds = [e["kind"] for e in store.list_events(a.id)]
+    b_kinds = [e["kind"] for e in store.list_events(b.id)]
+    assert a_kinds == ["became_active", "became_inactive"]
+    assert b_kinds == ["became_active"]
+    # 显式切回 a，A 再次 became_active，B 落 became_inactive
+    store.set_active(a.id)
+    assert [e["kind"] for e in store.list_events(a.id)] == [
+        "became_active", "became_inactive", "became_active",
+    ]
+    assert [e["kind"] for e in store.list_events(b.id)] == [
+        "became_active", "became_inactive",
+    ]
+
+
+def test_set_active_to_none(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    store.set_active(None)
+    assert store.active_task_id is None
+    state = json.loads((tmp_path / "tasks" / "state.json").read_text(encoding="utf-8"))
+    assert state["active_task_id"] is None
+    # events 行尾是 became_inactive
+    kinds = [e["kind"] for e in store.list_events(t.id)]
+    assert kinds[-1] == "became_inactive"
+
+
+def test_close_task_done_sets_state_active_none(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    closed = store.close_task(t.id, status="done")
+    assert closed.status == "done"
+    assert closed.closed_at_ms is not None
+    # 当前 active 被关 → state.active = None
+    assert store.active_task_id is None
+    # events: became_active（open 时）→ closed → became_inactive
+    kinds = [e["kind"] for e in store.list_events(t.id)]
+    assert kinds == ["became_active", "closed", "became_inactive"]
+    # closed event 带 status payload
+    closed_event = next(e for e in store.list_events(t.id) if e["kind"] == "closed")
+    assert closed_event["status"] == "done"
+
+
+def test_close_task_abandoned(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    store.close_task(t.id, status="abandoned")
+    assert store.get_task(t.id).status == "abandoned"
+
+
+def test_close_task_non_active_keeps_active(tmp_path: Path):
+    """关闭非 active 任务 —— state.active 不变；只该任务落 closed 事件。"""
+    store = TasksStore(room_dir=tmp_path)
+    a = store.open_task(title="A", goal="g")
+    b = store.open_task(title="B", goal="g")  # B 是 active
+    store.close_task(a.id, status="done")
+    assert store.active_task_id == b.id
+    assert store.get_task(a.id).status == "done"
+    # A 没 became_inactive（来自 close 自身），保留 open_task 时的 became_inactive（因为
+    # 开 B 时把 A 切走）
+    a_kinds = [e["kind"] for e in store.list_events(a.id)]
+    assert a_kinds == ["became_active", "became_inactive", "closed"]
+    # B 仍是 active —— events 只 became_active 一条
+    assert [e["kind"] for e in store.list_events(b.id)] == ["became_active"]
+
+
+def test_close_already_closed_raises(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    store.close_task(t.id, status="done")
+    with pytest.raises(TaskAlreadyClosedError):
+        store.close_task(t.id, status="abandoned")
+
+
+def test_close_task_rejects_non_terminal_status(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    with pytest.raises(ValueError):
+        store.close_task(t.id, status="in_progress")  # type: ignore[arg-type]
+
+
+def test_close_task_not_found(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    with pytest.raises(TaskNotFoundError):
+        store.close_task("task_ghost", status="done")
+
+
+def test_events_jsonl_roundtrip_three_lines(tmp_path: Path):
+    """① open A → ② open B（A 切走，B 上）→ ③ close B —— B 的 events.jsonl 3 行可读回。"""
+    store = TasksStore(room_dir=tmp_path)
+    store.open_task(title="A", goal="g")
+    b = store.open_task(title="B", goal="g")
+    store.close_task(b.id, status="done")
+    # B 的 events：became_active（open）+ closed + became_inactive = 3 行
+    events = store.list_events(b.id)
+    assert len(events) == 3
+    assert [e["kind"] for e in events] == ["became_active", "closed", "became_inactive"]
+    # 重装 store 还能读回（落盘宽容）
+    store2 = TasksStore(room_dir=tmp_path)
+    events2 = store2.list_events(b.id)
+    assert events2 == events
 
 
 def test_add_decision_appends_jsonl(tmp_path: Path):

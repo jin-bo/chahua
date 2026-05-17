@@ -14,7 +14,18 @@ state.json↔task.json" 集中实现（§7.1 / §10）。
         ├── decisions.jsonl        # append-only
         └── artifacts/             # 文件
 
-不写 `events.jsonl` / `<id>/summary.jsonl` —— 留待 P5.2 接 status / 摘要时再加。
+P5.2 起在每个 task 目录下追写 ``events.jsonl``（task 级状态 / 字段变更历史，append-only）；
+任务级 ``summary.jsonl`` 仍留待 P5.2.12 接 summarizer 时再写。
+
+事件 schema（events.jsonl 一行一条）：
+
+    {"ts_ms": <int>, "kind": "became_active" | "became_inactive"
+                             | "closed"           # P5.2.2，payload: {"status": "done"|"abandoned"}
+                             | "field_changed"    # P5.2.3，payload: {"field", "before", "after"}
+     ...payload}
+
+落盘宽容（§8.1）：加载 events.jsonl 用 :func:`read_jsonl_skip_bad`，未知 ``kind`` 整行
+跳过；本模块当前只**写**不**读**（list_events 给上层 UI / 测试用）。
 
 关键约束（docs §7.1 / §7.2）：
 
@@ -47,7 +58,10 @@ from ._persist import (
     write_json_atomic,
 )
 from .events import now_ms
-from .task import Decision, Task
+from .task import Decision, Task, TaskStatus
+
+# close_task 仅接受这两个"终结态"。in_progress / blocked / open 走 update_task。
+_CLOSED_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
 
 _log = logging.getLogger(__name__)
 
@@ -57,6 +71,7 @@ _TASKS_DIRNAME = "tasks"
 _STATE_FILENAME = "state.json"
 _TASK_FILENAME = "task.json"
 _DECISIONS_FILENAME = "decisions.jsonl"
+_EVENTS_FILENAME = "events.jsonl"  # P5.2.2 起
 _ARTIFACTS_DIRNAME = "artifacts"
 
 
@@ -71,7 +86,12 @@ class TaskExistsError(TasksStoreError):
 
 
 class TaskNotFoundError(TasksStoreError):
-    """``update_task`` / ``add_decision`` / ``attach_artifact`` 传了不存在的 task_id。"""
+    """``update_task`` / ``add_decision`` / ``attach_artifact`` / ``set_active`` /
+    ``close_task`` 传了不存在的 task_id。"""
+
+
+class TaskAlreadyClosedError(TasksStoreError):
+    """``close_task`` 被调用在已经 closed 的任务上（防前端误重复点关闭）。"""
 
 
 class ArtifactSourceMissingError(TasksStoreError):
@@ -120,6 +140,9 @@ class TasksStore:
 
     def decisions_path(self, task_id: str) -> Path:
         return self.task_dir(task_id) / _DECISIONS_FILENAME
+
+    def events_path(self, task_id: str) -> Path:
+        return self.task_dir(task_id) / _EVENTS_FILENAME
 
     def artifacts_dir(self, task_id: str) -> Path:
         return self.task_dir(task_id) / _ARTIFACTS_DIRNAME
@@ -211,6 +234,17 @@ class TasksStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(path, task.to_jsonl_dict())
 
+    def _append_event(self, task_id: str, kind: str, **payload: object) -> None:
+        """task 级 events.jsonl append 一条 ``{ts_ms, kind, ...payload}``。
+
+        unknown task_id 在调用方就该过滤掉；这里不再校验（active_changed / closed 都
+        是 mutator 里现场拼，不会传错 id）。``append_jsonl`` 父目录不存在不补建 —— task
+        目录在 :meth:`open_task` 已经 ``mkdir(parents=True, exist_ok=True)``。
+        """
+        record: dict = {"ts_ms": now_ms(), "kind": kind}
+        record.update(payload)
+        append_jsonl(self.events_path(task_id), record)
+
     # ── 读 API ──────────────────────────────────────────────────────────
 
     @property
@@ -232,6 +266,14 @@ class TasksStore:
     def list_decisions(self, task_id: str) -> list[Decision]:
         """返回任务的全部决策（按追加顺序）。从内存镜像取 —— 不再每次重读 decisions.jsonl。"""
         return list(self._decisions.get(task_id, ()))
+
+    def list_events(self, task_id: str) -> list[dict]:
+        """返回任务的全部 events.jsonl 记录（按追加顺序）。从盘读 —— 该 API 给 UI / 测试
+        round-trip 用，不进 ``task_info`` envelope（前端目前不渲染状态历史）。
+
+        坏行按 ``read_jsonl_skip_bad`` 跳过；不存在 → 空 list。
+        """
+        return list(read_jsonl_skip_bad(self.events_path(task_id)))
 
     def list_artifacts(self, task_id: str) -> list[dict]:
         """artifacts/ 目录扫，返回 ``[{name, size, mtime_ms, rel}, ...]``，按名升序。
@@ -276,7 +318,7 @@ class TasksStore:
         进历史列表（docs §7.2）。P5.1 的 :class:`TaskExistsError` 不再抛。
         """
         task = Task.new(title=title, goal=goal, owner=owner, task_id=task_id)
-        # 顺序：先建目录 + 写 task.json，再改内存 + 推 active + 写 state.json。
+        # 顺序：先建目录 + 写 task.json，再改内存 + 推 active + 写 state.json + events.jsonl。
         # 任何一步抛 OSError 都要把已落的盘 / 内存回滚到 "open 没发生" 的状态 —— 服务端
         # 把 OSError 当 "开任务失败" 报给前端，本函数也必须让 store 实际未开。
         self.task_dir(task.id).mkdir(parents=True, exist_ok=True)
@@ -289,16 +331,81 @@ class TasksStore:
         prev_active = self._active_task_id
         self._tasks[task.id] = task
         self._decisions[task.id] = []
-        self._active_task_id = task.id
         try:
-            self._write_state()
+            # set_active 也会写 state.json + 两边的 events.jsonl —— 失败时整体回滚到
+            # "open 没发生"。set_active 内部如果抛 OSError，state.json 可能已被改 / 也可能
+            # 没被改；这里统一按 "失败" 处理，回写 state.json 到 prev_active 兜底。
+            self.set_active(task.id)
         except OSError:
-            self._active_task_id = prev_active
             self._tasks.pop(task.id, None)
             self._decisions.pop(task.id, None)
+            self._active_task_id = prev_active
+            try:
+                self._write_state()
+            except OSError:
+                _log.warning("open_task rollback: state.json 写回 prev_active 失败")
             shutil.rmtree(self.task_dir(task.id), ignore_errors=True)
             raise
         return task
+
+    def set_active(self, task_id: Optional[str]) -> None:
+        """切换 active task。
+
+        ``task_id`` 必须是已存在的 task 或 ``None``。等于当前 active 时是 no-op（不写
+        state.json 不发事件）。切换时：旧 active 落 ``became_inactive``、新 active 落
+        ``became_active``（两条 events.jsonl 行）；state.json 落新值。
+
+        ``TaskNotFoundError`` 在传入 id 不在 ``self._tasks`` 时抛。
+        """
+        if task_id is not None and task_id not in self._tasks:
+            raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
+        prev = self._active_task_id
+        if prev == task_id:
+            return  # no-op
+        self._active_task_id = task_id
+        try:
+            self._write_state()
+        except OSError:
+            self._active_task_id = prev  # 不写 events.jsonl
+            raise
+        # state.json 落盘成功后再写 events.jsonl —— 两边失败 events 缺一行可接受（落盘
+        # 宽容 §8.1），缺一行不影响 task_info 权威快照（events 是 hint 历史，不参与
+        # state 重建）。
+        if prev is not None:
+            self._append_event(prev, "became_inactive")
+        if task_id is not None:
+            self._append_event(task_id, "became_active")
+
+    def close_task(self, task_id: str, *, status: TaskStatus) -> Task:
+        """把任务状态推到终结态（``"done"`` / ``"abandoned"``）+ 写 closed_at_ms。
+
+        若该任务当前是 active，连带调 :meth:`set_active(None)`（会写 became_inactive 行）。
+        已经 closed 的任务再 close → :class:`TaskAlreadyClosedError`。其它 status 值 →
+        ``ValueError``（应走 :meth:`update_task`）。
+        """
+        if status not in _CLOSED_STATUSES:
+            raise ValueError(
+                f"close_task: status={status!r} 不是终结态；in_progress / blocked 走 update_task"
+            )
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
+        if task.status in _CLOSED_STATUSES:
+            raise TaskAlreadyClosedError(
+                f"task {task_id!r} 已经 status={task.status!r}，不能重复关闭"
+            )
+        now = now_ms()
+        new_task = dataclasses.replace(
+            task, status=status, updated_at_ms=now, closed_at_ms=now,
+        )
+        self._write_task(new_task)
+        self._tasks[task.id] = new_task
+        self._append_event(task.id, "closed", status=status)
+        if self._active_task_id == task.id:
+            # set_active(None) 会写 became_inactive 行 + state.json。失败时本函数仍返
+            # 新 task（关闭已落盘）；上层应当看 state.json 与 task.status 一致性自愈。
+            self.set_active(None)
+        return new_task
 
     def update_task(
         self,
