@@ -14,8 +14,18 @@
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
-import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION } from "./events.js";
 import {
+  EventType,
+  Status,
+  Inbound,
+  ScoreKind,
+  NoticeLevel,
+  DEFAULT_PERMISSION,
+  isTaskClosed,
+  taskStatusLabel,
+} from "./events.js";
+import {
+  attachPopoverDismissHandlers,
   closeActionPopover,
   openActionPopover,
 } from "./ui_popover.js";
@@ -964,36 +974,162 @@ const taskPanel = createTaskPanel({
     if (!connected) return;
     send({ type: Inbound.UPDATE_TASK, task_id: taskId, patch });
   },
-  // 点"其它任务"折叠区的卡片 → 切 active。任务名先一步进 status 提示，回环到的
-  // task_info 会让面板重渲；server 端 _inbound_set_active_task 走前 cancel inflight turn，
-  // 没必要在前端再判 connected 之外的状态。
-  onSetActive: (taskId) => {
-    if (!connected) return;
-    send({ type: Inbound.SET_ACTIVE_TASK, task_id: taskId });
-    setStatus("", "切换任务…");
-  },
+  // 点"其它任务"折叠区的卡片 / composer chip dropdown 都走同一入口。server 端
+  // _inbound_set_active_task 走前 cancel inflight turn，前端不必再判 connected 之外
+  // 的状态。
+  onSetActive: sendSetActiveTask,
 });
 
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json
 // 丢失时仍 disable，防止悄悄允许开第二个（docs §7.1 实现项第 4 条）。
-taskState.subscribe(() => {
+//
+// 上次写过的 chip 状态 —— P5.2.8 chip 升级到下拉后，render 出 [label] + [▾] 双节点；
+// task_info 频繁回环（每 artifact / decision / update 一次），靠这个签名跳过无变化的
+// DOM 写避免无谓 layout invalidation。
+let _lastChipKey = "";
+taskState.subscribe((state) => {
   const active = taskState.getActiveTask();
-  if (active) {
-    const label = `📋 ${active.title || "(无标题)"}`;
-    composerTaskChipEl.hidden = false;
-    // 标题没变就不写 —— 多数 task_info 是 artifact / decision 触发的，title 没动；
-    // 避免无谓的 textContent 写触发 layout invalidation。
-    if (composerTaskChipEl.textContent !== label) {
-      composerTaskChipEl.textContent = label;
-      composerTaskChipEl.title = `当前任务：${active.title || "(无标题)"}`;
+  const hasAny = state.tasks.length > 0;
+  // 0 任务 → 整个 chip 隐起来（与 P5.1 同口径，避免点开"房间级"下拉发现啥可切的都没）
+  composerTaskChipEl.hidden = !hasAny;
+  if (hasAny) {
+    const labelText = active
+      ? `📋 ${active.title || "(无标题)"}`
+      : "🗨 房间级";
+    const titleHint = active
+      ? `当前任务：${active.title || "(无标题)"} —— 点击切换`
+      : "当前未挂任务（房间级闲聊）—— 点击切到任务";
+    const key = `${active ? active.id : "-"}|${labelText}`;
+    if (key !== _lastChipKey) {
+      composerTaskChipEl.replaceChildren();
+      const label = document.createElement("span");
+      label.className = "composer-task-chip-label";
+      label.textContent = labelText;
+      const chev = document.createElement("span");
+      chev.className = "composer-task-chip-chevron";
+      chev.textContent = "▾";
+      composerTaskChipEl.appendChild(label);
+      composerTaskChipEl.appendChild(chev);
+      composerTaskChipEl.title = titleHint;
+      composerTaskChipEl.classList.toggle("composer-task-chip-empty", !active);
+      _lastChipKey = key;
     }
-  } else {
-    composerTaskChipEl.hidden = true;
   }
   // body class 给 CSS 用 —— 控制 share/ pill 上 "拷贝到当前任务" 按钮是否可见。
   document.body.classList.toggle("has-active-task", !!active);
   updateNewTaskBtn();
+});
+
+// composer chip dropdown（P5.2.8）—— 列所有 status != closed 的任务 + "🗨 房间级"
+// 选项，当前 active 标 .selected。chip 在 composer 底栏，popover 走 anchor 上方位置
+// （anchor 下方一定溢出屏幕）。dismiss 沿用 ui_popover.attachPopoverDismissHandlers：
+// outside mousedown / ESC → close；同 anchor 再点 chip 也 toggle 关闭。
+let _chipDropdownEl = null;
+let _detachChipDismiss = null;
+
+function closeTaskChipDropdown() {
+  if (_chipDropdownEl) {
+    _chipDropdownEl.remove();
+    _chipDropdownEl = null;
+  }
+  if (_detachChipDismiss) {
+    _detachChipDismiss();
+    _detachChipDismiss = null;
+  }
+}
+
+function openTaskChipDropdown() {
+  if (!connected) return;
+  if (_chipDropdownEl) {
+    closeTaskChipDropdown();
+    return;
+  }
+  // 跨 popover 互斥：开 chip 前关 action / permission（反向靠 outside-mousedown 兜底）。
+  closeActionPopover();
+  closePermissionPopover();
+  const state = taskState.getState();
+  const active = taskState.getActiveTask();
+  // 列：所有非终结态任务 + 当前 active（即使是 closed，也保留让用户看到自己挂在哪）。
+  const items = state.tasks.filter(
+    (t) => !isTaskClosed(t.status) || (active && t.id === active.id),
+  );
+  const pop = document.createElement("div");
+  pop.className = "popover task-chip-dropdown";
+  pop.appendChild(makeChipDropdownItem({
+    label: "🗨 房间级",
+    desc: active ? "不归任何任务（聊天回到房间级闲聊）" : "当前选中",
+    selected: !active,
+    onClick: () => active && sendSetActiveTask(null),
+  }));
+  for (const t of items) {
+    const isCurrent = !!(active && t.id === active.id);
+    pop.appendChild(makeChipDropdownItem({
+      label: `📋 ${t.title || "(无标题)"}`,
+      desc: isCurrent ? "当前选中" : `状态：${taskStatusLabel(t.status)}`,
+      selected: isCurrent,
+      onClick: () => !isCurrent && sendSetActiveTask(t.id),
+    }));
+  }
+  document.body.appendChild(pop);
+  positionPopoverAboveAnchor(pop, composerTaskChipEl);
+  _chipDropdownEl = pop;
+  _detachChipDismiss = attachPopoverDismissHandlers(pop, closeTaskChipDropdown);
+}
+
+function makeChipDropdownItem({ label, desc, selected, onClick }) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "popover-option task-chip-option";
+  // ``.current`` 与 permission popover 同口径 —— 已是当前态，cursor: default + hover
+  // 不变色（自然提示"点这没用"），不必单独写 disabled / aria-pressed。
+  if (selected) btn.classList.add("current");
+  const meta = document.createElement("span");
+  meta.className = "popover-option-meta";
+  const labelEl = document.createElement("span");
+  labelEl.className = "popover-option-label";
+  labelEl.textContent = label;
+  meta.appendChild(labelEl);
+  if (desc) {
+    const descEl = document.createElement("span");
+    descEl.className = "popover-option-desc";
+    descEl.textContent = desc;
+    meta.appendChild(descEl);
+  }
+  btn.appendChild(meta);
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    closeTaskChipDropdown();
+    try { onClick(); } catch (e) { console.error("chip dropdown click", e); }
+  });
+  return btn;
+}
+
+function positionPopoverAboveAnchor(pop, anchor) {
+  // chip 永远在窗口底栏 —— anchor 下方一定溢出屏幕。先按 anchor 顶 + bottom 锚定让
+  // popover "向上展开"；若高度太大顶到窗口顶（罕见，>20 个任务时才会），退回到 anchor
+  // 下方（用户得滚 composer 才看到下半部分，但至少不裁切）。
+  const rect = anchor.getBoundingClientRect();
+  pop.style.position = "fixed";
+  pop.style.left = `${Math.round(rect.left)}px`;
+  pop.style.bottom = `${Math.round(window.innerHeight - rect.top + 6)}px`;
+  pop.style.top = "";
+  const popRect = pop.getBoundingClientRect();
+  if (popRect.top < 8) {
+    pop.style.bottom = "";
+    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
+  }
+}
+
+function sendSetActiveTask(taskId) {
+  if (!connected) return;
+  send({ type: Inbound.SET_ACTIVE_TASK, task_id: taskId });
+  setStatus("", taskId == null ? "切回房间级…" : "切换任务…");
+}
+
+composerTaskChipEl.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  openTaskChipDropdown();
 });
 
 taskPanelNewBtn.addEventListener("click", () => {
