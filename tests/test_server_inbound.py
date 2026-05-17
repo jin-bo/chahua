@@ -25,6 +25,7 @@ import pytest
 
 from chahua.server import (
     ChahuaServer,
+    _bind_inbound_handlers,
     INBOUND_ADD_GUEST,
     INBOUND_CANCEL,
     INBOUND_CLEAR_ROOM,
@@ -53,12 +54,119 @@ from chahua.server import (
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
 
+from chahua.server_inbound_admin import AdminHandlers
+from chahua.server_inbound_io import IOHandlers
+from chahua.server_inbound_settings import SettingsHandlers
+from chahua.server_inbound_task import TaskHandlers
+
+
+# 各 spy slot **继承**真实 handler，自动复用 ``_inbound_*`` payload 校验；只覆盖 worker
+# 把调用参数记到 ``self.server.calls``，路由测拦截到这一层就够，不真改 toml / 装 session。
+
+
+class _SpyAdmin(AdminHandlers):
+    def _add_guest(self, *, persona, name, permission, sink):
+        self.server.calls.append((
+            "_add_guest",
+            {"persona": persona, "name": name, "permission": permission},
+        ))
+
+    def _remove_guest(self, *, name, sink):
+        self.server.calls.append(("_remove_guest", {"name": name}))
+
+    def _set_persona_mcp_trust(self, *, persona_rel, trusted, sink):
+        self.server.calls.append((
+            "_set_persona_mcp_trust",
+            {"persona_rel": persona_rel, "trusted": trusted},
+        ))
+
+    def _update_guest_permission(self, *, name, permission, sink):
+        self.server.calls.append((
+            "_update_guest_permission",
+            {"name": name, "permission": permission},
+        ))
+
+    def _create_room(self, *, room_id, name, topic, rules, guests, sink):
+        self.server.calls.append((
+            "_create_room",
+            {
+                "room_id": room_id, "name": name, "topic": topic,
+                "rules": rules, "guests": guests,
+            },
+        ))
+
+    def _delete_room(self, *, room_id, sink):
+        self.server.calls.append(("_delete_room", {"room_id": room_id}))
+
+    def _update_room_orchestrator(self, *, overrides, sink):
+        self.server.calls.append(("_update_room_orchestrator", {"overrides": overrides}))
+
+    def _update_room_llm(self, *, section, spec_dict, sink):
+        self.server.calls.append((
+            "_update_room_llm", {"section": section, "spec_dict": spec_dict},
+        ))
+
+    def _update_guest_llm(self, *, name, spec_dict, sink):
+        self.server.calls.append((
+            "_update_guest_llm", {"name": name, "spec_dict": spec_dict},
+        ))
+
+    def _update_guest_isolation(self, *, name, isolation, sink):
+        self.server.calls.append((
+            "_update_guest_isolation", {"name": name, "isolation": isolation},
+        ))
+
+    def _update_guest_extra_mcp(self, *, name, servers, sink):
+        self.server.calls.append((
+            "_update_guest_extra_mcp", {"name": name, "servers": servers},
+        ))
+
+
+class _SpySettings(SettingsHandlers):
+    def _update_user_md(self, *, content, sink):
+        self.server.calls.append(("_update_user_md", {"content": content}))
+
+    def _update_room_toml(self, *, content, sink):
+        self.server.calls.append(("_update_room_toml", {"content": content}))
+
+    def _update_user_avatar(self, *, data_uri, sink):
+        self.server.calls.append(("_update_user_avatar", {"data_uri": data_uri}))
+
+
+class _SpyIO(IOHandlers):
+    def _upload_file(self, *, filename, content_b64, sink):
+        self.server.calls.append((
+            "_upload_file",
+            {"filename": filename, "content_b64": content_b64},
+        ))
+
+    def _export_room(self, sink):
+        self.server.calls.append(("_export_room", {}))
+
+    def _run_import(self, label, op, sink):
+        # 把 op 留下来，让测试断言它是 partial / lambda 即可，不真跑导入。
+        self.server.calls.append(("_run_import", {"label": label}))
+
+    def _fail_upload(self, sink, *, original: str, text: str) -> None:
+        # 路由测不挂真 session；记 NOTICE 即可，envelope 构造跳过避免访问 self._session。
+        self.server.notices.append(("error", text))
+
+
+class _SpyTask(TaskHandlers):
+    def _snapshot_active_task_id(self):
+        # 路由测不挂真 session；user_message 路径需要它返回 None 才不去访问 self._session。
+        return None
+
+
 class _SpyServer(ChahuaServer):
     """绕开 __init__，只挂 ``_handle_inbound`` 真正访问的状态 + 记录器。
 
     刻意**不**填 ``_session`` / ``_paths`` / ``_host`` 等：路由测里这些不该被读到，
     若将来 ``_handle_inbound`` 开始访问它们应该 ``AttributeError`` 让我们立刻注意到
     新增的依赖，而不是悄悄拿到 dummy 值绕过测试。
+
+    P5.2 起 inbound handler 拆 slot；spy slot 继承真实 handler 复用 ``_inbound_*`` 校验，
+    只覆盖 worker 拦截记录。dispatch 表用 :func:`_bind_inbound_handlers` 同款解析。
     """
 
     def __init__(self) -> None:  # type: ignore[override]
@@ -69,13 +177,15 @@ class _SpyServer(ChahuaServer):
         self.emit_snapshot_count = 0
         self.notices: list[tuple[str, str]] = []
         self.run_turn_args: list[str] = []
+        # 装 spy slot —— 与 ChahuaServer.__init__ 同布局，但 handler 实例是 spy。
+        self.admin = _SpyAdmin(self)
+        self.io = _SpyIO(self)
+        self.settings = _SpySettings(self)
+        self.task = _SpyTask(self)
+        self._inbound_handlers = _bind_inbound_handlers(self)
 
     async def _cancel_and_drain_inflight(self) -> None:  # type: ignore[override]
         self.cancel_drain_count += 1
-
-    def _snapshot_active_task_id(self):  # type: ignore[override]
-        # 路由测不挂真 session；user_message 路径需要它返回 None 才不去访问 self._session。
-        return None
 
     def _cancel_inflight(self) -> None:  # type: ignore[override]
         self.calls.append(("_cancel_inflight", {}))
@@ -89,97 +199,13 @@ class _SpyServer(ChahuaServer):
     def _emit_notice(self, sink, *, level: str, text: str) -> None:  # type: ignore[override]
         self.notices.append((level, text))
 
-    def _fail_upload(self, sink, *, original: str, text: str) -> None:  # type: ignore[override]
-        # 路由测不挂真 session；记 NOTICE 即可，envelope 构造跳过避免访问 self._session。
-        self.notices.append(("error", text))
+    # ── core inbound workers 仍挂 ChahuaServer 自身：switch / clear。──────────
 
-    # 每个 mutator 同款：拍下 kwargs。
     def _switch_room(self, room_id, sink):  # type: ignore[override]
         self.calls.append(("_switch_room", {"room_id": room_id}))
 
     def _clear_room(self, sink):  # type: ignore[override]
         self.calls.append(("_clear_room", {}))
-
-    def _add_guest(self, *, persona, name, permission, sink):  # type: ignore[override]
-        self.calls.append((
-            "_add_guest",
-            {"persona": persona, "name": name, "permission": permission},
-        ))
-
-    def _remove_guest(self, *, name, sink):  # type: ignore[override]
-        self.calls.append(("_remove_guest", {"name": name}))
-
-    def _set_persona_mcp_trust(self, *, persona_rel, trusted, sink):  # type: ignore[override]
-        self.calls.append((
-            "_set_persona_mcp_trust",
-            {"persona_rel": persona_rel, "trusted": trusted},
-        ))
-
-    def _update_guest_permission(self, *, name, permission, sink):  # type: ignore[override]
-        self.calls.append((
-            "_update_guest_permission",
-            {"name": name, "permission": permission},
-        ))
-
-    def _create_room(self, *, room_id, name, topic, rules, guests, sink):  # type: ignore[override]
-        self.calls.append((
-            "_create_room",
-            {
-                "room_id": room_id,
-                "name": name,
-                "topic": topic,
-                "rules": rules,
-                "guests": guests,
-            },
-        ))
-
-    def _delete_room(self, *, room_id, sink):  # type: ignore[override]
-        self.calls.append(("_delete_room", {"room_id": room_id}))
-
-    def _update_user_md(self, *, content, sink):  # type: ignore[override]
-        self.calls.append(("_update_user_md", {"content": content}))
-
-    def _update_room_toml(self, *, content, sink):  # type: ignore[override]
-        self.calls.append(("_update_room_toml", {"content": content}))
-
-    def _update_room_orchestrator(self, *, overrides, sink):  # type: ignore[override]
-        self.calls.append(("_update_room_orchestrator", {"overrides": overrides}))
-
-    def _update_room_llm(self, *, section, spec_dict, sink):  # type: ignore[override]
-        self.calls.append((
-            "_update_room_llm", {"section": section, "spec_dict": spec_dict},
-        ))
-
-    def _update_guest_llm(self, *, name, spec_dict, sink):  # type: ignore[override]
-        self.calls.append((
-            "_update_guest_llm", {"name": name, "spec_dict": spec_dict},
-        ))
-
-    def _update_guest_isolation(self, *, name, isolation, sink):  # type: ignore[override]
-        self.calls.append((
-            "_update_guest_isolation", {"name": name, "isolation": isolation},
-        ))
-
-    def _update_guest_extra_mcp(self, *, name, servers, sink):  # type: ignore[override]
-        self.calls.append((
-            "_update_guest_extra_mcp", {"name": name, "servers": servers},
-        ))
-
-    def _update_user_avatar(self, *, data_uri, sink):  # type: ignore[override]
-        self.calls.append(("_update_user_avatar", {"data_uri": data_uri}))
-
-    def _upload_file(self, *, filename, content_b64, sink):  # type: ignore[override]
-        self.calls.append((
-            "_upload_file",
-            {"filename": filename, "content_b64": content_b64},
-        ))
-
-    def _export_room(self, sink):  # type: ignore[override]
-        self.calls.append(("_export_room", {}))
-
-    def _run_import(self, label, op, sink):  # type: ignore[override]
-        # 把 op 留下来，让测试断言它是 partial / lambda 即可，不真跑导入。
-        self.calls.append(("_run_import", {"label": label}))
 
     async def _run_turn(self, text, sink, *, task_id=None):  # type: ignore[override]
         self.run_turn_args.append(text)

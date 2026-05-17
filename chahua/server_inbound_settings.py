@@ -1,8 +1,8 @@
-"""USER.md / 头像 / room.toml 设置 inbound mixin（P5.2 重构，docs §7.2）。
+"""USER.md / 头像 / room.toml 设置 handlers（P5.2 重构，docs §7.2）。
 
-依赖核心 ``ChahuaServer`` 提供：``self._session`` / ``self._paths`` / ``self._emit_notice``
-/ ``self._emit_room_info`` / ``self._emit_room_snapshot`` / ``self._replace_session``
-/ ``self._cancel_and_drain_inflight``。
+P5.2 重构：mixin 多继承换成组合。:class:`chahua.server.ChahuaServer` 在 ``__init__``
+里 ``self.settings = SettingsHandlers(self)``；本类持 ``self.server`` 反向引用，跨 server
+状态走 ``self.server.xxx``。
 """
 
 from __future__ import annotations
@@ -22,8 +22,11 @@ INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
 INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
 
 
-class SettingsHandlersMixin:
+class SettingsHandlers:
     """USER.md / 头像 / room.toml 三种设置写操作。"""
+
+    def __init__(self, server: "ChahuaServer") -> None:  # type: ignore[name-defined]
+        self.server = server
 
     def _update_user_md(self, *, content: str, sink: EnvelopeSink) -> None:
         """覆盖 USER.md + 原地 reload user_config（不重装整个 session）+ 重发 snapshot。
@@ -36,17 +39,17 @@ class SettingsHandlersMixin:
         """
         try:
             admin.update_user_md(
-                self._paths,
+                self.server._paths,
                 content,
-                source=self._session.user_config.source,
+                source=self.server._session.user_config.source,
             )
         except Exception:
             _log.exception("update_user_md 失败")
-            self._emit_room_snapshot(sink)
+            self.server._emit_room_snapshot(sink)
             return
-        self._session.reload_user_config(self._paths)
+        self.server._session.reload_user_config(self.server._paths)
         _log.info("update_user_md: %d 字节已落盘", len(content))
-        self._emit_room_snapshot(sink)
+        self.server._emit_room_snapshot(sink)
 
     def _update_room_toml(self, *, content: str, sink: EnvelopeSink) -> None:
         """覆盖当前房间 room.toml 全文 + 重装 session + 重发 snapshot。
@@ -54,27 +57,27 @@ class SettingsHandlersMixin:
         校验失败（语法 / 白名单 / persona 找不到）→ emit error notice + 重发当前 snapshot
         让前端 UI 复位；admin.update_room_toml 已经把磁盘内容回滚到旧 toml。
         """
-        room_dir = self._session.room_config.room_dir
+        room_dir = self.server._session.room_config.room_dir
         try:
-            admin.update_room_toml(room_dir, content, paths=self._paths)
+            admin.update_room_toml(room_dir, content, paths=self.server._paths)
         except (ValueError, RoomConfigError) as e:
             _log.warning("update_room_toml: room=%r 校验失败：%s", room_dir.name, e)
-            self._emit_notice(
+            self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR, text=f"房间配置保存失败：{e}"
             )
-            self._emit_room_snapshot(sink)
+            self.server._emit_room_snapshot(sink)
             return
         except Exception:
             _log.exception("update_room_toml: room=%r 失败", room_dir.name)
-            self._emit_notice(
+            self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR, text="房间配置保存失败（详见服务端日志）"
             )
-            self._emit_room_snapshot(sink)
+            self.server._emit_room_snapshot(sink)
             return
-        if not self._replace_session(room_dir, sink, label="update_room_toml"):
+        if not self.server._replace_session(room_dir, sink, label="update_room_toml"):
             return
         _log.info("update_room_toml: room=%r 已落盘", room_dir.name)
-        self._emit_room_snapshot(sink)
+        self.server._emit_room_snapshot(sink)
 
     def _update_user_avatar(self, *, data_uri: str, sink: EnvelopeSink) -> None:
         """覆盖 USER.png；不重装 session（avatar 不是 UserConfig 字段，靠 sidebar 重发即可）。
@@ -86,16 +89,16 @@ class SettingsHandlersMixin:
         try:
             png_bytes = admin.parse_png_data_uri(data_uri)
             admin.update_user_avatar(
-                self._paths,
+                self.server._paths,
                 png_bytes,
-                source=self._session.user_config.source,
+                source=self.server._session.user_config.source,
             )
         except Exception:
             _log.exception("update_user_avatar 失败")
-            self._emit_room_info(sink)
+            self.server._emit_room_info(sink)
             return
         _log.info("update_user_avatar: %d 字节已落盘", len(png_bytes))
-        self._emit_room_info(sink)
+        self.server._emit_room_info(sink)
 
     async def _inbound_update_user_md(self, data: dict, sink: EnvelopeSink) -> None:
         # content 允许空串：用户清空 USER.md 也算合法状态。
@@ -104,7 +107,7 @@ class SettingsHandlersMixin:
         )
         if content is None:
             return
-        await self._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_inflight()
         self._update_user_md(content=content, sink=sink)
 
     async def _inbound_update_room_toml(self, data: dict, sink: EnvelopeSink) -> None:
@@ -115,7 +118,7 @@ class SettingsHandlersMixin:
         )
         if content is None:
             return
-        await self._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_inflight()
         self._update_room_toml(content=content, sink=sink)
 
     async def _inbound_update_user_avatar(

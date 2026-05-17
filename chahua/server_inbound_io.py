@@ -1,7 +1,8 @@
-"""房间 IO inbound mixin —— upload / export / persona import（P5.2 重构，docs §7.2）。
+"""房间 IO handlers —— upload / export / persona import（P5.2 重构，docs §7.2）。
 
-依赖核心 ``ChahuaServer`` 提供：``self._session`` / ``self._paths`` / ``self._emit_notice``
-/ ``self._emit_room_info``。
+P5.2 重构：mixin 多继承换成组合。:class:`chahua.server.ChahuaServer` 在 ``__init__``
+里 ``self.io = IOHandlers(self)``；本类持 ``self.server`` 反向引用，跨 server 状态
+（``_session`` / ``_paths`` / ``_emit_notice`` / ``_emit_room_info``）走 ``self.server.xxx``。
 """
 
 from __future__ import annotations
@@ -51,8 +52,11 @@ def _import_success_text(result: "persona_import.ImportedPersona") -> str:
     return "".join(parts)
 
 
-class IOHandlersMixin:
+class IOHandlers:
     """upload / export / persona import inbound 集合。"""
+
+    def __init__(self, server: "ChahuaServer") -> None:  # type: ignore[name-defined]
+        self.server = server
 
     def _upload_file(
         self, *, filename: str, content_b64: str, sink: EnvelopeSink
@@ -94,7 +98,7 @@ class IOHandlersMixin:
             )
             return
         try:
-            share_dir = ensure_room_share_dir(self._session.room_config.room_dir)
+            share_dir = ensure_room_share_dir(self.server._session.room_config.room_dir)
             target = share_dir / safe_name
             write_bytes_atomic(target, data)
         except Exception as e:
@@ -105,7 +109,7 @@ class IOHandlersMixin:
         _log.info("upload_file: %s (%d bytes)", rel, len(data))
         sink(
             ChahuaEnvelope(
-                room_id=self._session.room.name,
+                room_id=self.server._session.room.name,
                 turn_id=None,
                 guest_name=None,
                 message_id=None,
@@ -135,34 +139,34 @@ class IOHandlersMixin:
             result = op()
         except persona_import.PersonaImportError as e:
             _log.info("%s 失败：%s", label, e)
-            self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
-            self._emit_room_info(sink)
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
+            self.server._emit_room_info(sink)
             return
         except Exception as e:
             _log.exception("%s 意外错", label)
-            self._emit_notice(
+            self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR, text=f"导入失败（内部错误）：{e}"
             )
-            self._emit_room_info(sink)
+            self.server._emit_room_info(sink)
             return
         _log.info("%s → %s", label, result.persona_rel)
-        self._emit_notice(
+        self.server._emit_notice(
             sink, level=NOTICE_LEVEL_INFO, text=_import_success_text(result)
         )
-        self._emit_room_info(sink)
+        self.server._emit_room_info(sink)
 
     def _export_room(self, sink: EnvelopeSink) -> None:
         # read-only：不动 session、不写盘。导出物只活在用户的 Downloads/ 里（renderer
         # 端走 Blob + <a download>），房间目录 transcript.jsonl / summary.jsonl 不动。
-        msgs = self._session.room.messages_since(0)
+        msgs = self.server._session.room.messages_since(0)
         filename, content = exporter.format_room_markdown(
-            self._session.room_config,
+            self.server._session.room_config,
             msgs,
-            self._session.user_config.display_name,
+            self.server._session.user_config.display_name,
         )
         sink(
             ChahuaEnvelope(
-                room_id=self._session.room.name,
+                room_id=self.server._session.room.name,
                 turn_id=None,
                 guest_name=None,
                 message_id=None,
@@ -172,7 +176,7 @@ class IOHandlersMixin:
         )
         _log.info(
             "export_room: room=%r %d msg → %s (%d bytes)",
-            self._session.room.name, len(msgs), filename, len(content),
+            self.server._session.room.name, len(msgs), filename, len(content),
         )
 
     async def _inbound_import_persona_folder(
@@ -184,7 +188,7 @@ class IOHandlersMixin:
         # 导入不动 session，无需 cancel inflight。
         self._run_import(
             f"import_persona_folder src={src!r}",
-            lambda: persona_import.import_from_folder(self._paths, Path(src)),
+            lambda: persona_import.import_from_folder(self.server._paths, Path(src)),
             sink,
         )
 
@@ -196,7 +200,7 @@ class IOHandlersMixin:
             return
         self._run_import(
             f"import_persona_github url={url!r}",
-            lambda: persona_import.import_from_github(self._paths, url),
+            lambda: persona_import.import_from_github(self.server._paths, url),
             sink,
         )
 
@@ -233,10 +237,10 @@ class IOHandlersMixin:
         ``_upload_file`` 内部错误路径与 ``_inbound_upload_file`` 的早返路径共用 —— 任何
         UPLOAD_FILE 入帧都必须以一条 FILE_UPLOADED envelope 收尾（成功 / 失败）。
         """
-        self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
+        self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
         sink(
             ChahuaEnvelope(
-                room_id=self._session.room.name,
+                room_id=self.server._session.room.name,
                 turn_id=None, guest_name=None, message_id=None,
                 type=ChahuaEventType.FILE_UPLOADED,
                 data={"original": original, "error": text},

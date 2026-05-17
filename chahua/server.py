@@ -26,6 +26,7 @@ import asyncio
 import ctypes
 import json
 import logging
+import operator
 import os
 import signal
 import sys
@@ -52,7 +53,7 @@ from .events import (
 from .orchestrator import OrchestratorConfig
 from .persona_assets import discover_assets, persona_relative
 from .server_inbound_admin import (
-    AdminHandlersMixin,
+    AdminHandlers,
     INBOUND_ADD_GUEST,
     INBOUND_CREATE_ROOM,
     INBOUND_DELETE_ROOM,
@@ -70,20 +71,20 @@ from .server_inbound_io import (
     INBOUND_IMPORT_PERSONA_FOLDER,
     INBOUND_IMPORT_PERSONA_GITHUB,
     INBOUND_UPLOAD_FILE,
-    IOHandlersMixin,
+    IOHandlers,
 )
 from .server_inbound_settings import (
     INBOUND_UPDATE_ROOM_TOML,
     INBOUND_UPDATE_USER_AVATAR,
     INBOUND_UPDATE_USER_MD,
-    SettingsHandlersMixin,
+    SettingsHandlers,
 )
 from .server_inbound_task import (
     INBOUND_ADD_DECISION,
     INBOUND_ATTACH_ARTIFACT,
     INBOUND_OPEN_TASK,
     INBOUND_UPDATE_TASK,
-    TaskHandlersMixin,
+    TaskHandlers,
 )
 from .session import (
     DEFAULT_ROOM_REL,
@@ -110,9 +111,12 @@ INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
 INBOUND_CLEAR_ROOM = "clear_room"
 INBOUND_CANCEL = "cancel"
-# P5.2 mixin 重构（docs/P5-任务房间.md §7.2）：admin / io / settings / task 四类 inbound
-# 常量分别从 ``.server_inbound_*`` import 上来，保留在 ``_INBOUND_HANDLERS`` 表里继续做
-# wire 字符串映射。
+# P5.2 重构（docs/P5-任务房间.md §7.2）：admin / io / settings / task 四类 inbound
+# 由独立 handler 类承担，:class:`ChahuaServer` 在 ``__init__`` 里实例化为四个 slot。
+# 模块级 :data:`_INBOUND_ROUTES` 是 wire 字符串 → 属性路径（"_inbound_cancel" /
+# "admin._inbound_add_guest"）的纯字符串表；``__init__`` 用 :func:`operator.attrgetter`
+# 把它解析成 per-instance bound-method 字典 ``self._inbound_handlers``，``_handle_inbound``
+# 走一次 dict lookup 直接 ``await``，没有 per-frame getattr。
 
 def _read_room_toml(room_dir: Path) -> str:
     """读 ``room_dir/room.toml`` 原文。读盘失败 → 空串（room_info 不会因为这个炸掉）。"""
@@ -215,12 +219,7 @@ def _attach_files_to_text(text: str, files: object) -> str:
 # ── server ────────────────────────────────────────────────────────────────
 
 
-class ChahuaServer(
-    AdminHandlersMixin,
-    IOHandlersMixin,
-    SettingsHandlersMixin,
-    TaskHandlersMixin,
-):
+class ChahuaServer:
     """单房间 ws server。
 
     在同一 session 上跨多次客户端连接复用 —— 客户端断开后房间状态保留，下次连上
@@ -230,6 +229,11 @@ class ChahuaServer(
     所有茶客 agentao close），按新 ``room_id`` 装配新 session 替换 ``_session``，
     复用 ws 连接 + ``_emit_room_info`` / ``_emit_room_history`` —— 客户端拿到
     新 room_info + 全量历史回放，DOM ``replaceChildren`` 自动清掉前一个房间残留。
+
+    P5.2 起 inbound handler 按 feature 切到四个独立类（:class:`AdminHandlers` /
+    :class:`IOHandlers` / :class:`SettingsHandlers` / :class:`TaskHandlers`），各持
+    ``self.server`` 反向引用做依赖注入；dispatch 走 ``__init__`` 时一次性把
+    :data:`_INBOUND_ROUTES` 解析成 ``self._inbound_handlers`` bound-method 字典。
     """
 
     def __init__(
@@ -250,6 +254,9 @@ class ChahuaServer(
         # 单 client + 单 in-flight 策略下（``user_message`` 在 task 未结束前 drop），
         # 同时只会有一个。
         self._inflight_turn_task: Optional[asyncio.Task[None]] = None
+        # P5.2 inbound handler 四个 slot + 一次性把 wire 路由解析成 bound-method 字典。
+        _install_handler_slots(self)
+        self._inbound_handlers = _bind_inbound_handlers(self)
 
     def close(self) -> None:
         """关停**当前**活动 session。
@@ -576,7 +583,7 @@ class ChahuaServer(
         """
         self._emit_room_info(sink)
         self._emit_room_history(sink)
-        self._emit_task_info(sink)
+        self.task._emit_task_info(sink)
 
     def _clear_room(self, sink: EnvelopeSink) -> None:
         """清空当前房间公共状态 + 重发 room snapshot 让前端复位。
@@ -651,17 +658,21 @@ class ChahuaServer(
         简化"missing/非字符串"分支），校验失败 → WARN + 早返；动会话的（add/remove
         guest、switch_room 等）调用前过 :meth:`_cancel_and_drain_inflight`，不动会话
         的（upload / 头像 / persona import）直接执行让在飞 turn 自然收尾。
+
+        Dispatch 表 ``self._inbound_handlers`` 在 ``__init__`` 里由
+        :func:`_bind_inbound_handlers` 一次性把 :data:`_INBOUND_ROUTES` 解析成 bound
+        method 字典；这里直接 dict lookup → ``await``。
         """
         msg_type = data.get("type")
-        handler = _INBOUND_HANDLERS.get(msg_type)
+        handler = self._inbound_handlers.get(msg_type)
         if handler is not None:
-            await handler(self, data, sink)
+            await handler(data, sink)
             return
         # 友好容忍：未知 type 不断连，仅 WARN。前端在协议升级期发新 type 时
         # 服务端旧版本也不至于把它踢下线。
         _log.warning("ignoring inbound message of unknown type=%r", msg_type)
 
-    # ── 各 inbound 帧的 handler；注册在类外 _INBOUND_HANDLERS。────────────
+    # ── 各 inbound 帧的 handler；wire 路由表 :data:`_INBOUND_ROUTES` 在文件底部。────
 
     async def _inbound_cancel(self, data: dict, sink: EnvelopeSink) -> None:
         # turn_id 由前端塞，服务端只记日志：单 in-flight 模型下当前 task 必定就是
@@ -746,47 +757,74 @@ class ChahuaServer(
             # 老前端 / wscat 直发场景。
             _log.warning("user_message dropped: previous turn still in flight")
             return
-        snapshot_task_id = self._snapshot_active_task_id()
+        snapshot_task_id = self.task._snapshot_active_task_id()
         self._inflight_turn_task = asyncio.create_task(
             self._run_turn(text, sink, task_id=snapshot_task_id),
             name="chahua-turn",
         )
 
 
-# inbound 帧类型 → handler unbound method 的注册表。``_handle_inbound`` 拿到 type
-# 直接查表分派，加新 wire 帧只动 INBOUND_* 常量 + 一个 ``_inbound_<name>`` 方法 +
-# 这张表一行；不必再去维护一个 200 行的 if-elif 链。
-_InboundHandler = Callable[
-    ["ChahuaServer", dict, EnvelopeSink], Awaitable[None]
-]
-_INBOUND_HANDLERS: dict[str, _InboundHandler] = {
-    INBOUND_CANCEL: ChahuaServer._inbound_cancel,
-    INBOUND_SWITCH_ROOM: ChahuaServer._inbound_switch_room,
-    INBOUND_CLEAR_ROOM: ChahuaServer._inbound_clear_room,
-    INBOUND_ADD_GUEST: ChahuaServer._inbound_add_guest,
-    INBOUND_REMOVE_GUEST: ChahuaServer._inbound_remove_guest,
-    INBOUND_SET_PERSONA_MCP_TRUST: ChahuaServer._inbound_set_persona_mcp_trust,
-    INBOUND_UPDATE_GUEST_PERMISSION: ChahuaServer._inbound_update_guest_permission,
-    INBOUND_CREATE_ROOM: ChahuaServer._inbound_create_room,
-    INBOUND_DELETE_ROOM: ChahuaServer._inbound_delete_room,
-    INBOUND_UPDATE_USER_MD: ChahuaServer._inbound_update_user_md,
-    INBOUND_UPDATE_ROOM_TOML: ChahuaServer._inbound_update_room_toml,
-    INBOUND_UPDATE_ROOM_ORCHESTRATOR: ChahuaServer._inbound_update_room_orchestrator,
-    INBOUND_UPDATE_ROOM_LLM: ChahuaServer._inbound_update_room_llm,
-    INBOUND_UPDATE_GUEST_LLM: ChahuaServer._inbound_update_guest_llm,
-    INBOUND_UPDATE_GUEST_ISOLATION: ChahuaServer._inbound_update_guest_isolation,
-    INBOUND_UPDATE_GUEST_EXTRA_MCP: ChahuaServer._inbound_update_guest_extra_mcp,
-    INBOUND_UPDATE_USER_AVATAR: ChahuaServer._inbound_update_user_avatar,
-    INBOUND_IMPORT_PERSONA_FOLDER: ChahuaServer._inbound_import_persona_folder,
-    INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,
-    INBOUND_UPLOAD_FILE: ChahuaServer._inbound_upload_file,
-    INBOUND_EXPORT_ROOM: ChahuaServer._inbound_export_room,
-    INBOUND_OPEN_TASK: ChahuaServer._inbound_open_task,
-    INBOUND_UPDATE_TASK: ChahuaServer._inbound_update_task,
-    INBOUND_ATTACH_ARTIFACT: ChahuaServer._inbound_attach_artifact,
-    INBOUND_ADD_DECISION: ChahuaServer._inbound_add_decision,
-    INBOUND_USER_MESSAGE: ChahuaServer._inbound_user_message,
+_InboundHandler = Callable[[dict, EnvelopeSink], Awaitable[None]]
+
+# wire 字符串 → 属性路径（解析 ``self`` 上的 attrgetter 串）。加新 wire 帧只动
+# INBOUND_* 常量 + 对应 ``_inbound_<name>`` 方法 + 这张表一行。``__init__`` 期间用
+# :func:`_bind_inbound_handlers` 一次把它转成 bound-method 字典装上 ``self._inbound_handlers``。
+_INBOUND_ROUTES: dict[str, str] = {
+    # 核心 4 个：cancel / switch_room / clear_room / user_message 留在 ChahuaServer。
+    INBOUND_CANCEL: "_inbound_cancel",
+    INBOUND_SWITCH_ROOM: "_inbound_switch_room",
+    INBOUND_CLEAR_ROOM: "_inbound_clear_room",
+    INBOUND_USER_MESSAGE: "_inbound_user_message",
+    # admin slot：guest / room / persona / permission。
+    INBOUND_ADD_GUEST: "admin._inbound_add_guest",
+    INBOUND_REMOVE_GUEST: "admin._inbound_remove_guest",
+    INBOUND_SET_PERSONA_MCP_TRUST: "admin._inbound_set_persona_mcp_trust",
+    INBOUND_UPDATE_GUEST_PERMISSION: "admin._inbound_update_guest_permission",
+    INBOUND_CREATE_ROOM: "admin._inbound_create_room",
+    INBOUND_DELETE_ROOM: "admin._inbound_delete_room",
+    INBOUND_UPDATE_ROOM_ORCHESTRATOR: "admin._inbound_update_room_orchestrator",
+    INBOUND_UPDATE_ROOM_LLM: "admin._inbound_update_room_llm",
+    INBOUND_UPDATE_GUEST_LLM: "admin._inbound_update_guest_llm",
+    INBOUND_UPDATE_GUEST_ISOLATION: "admin._inbound_update_guest_isolation",
+    INBOUND_UPDATE_GUEST_EXTRA_MCP: "admin._inbound_update_guest_extra_mcp",
+    # settings slot：USER.md / 房间 toml / 用户头像。
+    INBOUND_UPDATE_USER_MD: "settings._inbound_update_user_md",
+    INBOUND_UPDATE_ROOM_TOML: "settings._inbound_update_room_toml",
+    INBOUND_UPDATE_USER_AVATAR: "settings._inbound_update_user_avatar",
+    # io slot：persona import / 文件上传 / 房间导出。
+    INBOUND_IMPORT_PERSONA_FOLDER: "io._inbound_import_persona_folder",
+    INBOUND_IMPORT_PERSONA_GITHUB: "io._inbound_import_persona_github",
+    INBOUND_UPLOAD_FILE: "io._inbound_upload_file",
+    INBOUND_EXPORT_ROOM: "io._inbound_export_room",
+    # task slot：任务房间四个 inbound。
+    INBOUND_OPEN_TASK: "task._inbound_open_task",
+    INBOUND_UPDATE_TASK: "task._inbound_update_task",
+    INBOUND_ATTACH_ARTIFACT: "task._inbound_attach_artifact",
+    INBOUND_ADD_DECISION: "task._inbound_add_decision",
 }
+
+
+def _install_handler_slots(srv: ChahuaServer) -> None:
+    """装四个 handler slot。``ChahuaServer.__init__`` 与 ``object.__new__`` 跳 __init__
+    的测试夹具共用 —— 唯一真理源，将来加 slot 这里一处加完即可。
+    """
+    srv.admin = AdminHandlers(srv)
+    srv.io = IOHandlers(srv)
+    srv.settings = SettingsHandlers(srv)
+    srv.task = TaskHandlers(srv)
+
+
+def _bind_inbound_handlers(srv: ChahuaServer) -> dict[str, _InboundHandler]:
+    """按 :data:`_INBOUND_ROUTES` 把属性路径解析成 bound method 字典。
+
+    调用方需先装好 slot（``srv.admin`` / ``srv.io`` 等）；spy 测试夹具自己装完 spy slot
+    后调本函数取分派表。每条路径通过 :func:`operator.attrgetter` 解析 —— 错路径在
+    server 启动期就 AttributeError 而不是首次该 inbound 进来时才炸。
+    """
+    return {
+        wire: operator.attrgetter(path)(srv)
+        for wire, path in _INBOUND_ROUTES.items()
+    }
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────

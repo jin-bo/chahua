@@ -51,10 +51,15 @@ def session_and_srv(env_paths):
         guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
     )
     session = build_room_session(rc.room_dir, env_paths)
+    from chahua.server import _bind_inbound_handlers, _install_handler_slots
     srv = object.__new__(ChahuaServer)
     srv._session = session  # type: ignore[attr-defined]
     srv._paths = env_paths  # type: ignore[attr-defined]
     srv._inflight_turn_task = None  # type: ignore[attr-defined]
+    # P5.2 inbound handler 切到 slot + 预绑 dispatch 表；object.__new__ 跳 __init__ 后
+    # 沿用同一对 helper 装回去，与 ChahuaServer.__init__ 唯一真理源对齐。
+    _install_handler_slots(srv)
+    srv._inbound_handlers = _bind_inbound_handlers(srv)  # type: ignore[attr-defined]
     yield session, srv
     session.close()
 

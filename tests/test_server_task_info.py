@@ -39,16 +39,19 @@ def _build_session_and_server(env_paths):
         paths=env_paths, room_id="t1", name="t1",
         guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
     )
+    from chahua.server import _install_handler_slots
     session = build_room_session(rc.room_dir, env_paths)
     srv = object.__new__(ChahuaServer)
     srv._session = session  # type: ignore[attr-defined]
     srv._paths = env_paths  # type: ignore[attr-defined]
+    _install_handler_slots(srv)
     return session, srv
 
 
 def _emit_task_info(srv) -> dict:
     captured: list[dict] = []
-    srv._emit_task_info(lambda env: captured.append(env.to_dict()))
+    # P5.2 起 _emit_task_info 挂 self.task slot。
+    srv.task._emit_task_info(lambda env: captured.append(env.to_dict()))
     assert len(captured) == 1
     env = captured[0]
     assert env["type"] == ChahuaEventType.TASK_INFO.value

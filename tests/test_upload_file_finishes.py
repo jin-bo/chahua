@@ -36,11 +36,14 @@ def session_and_srv(env_paths):
         paths=env_paths, room_id="t1", name="t1",
         guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
     )
+    from chahua.server import _install_handler_slots
     session = build_room_session(rc.room_dir, env_paths)
     srv = object.__new__(ChahuaServer)
     srv._session = session
     srv._paths = env_paths
     srv._inflight_turn_task = None
+    # P5.2 inbound handler 切到 slot；object.__new__ 跳 __init__ 后用同一对 helper 装回。
+    _install_handler_slots(srv)
     yield session, srv
     session.close()
 
@@ -52,7 +55,7 @@ def _types(envs: list[dict]) -> list[str]:
 def test_upload_success_emits_file_uploaded(session_and_srv):
     session, srv = session_and_srv
     captured: list[dict] = []
-    srv._upload_file(
+    srv.io._upload_file(
         filename="a.txt",
         content_b64=base64.b64encode(b"hello").decode(),
         sink=lambda env: captured.append(env.to_dict()),
@@ -68,7 +71,7 @@ def test_upload_bad_filename_still_emits_file_uploaded(session_and_srv):
     """文件名非法 → NOTICE + 失败 echo（无 rel，含 error）。"""
     session, srv = session_and_srv
     captured: list[dict] = []
-    srv._upload_file(
+    srv.io._upload_file(
         filename="...",  # sanitize_fs_name 拒
         content_b64=base64.b64encode(b"x").decode(),
         sink=lambda env: captured.append(env.to_dict()),
@@ -85,7 +88,7 @@ def test_upload_bad_filename_still_emits_file_uploaded(session_and_srv):
 def test_upload_bad_base64_still_emits_file_uploaded(session_and_srv):
     session, srv = session_and_srv
     captured: list[dict] = []
-    srv._upload_file(
+    srv.io._upload_file(
         filename="a.txt",
         content_b64="!!!not base64!!!",
         sink=lambda env: captured.append(env.to_dict()),
@@ -101,7 +104,7 @@ async def test_inbound_upload_zero_byte_file_emits_file_uploaded(session_and_srv
     """零字节文件 content_b64="" —— inbound 不能因为 _require_str 拒空串而早返不发 echo。"""
     session, srv = session_and_srv
     captured: list[dict] = []
-    await srv._inbound_upload_file(
+    await srv.io._inbound_upload_file(
         {"type": "upload_file", "filename": "empty.txt", "content_b64": ""},
         lambda env: captured.append(env.to_dict()),
     )
@@ -115,7 +118,7 @@ async def test_inbound_upload_missing_filename_emits_file_uploaded(session_and_s
     """filename 缺失 → inbound 早返但仍发 file_uploaded(error)。"""
     session, srv = session_and_srv
     captured: list[dict] = []
-    await srv._inbound_upload_file(
+    await srv.io._inbound_upload_file(
         {"type": "upload_file", "content_b64": "aGk="},
         lambda env: captured.append(env.to_dict()),
     )
@@ -130,7 +133,7 @@ async def test_inbound_upload_missing_content_b64_emits_file_uploaded(session_an
     """content_b64 字段缺失（非 str）—— inbound 应当发失败 echo，前端队列才能推进。"""
     session, srv = session_and_srv
     captured: list[dict] = []
-    await srv._inbound_upload_file(
+    await srv.io._inbound_upload_file(
         {"type": "upload_file", "filename": "x.txt"},
         lambda env: captured.append(env.to_dict()),
     )
@@ -146,7 +149,7 @@ def test_upload_too_large_still_emits_file_uploaded(session_and_srv, monkeypatch
     import chahua.server_inbound_io as io_mod
     monkeypatch.setattr(io_mod, "_UPLOAD_MAX_BYTES", 1)
     captured: list[dict] = []
-    srv._upload_file(
+    srv.io._upload_file(
         filename="a.txt",
         content_b64=base64.b64encode(b"too big").decode(),
         sink=lambda env: captured.append(env.to_dict()),
