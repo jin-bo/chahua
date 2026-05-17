@@ -1554,3 +1554,38 @@ body.disconnected .dblclick-anchor:hover { background: transparent; }
   font-size: 12px;
   font-style: italic;
 }
+
+/* P5.3.6 茶客 propose 卡片 —— 嵌在茶客气泡 li 之下，灰底框 + 采纳/忽略两按钮。 */
+.proposal-card {
+  margin: 6px 0 0 44px;  /* 头像宽度 + gap，左对齐到气泡边 */
+  padding: 8px 12px;
+  border: 1px solid #e0d8c0;
+  border-radius: 8px;
+  background: #fffbef;
+  font-size: 12px;
+  max-width: 75%;
+}
+.proposal-card-meta { color: #888; font-size: 11px; margin-bottom: 4px; }
+.proposal-card-kind { font-weight: 600; color: #6b4f2a; margin-bottom: 2px; }
+.proposal-card-title { font-weight: 500; color: #2a200f; }
+.proposal-card-summary, .proposal-card-goal {
+  color: #333; line-height: 1.5; margin: 2px 0;
+  white-space: pre-wrap; word-break: break-word;
+}
+.proposal-card-refs { color: #888; font-size: 11px; margin-top: 2px; }
+.proposal-card-actions { margin-top: 6px; display: flex; gap: 8px; align-items: center; }
+.proposal-card-accept, .proposal-card-ignore {
+  padding: 3px 10px;
+  border: 1px solid #cdb88a;
+  border-radius: 4px;
+  background: #fff;
+  color: #2a200f;
+  font-size: 11px;
+  cursor: pointer;
+}
+.proposal-card-accept:hover:not(:disabled) { background: #e8d8a0; }
+.proposal-card-ignore:hover:not(:disabled) { background: #f0e8d0; }
+.proposal-card-accept:disabled, .proposal-card-ignore:disabled {
+  cursor: not-allowed; opacity: 0.6;
+}
+.proposal-card-status { color: #888; font-size: 10px; font-style: italic; }

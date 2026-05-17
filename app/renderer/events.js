@@ -36,6 +36,18 @@ export const EventType = Object.freeze({
   // P5.2.4：任务推入终结态（done / abandoned）后的 hint。与其它四个 hint 同口径 —— 紧
   // 跟一帧 TASK_INFO 才是权威状态；这里仅给前端做 toast / 卡片翻灰动画用。
   TASK_CLOSE: "task_close",
+  // P5.3.3：茶客通过 task_propose_* 工具发出的"提议"（开任务 / 记决策）。data 形状：
+  // {task_id?, proposer, kind: "decision"|"open", payload}。**纯 hint** —— 写权限永远
+  // 在用户，前端渲染成"采纳/忽略"卡片，采纳后薄包装转译回既有 ADD_DECISION / OPEN_TASK
+  // inbound。镜像 chahua/events.py::TASK_PROPOSAL。
+  TASK_PROPOSAL: "task_proposal",
+});
+
+// TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
+// 前端"采纳"按钮按 kind 分发对应 inbound 帧。
+export const TaskProposalKind = Object.freeze({
+  DECISION: "decision",
+  OPEN: "open",
 });
 
 export const Status = Object.freeze({

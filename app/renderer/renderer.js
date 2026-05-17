@@ -56,6 +56,7 @@ import { createPermissionPopover } from "./permission_popover.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import { createTaskPanel } from "./task_panel.js";
+import { createProposalCard } from "./proposal_card.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -835,6 +836,9 @@ function handleEnvelope(env) {
     case EventType.TASK_CLOSE:
       taskPanel.flashHint(env.type, env.data ?? {});
       return;
+    case EventType.TASK_PROPOSAL:
+      proposalCard.onEnvelope(env);
+      return;
     case EventType.ROOM_EXPORT: {
       const markdown = env.data?.markdown;
       const filename = env.data?.filename || "chahua-export.md";
@@ -1126,6 +1130,11 @@ const taskPanel = createTaskPanel({
   // taskState 重渲，guests 已先一步在 renderSidebar 里更新）。
   getGuestNames: () => guests.map((g) => g.name),
 });
+
+// P5.3.6 茶客 propose 卡片渲染 + 去重。挂到 TASK_PROPOSAL envelope 分发上。
+// sendInbound 给 P5.3.7 采纳按钮拼 ADD_DECISION / OPEN_TASK 帧用 —— 本阶段卡片渲染
+// + 忽略按钮已可用，采纳按钮接入 P5.3.7 完成。
+const proposalCard = createProposalCard({ messagesEl, sendInbound: send });
 
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json
