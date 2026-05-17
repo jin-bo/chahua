@@ -23,6 +23,7 @@ import {
   DEFAULT_PERMISSION,
   TASK_UNTITLED,
   buildOwnerOptionData,
+  formatTaskLabel,
   isTaskClosed,
   taskStatusLabel,
 } from "./events.js";
@@ -304,46 +305,44 @@ function appendBubble({ speaker, text, kind, messageId = null, taskId = null }) 
       li = row.li;
     }
     messagesEl.appendChild(li);
-    refreshMessageTaskChip(li);
-    applyMessageFilterTo(li);
+    afterAppendMessage(li);
   });
 }
 
 // ── 消息上的任务 chip + filter 视图（P5.2.10）─────────────────────────────
 //
-// 非 active 任务的消息气泡左上挂灰 chip 显示任务名；点击进入该任务 filter 视图（仅
-// 渲染 data-task-id == X 的 li）。filter 状态走单 module-level var；切换房间 /
-// clear room 时强制 exit。
-//
-// chip 文案随 taskState 变 —— 任务被改名、被关、被切 active 都靠 subscriber 重刷。
-// 单条 li 的 chip 走 refreshMessageTaskChip(li) 单点；新挂 li 直接调一次而非依赖
-// subscriber 在全局 walk（subscriber 也会触发，但 walk 100 条 li 比单挂贵）。
+// chip 状态随 taskState 变 —— task_panel 没把消息 chip 文案当模块状态存（DOM 即真
+// 源），refresh 是幂等的"看一眼 taskState、按需改 chip"。新挂的 li 直接调一次
+// afterAppendMessage 而不是等 subscriber 全局 walk（walk N 条消息比单挂贵）。
 
 let _filterTaskId = null;
 let _filterBannerEl = null;
 
+function getLiTaskId(li) {
+  return li.dataset.taskId || null;
+}
+
 function refreshMessageTaskChip(li) {
-  const taskId = li.dataset.taskId || "";
+  const taskId = getLiTaskId(li);
   let chip = li.querySelector(".message-task-chip");
   const removeChip = () => { if (chip) { chip.remove(); chip = null; } };
   if (!taskId) {
     removeChip();
     return;
   }
-  const { tasks, activeTaskId } = taskState.getState();
-  // active 任务的消息不挂 chip —— "默认 chat 主流就是 active"，挂了反而吵。
-  if (taskId === activeTaskId) {
+  const activeId = taskState.getState().activeTaskId;
+  // active 任务的消息不挂 chip —— 默认 chat 主流就是 active，挂了反而吵。
+  if (taskId === activeId) {
     removeChip();
     return;
   }
-  const task = tasks.find((t) => t && t.id === taskId);
+  // task 还没加载（room_history 先于 task_info）/ 被删了 —— 不挂；下次 subscriber 补。
+  const task = taskState.getTaskById(taskId);
   if (!task) {
-    // task 还没加载到 taskState（room_history 先于 task_info）/ 被删了 —— 不挂 chip，
-    // 下次 subscriber 触发 refresh 再补。
     removeChip();
     return;
   }
-  const text = `📋 ${task.title || TASK_UNTITLED}`;
+  const text = formatTaskLabel(task);
   if (chip) {
     if (chip.textContent !== text) chip.textContent = text;
     return;
@@ -362,8 +361,9 @@ function refreshMessageTaskChip(li) {
 }
 
 function refreshAllMessageTaskChips() {
-  const lis = messagesEl.querySelectorAll("li[data-task-id]");
-  for (const li of lis) refreshMessageTaskChip(li);
+  for (const li of messagesEl.querySelectorAll("li[data-task-id]")) {
+    refreshMessageTaskChip(li);
+  }
 }
 
 function applyMessageFilterTo(li) {
@@ -371,12 +371,19 @@ function applyMessageFilterTo(li) {
     li.classList.remove("filtered-out");
     return;
   }
-  const liTaskId = li.dataset.taskId || "";
-  li.classList.toggle("filtered-out", liTaskId !== _filterTaskId);
+  li.classList.toggle("filtered-out", getLiTaskId(li) !== _filterTaskId);
 }
 
 function applyMessageFilterAll() {
   for (const li of messagesEl.querySelectorAll("li")) applyMessageFilterTo(li);
+}
+
+// 三处 append 调用站（appendBubble / startStreamingMessage / endStreamingMessage 的
+// 无 start 分支）的尾部都做一样的事 —— 刷 chip + 应用 filter。单出口，将来加 third
+// concern（搜索高亮 / 已读标记等）也只动这里。
+function afterAppendMessage(li) {
+  refreshMessageTaskChip(li);
+  applyMessageFilterTo(li);
 }
 
 function enterMessageFilter(taskId) {
@@ -414,8 +421,7 @@ function ensureFilterBanner() {
 
 function updateFilterBannerText() {
   if (!_filterBannerEl || _filterTaskId === null) return;
-  const { tasks } = taskState.getState();
-  const task = tasks.find((t) => t && t.id === _filterTaskId);
+  const task = taskState.getTaskById(_filterTaskId);
   const title = task ? task.title || TASK_UNTITLED : _filterTaskId;
   _filterBannerEl.querySelector(".message-filter-banner-text").textContent =
     `仅显示任务「${title}」的消息 —— 其余隐起来`;
@@ -451,8 +457,7 @@ function startStreamingMessage(env) {
       taskId,
     });
     messagesEl.appendChild(li);
-    refreshMessageTaskChip(li);
-    applyMessageFilterTo(li);
+    afterAppendMessage(li);
     // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
     // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
     const entry = { textEl, li, bubble, accumulated: "" };
@@ -504,8 +509,7 @@ function endStreamingMessage(env) {
     setStatusTail(row.bubble, statusTail(env));
     stickToBottom(() => {
       messagesEl.appendChild(row.li);
-      refreshMessageTaskChip(row.li);
-      applyMessageFilterTo(row.li);
+      afterAppendMessage(row.li);
     });
     return;
   }
@@ -1158,7 +1162,7 @@ function renderComposerTaskChip(active) {
   composerTaskChipEl.replaceChildren();
   const label = document.createElement("span");
   label.className = "composer-task-chip-label";
-  label.textContent = active ? `📋 ${titleText}` : "🗨 房间级";
+  label.textContent = active ? formatTaskLabel(active) : "🗨 房间级";
   const chev = document.createElement("span");
   chev.className = "composer-task-chip-chevron";
   chev.textContent = "▾";
@@ -1216,7 +1220,7 @@ function openTaskChipDropdown() {
   for (const t of items) {
     const isCurrent = !!(active && t.id === active.id);
     pop.appendChild(makePopoverOption({
-      label: `📋 ${t.title || TASK_UNTITLED}`,
+      label: formatTaskLabel(t),
       desc: isCurrent ? "当前选中" : `状态：${taskStatusLabel(t.status)}`,
       current: isCurrent,
       extraClass: "task-chip-option",

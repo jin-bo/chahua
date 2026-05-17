@@ -13,6 +13,9 @@ const EMPTY = Object.freeze({ tasks: Object.freeze([]), activeTaskId: null });
 
 let state = EMPTY;
 let lastSerialized = "";
+// 懒建索引 —— 每次 setSnapshot 清掉；getTaskById 第一次调时 rebuild。message-chip
+// refresh 一次走 N 条消息时 O(N*M) 退化到 O(N+M)。
+let tasksById = null;
 
 function normalize(envData) {
   if (envData == null) return EMPTY;
@@ -30,6 +33,7 @@ export function setSnapshot(envData) {
   if (serialized === lastSerialized) return;
   lastSerialized = serialized;
   state = next;
+  tasksById = null;
   // F12 console 直接 ``__chahua_task_state`` 取当前快照，dev 调试用。
   if (typeof window !== "undefined") window.__chahua_task_state = state;
   for (const fn of listeners) {
@@ -41,9 +45,19 @@ export function getState() {
   return state;
 }
 
+export function getTaskById(id) {
+  if (!id) return null;
+  if (!tasksById) {
+    tasksById = new Map();
+    for (const t of state.tasks) {
+      if (t && typeof t.id === "string") tasksById.set(t.id, t);
+    }
+  }
+  return tasksById.get(id) ?? null;
+}
+
 export function getActiveTask() {
-  if (!state.activeTaskId) return null;
-  return state.tasks.find((t) => t && t.id === state.activeTaskId) ?? null;
+  return getTaskById(state.activeTaskId);
 }
 
 // 订阅：注册即触发一次让消费方拿到初值；返回 unsubscribe。

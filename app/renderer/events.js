@@ -141,6 +141,14 @@ export function taskStatusLabel(status) {
 // 区分：placeholder 鼓励用户填，本常量是 fallback。
 export const TASK_UNTITLED = "(无标题)";
 
+// 消息 chip / composer chip / chip dropdown 共用 "📋 <title>" 文案 —— 单源避免散落手抄。
+// 改图标 / 改格式只动一处。task_panel.js 的"其它任务"列表用 "📌" 表区别（卡片 vs chip
+// 视觉分流），不走这条。
+export function formatTaskLabel(task) {
+  if (!task) return "";
+  return `📋 ${task.title || TASK_UNTITLED}`;
+}
+
 // owner 选 null 时的展示文案；wire 层 owner = null，UI 层 "全员"。下拉 / meta 都从这里取。
 export const TASK_OWNER_ALL = "全员";
 
