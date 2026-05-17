@@ -50,7 +50,7 @@ from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
 from .summarizer import SummarySpan, Summarizer, TaskSummaries
 from .task import TASK_STATUS_DISPLAY, TASK_UNTITLED, Decision, Task
-from .tasks_store import TasksStore
+from .tasks_store import CLOSED_STATUSES, TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 
 _log = logging.getLogger(__name__)
@@ -563,7 +563,7 @@ class Orchestrator:
         task_id: Optional[str] = None,
     ) -> None:
         entry = self._guests[guest_name]
-        ctx = self._build_context_for(guest_name)
+        ctx = self._build_context_for(guest_name, task_id=task_id)
         # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
         # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
         msg = await entry.guest.speak(
@@ -619,15 +619,60 @@ class Orchestrator:
 
     # ── 上下文喂养 ─────────────────────────────────────────────────────
 
-    def _build_context_for(self, guest_name: str) -> str:
+    def _build_context_for(
+        self, guest_name: str, *, task_id: Optional[str] = None
+    ) -> str:
+        """组 prompt 上下文。``task_id`` 是 ``_let_speak`` 入口的 snapshot 值（P5.1.8
+        立下的语义：每轮归属固定，不读当前 store.active），P5.3.2 起注入到 task block。
+
+        路径分两叉：``last_seen==0`` 或增量超阈值走 onboarding 完整块；否则走 incremental
+        compact 块。task block 取数 + 渲染走 :meth:`_maybe_render_task_block`，对两路径
+        同源（仅 compact 与否不同），closed / 不存在 / 缺 store 都返 ``None`` 不注入。
+        """
         last_seen = self.cursor.get(guest_name)
         increment = self.room.messages_since(last_seen)
-        if last_seen == 0 or len(increment) > self.config.onboarding_threshold:
-            return self._render_onboarding(guest_name, increment)
-        return self._render_incremental(guest_name, increment)
+        use_onboarding = (
+            last_seen == 0 or len(increment) > self.config.onboarding_threshold
+        )
+        task_block = self._maybe_render_task_block(
+            task_id, compact=not use_onboarding
+        )
+        if use_onboarding:
+            return self._render_onboarding(guest_name, increment, task_block=task_block)
+        return self._render_incremental(guest_name, increment, task_block=task_block)
+
+    def _maybe_render_task_block(
+        self, task_id: Optional[str], *, compact: bool
+    ) -> Optional[str]:
+        """两步取数 + 调纯 renderer：``None`` 表示本轮不注入 task 块。
+
+        过滤路径（任一命中即不注入）：① 缺 task_id；② 缺 store；③ store 无该任务；
+        ④ 任务终结态（done / abandoned）。前 4 个走 1 次 ``get_task`` 就出，不触碰其余
+        三个 read API —— 闲聊回合 / closed task 时省掉 list_decisions / list_artifacts /
+        task_summaries.get 三次 IO。
+        """
+        if task_id is None or self.tasks_store is None:
+            return None
+        task = self.tasks_store.get_task(task_id)
+        if task is None or task.status in CLOSED_STATUSES:
+            return None
+        decisions = self.tasks_store.list_decisions(task_id)
+        artifacts = self.tasks_store.list_artifacts(task_id)
+        summary_tail: list[SummarySpan] = []
+        if self.task_summaries is not None:
+            handle = self.task_summaries.get(task_id)
+            if handle is not None:
+                summary_tail = list(handle.summaries)
+        return _render_task_block(
+            task, decisions, artifacts, summary_tail, compact=compact
+        )
 
     def _render_onboarding(
-        self, guest_name: str, increment: list[Message]
+        self,
+        guest_name: str,
+        increment: list[Message],
+        *,
+        task_block: Optional[str] = None,
     ) -> str:
         display_for = self._display_map()
         parts: list[str] = [f"[群聊·{self.room.name}]"]
@@ -654,6 +699,10 @@ class Orchestrator:
             bullets = "\n\n".join(s.text for s in recent)
             parts.append(f"\n近期梗概：\n{bullets}")
 
+        # task block 落在"近期梗概"之后、"最近原文"之前（docs §6.1）。
+        if task_block:
+            parts.append(f"\n{task_block}")
+
         tail = increment[-self.config.onboarding_recent_messages :]
         if tail:
             parts.append(f"\n最近原文：\n{format_messages(tail, display_for)}")
@@ -662,7 +711,11 @@ class Orchestrator:
         return "\n".join(parts) + "\n"
 
     def _render_incremental(
-        self, guest_name: str, increment: list[Message]
+        self,
+        guest_name: str,
+        increment: list[Message],
+        *,
+        task_block: Optional[str] = None,
     ) -> str:
         # 增量空（理论不会发生 —— 编排器只在 transcript 有新消息时调）：兜底成只指令。
         body = (
@@ -670,9 +723,12 @@ class Orchestrator:
             if increment
             else "（无新消息）"
         )
+        # task block 落在 body 之后、speak instruction 之前（docs §6.1）。
+        task_section = f"{task_block}\n\n" if task_block else ""
         return (
             f"（房间·{self.room.name}·继续）\n"
             f"{body}\n\n"
+            f"{task_section}"
             f"{self._speak_instruction(guest_name)}"
         )
 
