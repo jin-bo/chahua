@@ -14,7 +14,12 @@
 // 渲染管线（XSS 由 dompurify 兜底）。
 
 import { renderMarkdown } from "./chat_view.js";
-import { EventType, isTaskClosed, taskStatusLabel } from "./events.js";
+import {
+  EventType,
+  TASK_UNTITLED,
+  isTaskClosed,
+  taskStatusLabel,
+} from "./events.js";
 import * as taskState from "./task_state.js";
 
 const LS_COLLAPSED_KEY = "chahua.taskPanel.collapsed";
@@ -362,7 +367,7 @@ export function createTaskPanel({
     title.appendChild(icon);
     const text = document.createElement("span");
     text.className = "task-other-title-text";
-    text.textContent = task.title || "(无标题)";
+    text.textContent = task.title || TASK_UNTITLED;
     title.appendChild(text);
     li.appendChild(title);
 
@@ -382,7 +387,7 @@ export function createTaskPanel({
     if (onSetActive) {
       li.classList.add("task-other-clickable");
       li.tabIndex = 0;
-      li.title = `切到任务「${task.title || "(无标题)"}」`;
+      li.title = `切到任务「${task.title || TASK_UNTITLED}」`;
       const activate = () => onSetActive(task.id);
       li.addEventListener("click", activate);
       // 键盘可达 —— 与 sidebar 头像 / 房间行 click 口径相近，但任务列表更可能被键盘党

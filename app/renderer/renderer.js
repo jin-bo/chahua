@@ -21,13 +21,16 @@ import {
   ScoreKind,
   NoticeLevel,
   DEFAULT_PERMISSION,
+  TASK_UNTITLED,
   isTaskClosed,
   taskStatusLabel,
 } from "./events.js";
 import {
   attachPopoverDismissHandlers,
   closeActionPopover,
+  makePopoverOption,
   openActionPopover,
+  positionPopoverAboveAnchor,
 } from "./ui_popover.js";
 import {
   renderMarkdown,
@@ -961,7 +964,7 @@ function attachArtifact(rel) {
     task_id: active.id,
     share_rel: rel,
   });
-  setStatus("", `拷贝「${rel}」到任务「${active.title || "(无标题)"}」…`);
+  setStatus("", `拷贝「${rel}」到任务「${active.title || TASK_UNTITLED}」…`);
 }
 
 // 任务面板（订阅 task_state；TASK_INFO 到达 → 全量重渲）。模块级单例 —— 重连不重建，
@@ -983,43 +986,35 @@ const taskPanel = createTaskPanel({
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json
 // 丢失时仍 disable，防止悄悄允许开第二个（docs §7.1 实现项第 4 条）。
-//
-// 上次写过的 chip 状态 —— P5.2.8 chip 升级到下拉后，render 出 [label] + [▾] 双节点；
-// task_info 频繁回环（每 artifact / decision / update 一次），靠这个签名跳过无变化的
-// DOM 写避免无谓 layout invalidation。
-let _lastChipKey = "";
 taskState.subscribe((state) => {
   const active = taskState.getActiveTask();
   const hasAny = state.tasks.length > 0;
   // 0 任务 → 整个 chip 隐起来（与 P5.1 同口径，避免点开"房间级"下拉发现啥可切的都没）
   composerTaskChipEl.hidden = !hasAny;
   if (hasAny) {
-    const labelText = active
-      ? `📋 ${active.title || "(无标题)"}`
-      : "🗨 房间级";
-    const titleHint = active
-      ? `当前任务：${active.title || "(无标题)"} —— 点击切换`
-      : "当前未挂任务（房间级闲聊）—— 点击切到任务";
-    const key = `${active ? active.id : "-"}|${labelText}`;
-    if (key !== _lastChipKey) {
-      composerTaskChipEl.replaceChildren();
-      const label = document.createElement("span");
-      label.className = "composer-task-chip-label";
-      label.textContent = labelText;
-      const chev = document.createElement("span");
-      chev.className = "composer-task-chip-chevron";
-      chev.textContent = "▾";
-      composerTaskChipEl.appendChild(label);
-      composerTaskChipEl.appendChild(chev);
-      composerTaskChipEl.title = titleHint;
-      composerTaskChipEl.classList.toggle("composer-task-chip-empty", !active);
-      _lastChipKey = key;
-    }
+    renderComposerTaskChip(active);
   }
   // body class 给 CSS 用 —— 控制 share/ pill 上 "拷贝到当前任务" 按钮是否可见。
   document.body.classList.toggle("has-active-task", !!active);
   updateNewTaskBtn();
 });
+
+function renderComposerTaskChip(active) {
+  const titleText = active ? active.title || TASK_UNTITLED : null;
+  composerTaskChipEl.replaceChildren();
+  const label = document.createElement("span");
+  label.className = "composer-task-chip-label";
+  label.textContent = active ? `📋 ${titleText}` : "🗨 房间级";
+  const chev = document.createElement("span");
+  chev.className = "composer-task-chip-chevron";
+  chev.textContent = "▾";
+  composerTaskChipEl.appendChild(label);
+  composerTaskChipEl.appendChild(chev);
+  composerTaskChipEl.title = active
+    ? `当前任务：${titleText} —— 点击切换`
+    : "当前未挂任务（房间级闲聊）—— 点击切到任务";
+  composerTaskChipEl.classList.toggle("composer-task-chip-empty", !active);
+}
 
 // composer chip dropdown（P5.2.8）—— 列所有 status != closed 的任务 + "🗨 房间级"
 // 选项，当前 active 标 .selected。chip 在 composer 底栏，popover 走 anchor 上方位置
@@ -1056,18 +1051,22 @@ function openTaskChipDropdown() {
   );
   const pop = document.createElement("div");
   pop.className = "popover task-chip-dropdown";
-  pop.appendChild(makeChipDropdownItem({
+  pop.appendChild(makePopoverOption({
     label: "🗨 房间级",
     desc: active ? "不归任何任务（聊天回到房间级闲聊）" : "当前选中",
-    selected: !active,
+    current: !active,
+    extraClass: "task-chip-option",
+    onClose: closeTaskChipDropdown,
     onClick: () => active && sendSetActiveTask(null),
   }));
   for (const t of items) {
     const isCurrent = !!(active && t.id === active.id);
-    pop.appendChild(makeChipDropdownItem({
-      label: `📋 ${t.title || "(无标题)"}`,
+    pop.appendChild(makePopoverOption({
+      label: `📋 ${t.title || TASK_UNTITLED}`,
       desc: isCurrent ? "当前选中" : `状态：${taskStatusLabel(t.status)}`,
-      selected: isCurrent,
+      current: isCurrent,
+      extraClass: "task-chip-option",
+      onClose: closeTaskChipDropdown,
       onClick: () => !isCurrent && sendSetActiveTask(t.id),
     }));
   }
@@ -1075,50 +1074,6 @@ function openTaskChipDropdown() {
   positionPopoverAboveAnchor(pop, composerTaskChipEl);
   _chipDropdownEl = pop;
   _detachChipDismiss = attachPopoverDismissHandlers(pop, closeTaskChipDropdown);
-}
-
-function makeChipDropdownItem({ label, desc, selected, onClick }) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "popover-option task-chip-option";
-  // ``.current`` 与 permission popover 同口径 —— 已是当前态，cursor: default + hover
-  // 不变色（自然提示"点这没用"），不必单独写 disabled / aria-pressed。
-  if (selected) btn.classList.add("current");
-  const meta = document.createElement("span");
-  meta.className = "popover-option-meta";
-  const labelEl = document.createElement("span");
-  labelEl.className = "popover-option-label";
-  labelEl.textContent = label;
-  meta.appendChild(labelEl);
-  if (desc) {
-    const descEl = document.createElement("span");
-    descEl.className = "popover-option-desc";
-    descEl.textContent = desc;
-    meta.appendChild(descEl);
-  }
-  btn.appendChild(meta);
-  btn.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    closeTaskChipDropdown();
-    try { onClick(); } catch (e) { console.error("chip dropdown click", e); }
-  });
-  return btn;
-}
-
-function positionPopoverAboveAnchor(pop, anchor) {
-  // chip 永远在窗口底栏 —— anchor 下方一定溢出屏幕。先按 anchor 顶 + bottom 锚定让
-  // popover "向上展开"；若高度太大顶到窗口顶（罕见，>20 个任务时才会），退回到 anchor
-  // 下方（用户得滚 composer 才看到下半部分，但至少不裁切）。
-  const rect = anchor.getBoundingClientRect();
-  pop.style.position = "fixed";
-  pop.style.left = `${Math.round(rect.left)}px`;
-  pop.style.bottom = `${Math.round(window.innerHeight - rect.top + 6)}px`;
-  pop.style.top = "";
-  const popRect = pop.getBoundingClientRect();
-  if (popRect.top < 8) {
-    pop.style.bottom = "";
-    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
-  }
 }
 
 function sendSetActiveTask(taskId) {
@@ -1189,7 +1144,7 @@ messagesEl.addEventListener("contextmenu", (ev) => {
   openActionPopover(li, "消息操作", [
     {
       label: "📌 标为决策",
-      desc: `把这条加进任务「${active.title || "(无标题)"}」`,
+      desc: `把这条加进任务「${active.title || TASK_UNTITLED}」`,
       onClick: () => decisionSupport.open(li, active.id),
     },
   ]);

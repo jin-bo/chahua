@@ -17,6 +17,61 @@ export function positionPopoverByAnchor(pop, anchor) {
   }
 }
 
+// composer 底栏 chip / textarea 这类近窗底 anchor 用 —— 默认锚到 anchor 上方，
+// 顶到屏幕顶（短窗 + 长 popover 罕见）才退回 anchor 下方。与 positionPopoverByAnchor
+// 同构（fixed + rect-read + 兜底分支），独立函数避免一个 placement 参数让两套 fallback
+// 逻辑混在一起。
+export function positionPopoverAboveAnchor(pop, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  pop.style.position = "fixed";
+  pop.style.left = `${Math.round(rect.left)}px`;
+  pop.style.bottom = `${Math.round(window.innerHeight - rect.top + 6)}px`;
+  pop.style.top = "";
+  const popRect = pop.getBoundingClientRect();
+  if (popRect.top < 8) {
+    pop.style.bottom = "";
+    pop.style.top = `${Math.round(rect.bottom + 6)}px`;
+  }
+}
+
+// 共享 .popover-option 按钮构造 —— action popover / task chip dropdown 同款骨架
+// （button > meta > label + optional desc）。click 自动 stopPropagation + onClose
+// + onClick try/catch。permission popover 因为多一道 swatch / "（当前）" 行内 tag
+// 不复用本助手，自管 DOM。
+export function makePopoverOption({
+  label, desc, onClick,
+  extraClass = "",
+  danger = false,
+  current = false,
+  onClose = () => {},
+}) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "popover-option";
+  if (extraClass) btn.classList.add(...extraClass.split(/\s+/));
+  if (danger) btn.classList.add("danger");
+  if (current) btn.classList.add("current");
+  const meta = document.createElement("span");
+  meta.className = "popover-option-meta";
+  const labelEl = document.createElement("span");
+  labelEl.className = "popover-option-label";
+  labelEl.textContent = label;
+  meta.appendChild(labelEl);
+  if (desc) {
+    const descEl = document.createElement("span");
+    descEl.className = "popover-option-desc";
+    descEl.textContent = desc;
+    meta.appendChild(descEl);
+  }
+  btn.appendChild(meta);
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    onClose();
+    try { onClick(); } catch (e) { console.error("popover option click", e); }
+  });
+  return btn;
+}
+
 // setTimeout 0 延后挂载 —— 否则触发 popover 那一下 click 冒泡到 document 会立刻关。
 export function attachPopoverDismissHandlers(pop, onClose) {
   const outside = (ev) => {
@@ -70,29 +125,14 @@ export function openActionPopover(anchor, title, items) {
   head.textContent = title;
   pop.appendChild(head);
   for (const it of items) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "popover-option action-option";
-    if (it.danger) btn.classList.add("danger");
-    const meta = document.createElement("span");
-    meta.className = "popover-option-meta";
-    const label = document.createElement("span");
-    label.className = "popover-option-label";
-    label.textContent = it.label;
-    meta.appendChild(label);
-    if (it.desc) {
-      const desc = document.createElement("span");
-      desc.className = "popover-option-desc";
-      desc.textContent = it.desc;
-      meta.appendChild(desc);
-    }
-    btn.appendChild(meta);
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      closeActionPopover();
-      try { it.onClick(); } catch (e) { console.error("action popover click handler 抛错", e); }
-    });
-    pop.appendChild(btn);
+    pop.appendChild(makePopoverOption({
+      label: it.label,
+      desc: it.desc,
+      onClick: it.onClick,
+      danger: it.danger,
+      extraClass: "action-option",
+      onClose: closeActionPopover,
+    }));
   }
   document.body.appendChild(pop);
   positionPopoverByAnchor(pop, anchor);
