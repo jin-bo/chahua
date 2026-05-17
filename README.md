@@ -51,6 +51,7 @@ transcript / cursor / summary 持久化保留。
 - 发言 / 停止当前 turn（同一按钮形变）；`@<茶客名>` 直接路由（含空格的名字也能命中）。
 - 多行输入：Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px 切滚动。
 - 附件上传：composer 左侧 `+`，文件落房间共享目录，随下一条消息一起进上下文。
+- 任务房间：右上角面板「+ 新任务」开任务 → composer 顶部 chip 显示当前 active 任务；茶客感知 active 任务（onboarding/incremental prompt 都注入 task 块），可写 `./task/<name>` 自动归集为 artifact、可 propose 决策 / 新任务待你「采纳」。产物列表点击即下载（带白名单 + symlink 防逃逸）。多任务共存，单时刻最多 1 个 active。
 - sidebar：切换房间 / 加茶客 / 导入 persona（本地目录或 GitHub）；点茶客头像设权限、勾选信任其 MCP。
 - **双击房间名** 弹「更改房间配置（直接编辑 room.toml）/ 清空聊天」；**双击用户头像或显示名** 弹「编辑配置（USER.md）/ 换头像（PNG / JPG / WebP / GIF）」。
 
