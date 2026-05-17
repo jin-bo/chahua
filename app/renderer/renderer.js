@@ -180,14 +180,10 @@ function setInputEnabled(enabled) {
   document.body.classList.toggle("disconnected", !enabled);
 }
 
-// "+ 新任务" 同时受 connected 与 task 存在性制约。setInputEnabled 与 task_info
-// 接帧两路都调这个汇合点；hasAny 直接派生自 task_state，不另留 cache。
+// "+ 新任务" 只受 connected 制约（P5.2 起允许多任务，去掉"已有任务时禁用"门）。
 function updateNewTaskBtn() {
-  const hasAny = taskState.getState().tasks.length > 0;
-  taskPanelNewBtn.disabled = !connected || hasAny;
-  taskPanelNewBtn.title = hasAny
-    ? "当前已有任务 —— P5.2 起支持多任务"
-    : "新建任务";
+  taskPanelNewBtn.disabled = !connected;
+  taskPanelNewBtn.title = "新建任务";
 }
 
 // 同一个按钮承担「发送 / 停止」双重职责；aria-label 同步切，屏读器读"发送"/"停止"而
