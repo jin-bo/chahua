@@ -981,6 +981,14 @@ const taskPanel = createTaskPanel({
   // _inbound_set_active_task 走前 cancel inflight turn，前端不必再判 connected 之外
   // 的状态。
   onSetActive: sendSetActiveTask,
+  onCloseTask: (taskId, status) => {
+    if (!connected) return;
+    send({ type: Inbound.CLOSE_TASK, task_id: taskId, status });
+    setStatus("", status === "done" ? "标记完成…" : "放弃任务…");
+  },
+  // 每次重渲都 fresh 拉 —— 茶客加 / 删后 owner 下拉同步刷新（room_info 回环会触发
+  // taskState 重渲，guests 已先一步在 renderSidebar 里更新）。
+  getGuestNames: () => guests.map((g) => g.name),
 });
 
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮

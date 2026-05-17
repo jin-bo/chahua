@@ -443,6 +443,60 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .task-card-meta dt { color: #999; }
 .task-card-meta dd { margin: 0; color: #555; }
 
+/* 任务卡可编辑控件（P5.2.9）：status / owner 下拉 + 完成 / 放弃按钮。
+   两栏 grid 给 controls，与下面 actions 行视觉对齐。 */
+.task-card-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+  margin: 8px 0;
+}
+.task-card-control {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: #777;
+}
+.task-card-control-label { color: #999; }
+.task-control-select {
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+}
+.task-control-select:hover { border-color: #b0a890; }
+.task-control-select:focus { outline: 2px solid #d0c8b4; outline-offset: 1px; }
+.task-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.task-card-close-btn {
+  flex: 1;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #fff;
+}
+/* 完成：浅绿基调（沿 .task-other-status[data-status=done]）。
+   放弃：浅红基调（沿 abandoned）—— 让用户一眼分辨破坏性 vs 收尾。 */
+.task-card-close-done {
+  border-color: #a8c9a0;
+  color: #406c2a;
+}
+.task-card-close-done:hover { background: #eaf5e3; }
+.task-card-close-abandoned {
+  border-color: #d4a8a8;
+  color: #8a4040;
+}
+.task-card-close-abandoned:hover { background: #f5e3e3; }
+
 /* 产物 / 决策两块：head + ul，空状态用淡色 hint */
 .task-section { margin-bottom: 12px; }
 .task-section-head {
