@@ -697,6 +697,59 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 #messages li.error .speaker { color: #c00; }
 #messages li.error .text { color: #c00; }
 
+/* 任务房间消息 chip（P5.2.10）：非 active 任务的消息气泡左上角浮一颗灰 pill，点击
+   进入该任务 filter 视图。.bubble 已有 position:relative，chip 直接绝对定位即可。 */
+.message-task-chip {
+  position: absolute;
+  top: -10px;
+  left: 8px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 8px;
+  background: #ece4cf;
+  color: #6a4f25;
+  border: 1px solid #d0c8b4;
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 1;
+  white-space: nowrap;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.message-task-chip:hover {
+  background: #fff8dc;
+  border-color: #b0a890;
+}
+
+/* filter 视图：满足 enter 触发的 li 才显，其余 .filtered-out 全部隐起来。 */
+#messages li.filtered-out { display: none !important; }
+
+/* 顶部 filter 状态横幅（sticky 顶到聊天区上方）。返回全部按钮走 sidebar 操作按钮同款。 */
+.message-filter-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: #fff8dc;
+  border-bottom: 1px solid #e0c068;
+  font-size: 12px;
+  color: #6a4f25;
+  flex-shrink: 0;
+}
+.message-filter-banner[hidden] { display: none; }
+.message-filter-banner-text { flex: 1; }
+.message-filter-banner-exit {
+  font-size: 11px;
+  padding: 3px 10px;
+  background: #fff;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  color: #6a4f25;
+  cursor: pointer;
+}
+.message-filter-banner-exit:hover { background: #ffeec0; border-color: #c89c40; }
+
 /* 打分横条 + 气泡内 score-badge 已下线，打分移到 sidebar 茶客行右侧
    （见 #guests li .guest-score）。 */
 

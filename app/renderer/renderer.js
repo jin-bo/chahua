@@ -244,10 +244,11 @@ function showPermissionPopover(anchor, g) {
 // 整段重渲；cursor 与状态尾走 sibling 节点，避开 innerHTML 替换的擦除。
 //
 // 打分不挂在气泡里 —— 沿 sidebar 茶客名右侧显示，见 ``applyScoresToSidebar``。
-function makeGuestRow(speaker, { streaming = false, messageId = null } = {}) {
+function makeGuestRow(speaker, { streaming = false, messageId = null, taskId = null } = {}) {
   const li = document.createElement("li");
   li.className = "msg";
   if (messageId) li.dataset.messageId = messageId;
+  if (taskId) li.dataset.taskId = taskId;
   li.dataset.speaker = speaker;
   li.appendChild(makeAvatar(speaker, "msg-avatar"));
   const bubble = document.createElement("div");
@@ -273,10 +274,11 @@ function makeGuestRow(speaker, { streaming = false, messageId = null } = {}) {
 
 // 用户行：右对齐气泡 + 头像（无名字 —— 自己看自己 redundant）。镜像茶客布局：
 // 茶客是 [头像][气泡]，用户是 [气泡][头像]。
-function makeUserRow(text, { messageId = null } = {}) {
+function makeUserRow(text, { messageId = null, taskId = null } = {}) {
   const li = document.createElement("li");
   li.className = "user";
   if (messageId) li.dataset.messageId = messageId;
+  if (taskId) li.dataset.taskId = taskId;
   li.dataset.speaker = USER_SPEAKER_ID;
   const bubble = document.createElement("div");
   bubble.className = "bubble bubble-user";
@@ -290,19 +292,133 @@ function makeUserRow(text, { messageId = null } = {}) {
   return li;
 }
 
-function appendBubble({ speaker, text, kind, messageId = null }) {
+function appendBubble({ speaker, text, kind, messageId = null, taskId = null }) {
   stickToBottom(() => {
     let li;
     if (kind === "user") {
-      li = makeUserRow(text, { messageId });
+      li = makeUserRow(text, { messageId, taskId });
     } else {
-      const row = makeGuestRow(speaker, { messageId });
+      const row = makeGuestRow(speaker, { messageId, taskId });
       renderGuestText(row, text);
       if (kind === "error") row.li.classList.add("error");
       li = row.li;
     }
     messagesEl.appendChild(li);
+    refreshMessageTaskChip(li);
+    applyMessageFilterTo(li);
   });
+}
+
+// ── 消息上的任务 chip + filter 视图（P5.2.10）─────────────────────────────
+//
+// 非 active 任务的消息气泡左上挂灰 chip 显示任务名；点击进入该任务 filter 视图（仅
+// 渲染 data-task-id == X 的 li）。filter 状态走单 module-level var；切换房间 /
+// clear room 时强制 exit。
+//
+// chip 文案随 taskState 变 —— 任务被改名、被关、被切 active 都靠 subscriber 重刷。
+// 单条 li 的 chip 走 refreshMessageTaskChip(li) 单点；新挂 li 直接调一次而非依赖
+// subscriber 在全局 walk（subscriber 也会触发，但 walk 100 条 li 比单挂贵）。
+
+let _filterTaskId = null;
+let _filterBannerEl = null;
+
+function refreshMessageTaskChip(li) {
+  const taskId = li.dataset.taskId || "";
+  let chip = li.querySelector(".message-task-chip");
+  const removeChip = () => { if (chip) { chip.remove(); chip = null; } };
+  if (!taskId) {
+    removeChip();
+    return;
+  }
+  const { tasks, activeTaskId } = taskState.getState();
+  // active 任务的消息不挂 chip —— "默认 chat 主流就是 active"，挂了反而吵。
+  if (taskId === activeTaskId) {
+    removeChip();
+    return;
+  }
+  const task = tasks.find((t) => t && t.id === taskId);
+  if (!task) {
+    // task 还没加载到 taskState（room_history 先于 task_info）/ 被删了 —— 不挂 chip，
+    // 下次 subscriber 触发 refresh 再补。
+    removeChip();
+    return;
+  }
+  const text = `📋 ${task.title || TASK_UNTITLED}`;
+  if (chip) {
+    if (chip.textContent !== text) chip.textContent = text;
+    return;
+  }
+  chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "message-task-chip";
+  chip.textContent = text;
+  chip.title = `进入任务「${task.title || TASK_UNTITLED}」的 filter 视图`;
+  chip.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    enterMessageFilter(taskId);
+  });
+  const bubble = li.querySelector(".bubble");
+  if (bubble) bubble.appendChild(chip);
+}
+
+function refreshAllMessageTaskChips() {
+  const lis = messagesEl.querySelectorAll("li[data-task-id]");
+  for (const li of lis) refreshMessageTaskChip(li);
+}
+
+function applyMessageFilterTo(li) {
+  if (_filterTaskId === null) {
+    li.classList.remove("filtered-out");
+    return;
+  }
+  const liTaskId = li.dataset.taskId || "";
+  li.classList.toggle("filtered-out", liTaskId !== _filterTaskId);
+}
+
+function applyMessageFilterAll() {
+  for (const li of messagesEl.querySelectorAll("li")) applyMessageFilterTo(li);
+}
+
+function enterMessageFilter(taskId) {
+  _filterTaskId = taskId;
+  ensureFilterBanner();
+  updateFilterBannerText();
+  _filterBannerEl.hidden = false;
+  applyMessageFilterAll();
+}
+
+function exitMessageFilter() {
+  if (_filterTaskId === null) return;
+  _filterTaskId = null;
+  if (_filterBannerEl) _filterBannerEl.hidden = true;
+  applyMessageFilterAll();
+}
+
+function ensureFilterBanner() {
+  if (_filterBannerEl) return;
+  _filterBannerEl = document.createElement("div");
+  _filterBannerEl.className = "message-filter-banner";
+  _filterBannerEl.hidden = true;
+  const text = document.createElement("span");
+  text.className = "message-filter-banner-text";
+  _filterBannerEl.appendChild(text);
+  const exit = document.createElement("button");
+  exit.type = "button";
+  exit.className = "message-filter-banner-exit";
+  exit.textContent = "返回全部";
+  exit.addEventListener("click", exitMessageFilter);
+  _filterBannerEl.appendChild(exit);
+  // 插到 messagesEl 紧前 —— flex 容器 #main 里同级 sibling，挡不到聊天区域滚动。
+  messagesEl.parentNode.insertBefore(_filterBannerEl, messagesEl);
+}
+
+function updateFilterBannerText() {
+  if (!_filterBannerEl || _filterTaskId === null) return;
+  const { tasks } = taskState.getState();
+  const task = tasks.find((t) => t && t.id === _filterTaskId);
+  const title = task ? task.title || TASK_UNTITLED : _filterTaskId;
+  _filterBannerEl.querySelector(".message-filter-banner-text").textContent =
+    `仅显示任务「${title}」的消息 —— 其余隐起来`;
 }
 
 // 打分写到 sidebar 各茶客行的 ``.guest-score`` span 上（不是主聊天区）。
@@ -328,8 +444,15 @@ function applyScoresToSidebar() {
 function startStreamingMessage(env) {
   stickToBottom(() => {
     const speaker = env.guest_name || "?";
-    const { li, textEl, bubble } = makeGuestRow(speaker, { streaming: true, messageId: env.message_id });
+    const taskId = env.data?.task_id ?? null;
+    const { li, textEl, bubble } = makeGuestRow(speaker, {
+      streaming: true,
+      messageId: env.message_id,
+      taskId,
+    });
     messagesEl.appendChild(li);
+    refreshMessageTaskChip(li);
+    applyMessageFilterTo(li);
     // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
     // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
     const entry = { textEl, li, bubble, accumulated: "" };
@@ -369,16 +492,21 @@ function endStreamingMessage(env) {
     // 整段一次性回）。OK 路径走 appendBubble；error 路径要挂 status-tail，appendBubble
     // 没那个口子，单独装一行。
     const speaker = env.guest_name || "?";
+    const taskId = env.data?.task_id ?? null;
     if (env.status === Status.OK) {
-      appendBubble({ speaker, text: env.data?.text ?? "", messageId: env.message_id });
+      appendBubble({ speaker, text: env.data?.text ?? "", messageId: env.message_id, taskId });
       return;
     }
     const partial = env.data?.partial_text ?? "";
-    const row = makeGuestRow(speaker, { messageId: env.message_id });
+    const row = makeGuestRow(speaker, { messageId: env.message_id, taskId });
     renderGuestText(row, partial);
     row.li.classList.add("error");
     setStatusTail(row.bubble, statusTail(env));
-    stickToBottom(() => messagesEl.appendChild(row.li));
+    stickToBottom(() => {
+      messagesEl.appendChild(row.li);
+      refreshMessageTaskChip(row.li);
+      applyMessageFilterTo(row.li);
+    });
     return;
   }
   inFlight.delete(env.message_id);
@@ -428,6 +556,8 @@ function renderSidebar(roomInfo) {
   inFlight.clear();
   scoresByName = new Map();
   scoreSpansByName.clear();
+  // 切房 / 重连 / 清空 → filter 视图无意义，强 exit 让新房间从全量视角起步。
+  exitMessageFilter();
   messagesEl.replaceChildren();
   upload.clear();
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
@@ -619,14 +749,17 @@ const USER_SPEAKER_ID = "user";
 
 function renderHistory(messages) {
   // 进 Room（首次连接 / 重连 / 换房）时全量回放。messagesEl 的清空由 renderSidebar
-  // 一帧前完成（room_info 先于 room_history 到达），单点 owner 改一处即可。
+  // 一帧前完成（room_info 先于 room_history 到达），单点 owner 改一处即可。room_history
+  // 先于 task_info 到达 —— 这里 li 上的 data-task-id 先就位；后续 task_info 触发的
+  // refreshMessageTaskChips 会找到这些 li 并把 chip 挂上。
   if (!Array.isArray(messages) || messages.length === 0) return;
   stickToBottom(() => {
     for (const m of messages) {
+      const taskId = m.task_id ?? null;
       if (m.speaker_id === USER_SPEAKER_ID) {
-        messagesEl.appendChild(makeUserRow(m.text, { messageId: m.message_id }));
+        messagesEl.appendChild(makeUserRow(m.text, { messageId: m.message_id, taskId }));
       } else {
-        const row = makeGuestRow(m.speaker_id, { messageId: m.message_id });
+        const row = makeGuestRow(m.speaker_id, { messageId: m.message_id, taskId });
         renderGuestText(row, m.text);
         messagesEl.appendChild(row.li);
       }
@@ -998,6 +1131,15 @@ const taskPanel = createTaskPanel({
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json
 // 丢失时仍 disable，防止悄悄允许开第二个（docs §7.1 实现项第 4 条）。
+//
+// 任务房间消息 chip + filter banner 文案也跟着 taskState 走 —— 任务改名 / 切 active /
+// 关任务都靠这条 subscriber 顺着重刷。filter banner 自身的可见性由 enter / exit 控制；
+// 这里只刷文案。
+taskState.subscribe(() => {
+  refreshAllMessageTaskChips();
+  if (_filterTaskId !== null) updateFilterBannerText();
+});
+
 taskState.subscribe((state) => {
   const active = taskState.getActiveTask();
   const hasAny = state.tasks.length > 0;
@@ -1283,7 +1425,14 @@ composer.addEventListener("submit", (ev) => {
   const echoLines = [text];
   for (const f of files) echoLines.push(`<./${f}>`);
   const echo = echoLines.filter(Boolean).join("\n");
-  appendBubble({ speaker: userDisplayName, text: echo, kind: "user" });
+  // task_id snapshot at submit —— server 端在 inbound 接帧时按当前 active 打 tag，与
+  // 这里 active 通常一致（单客户端串行 inbound + 用户改 active 也走 inbound 排队）。
+  appendBubble({
+    speaker: userDisplayName,
+    text: echo,
+    kind: "user",
+    taskId: taskState.getActiveTask()?.id ?? null,
+  });
   ws.send(JSON.stringify({
     type: Inbound.USER_MESSAGE,
     text,
