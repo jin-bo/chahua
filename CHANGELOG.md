@@ -6,6 +6,15 @@
 ## [Unreleased]
 
 ### Added
+- **P5.1 任务房间 MVP**（2026-05-16，详见 [`docs/P5-任务房间.md`](docs/P5-任务房间.md)）：把房间从纯聊天容器升级为带任务的工作容器。**P5.1 严守"一房间最多 1 任务"窄路径**：开任务 → 消息打 tag → 拷贝产物 → 记决策；切换 / 关闭 / 多任务延后到 P5.2。
+  - **核心模型**：`tasks/state.json`（`active_task_id` 覆写式 tmp+rename）+ `tasks/<id>/{task.json, decisions.jsonl, artifacts/}`。`transcript.jsonl` 每条多可选 `task_id` 字段（缺 = 房间级，向后兼容）。加载期双向修复 state.json↔task.json：state 指向不存在 → 清回 None；state 缺但只有一个 task.json → 自动设为 active 并回写。
+  - **入站严格 / 落盘宽容**：inbound 白名单严格、未知键 NOTICE error 丢帧；jsonl 加载未知字段 warn 忽略、必需缺才跳条。两条规则有意不对称（保护数据不被前端瞎写 vs 保护跨版本向前兼容）。
+  - **新 wire 帧**：上行 `open_task` / `update_task` / `attach_artifact` / `add_decision`；下行 `task_info`（权威快照，状态变更后重发整份）+ 4 个 hint（`task_open` / `task_update` / `task_decision_added` / `task_artifact_added`，给前端 flash 高亮，不进状态本身）。`schema_version` 不 bump —— 新 envelope.data.task_id 字段老前端忽略不报错。
+  - **写权限永远在用户**：茶客通过协议提议（P5.3 起），UI 渲染成"采纳"按钮等用户点；P5.1 入口（"+ 新任务" 按钮 / 右键消息「📌 标为决策」/ pill 上 📎 拷贝 / `/task <title>` 斜杠命令）全是用户直接动作。
+  - **`attach_artifact` 是 copy 不是 move**：`share/` 是房间公共桌面 + 历史消息 / 茶客 cwd 都引用，移动会断引用。茶客视角 `share/` 永远在原位。
+  - **任务面板 UI**：右侧栏（折叠状态记 `localStorage('chahua.taskPanel.collapsed')`）；当前任务卡（title / goal 支持 inline 编辑，contenteditable + blur 触发 update_task）+ 产物列表 + 决策列表。composer 顶端 "📋 \<title\>" 静态 pill（chip），active 切换时跟着。`+ 新任务` 按钮在 `task_info.tasks.length > 0` 时 disabled（看任务存在性而非 active，防 state.json 丢失时悄悄允许开第二个）。
+  - **新增模块**：`chahua/task.py` / `chahua/tasks_store.py`（后端）；`app/renderer/{task_state, task_panel}.js`（前端）。`chahua/events.py` 加 5 个新 `ChahuaEventType` + `new_id` / `now_ms` 公共 helper（task / decision / msg / turn 共用 mint 口径）。
+  - **附带上传链路修缮**：`_UPLOAD_MAX_BYTES` 2MB → 200MB；`_upload_file` 恒发 `FILE_UPLOADED` envelope（成功 / 失败都发）让前端串行上传循环靠 echo 推进；renderer 端 `upload.js` 串行 for-of + pendingEchoes FIFO + dropPending；ws 断 / 切房时拒掉 await echo 让 finally 清 `isUploading`。
 - **P4 专业茶客配置闭环**（2026-05-16，详见 [`docs/P4-专业茶客配置闭环.md`](docs/P4-专业茶客配置闭环.md)）：把 P1.5 全数硬拒到 P4 的 `room.toml` 字段一次落地。
   - `[room]` 编排参数 `want_threshold` / `max_consecutive_ai_turns` / `speaker_cooldown_turns` / `onboarding_threshold` 接入；改值热替不重建茶客。
   - `[scoring]` / `[summary]` / `[[guest]]` LLM 字段：`model = "<provider>/<model>"` 合并写法（OpenRouter / LiteLLM 二级路径保留）；all-or-nothing 校验（`base_url` / `api_key_env` 不能单独出现）；section 级 fallback 链 `[summary]` → `[scoring]` → 房间默认。每位茶客可独立配 LLM client（之前 P1.5 全茶客共用一个）。

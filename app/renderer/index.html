@@ -399,12 +399,79 @@
         </div>
       </div>
     </div>
+
+    <!-- 标为决策 modal —— 右键消息后调起。summary 必填（≤ 200 字）；支持消息列表
+         显示当前消息 + 它上面最多 4 条（同房间），勾选的纳入 supporting_message_ids。 -->
+    <div id="mark-decision-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>标为决策</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <label class="modal-field">
+            <span>一句话说清这条决策是什么（≤ 200 字）</span>
+            <textarea id="mark-decision-summary" class="modal-textarea modal-textarea-short" maxlength="200" placeholder="例如：先用 Electron 打包，砍掉 Windows 支持"></textarea>
+          </label>
+          <div class="modal-field">
+            <span>支持消息（默认勾右键的那条；同房间往上最多 4 条可挑）</span>
+            <ul id="mark-decision-support" class="decision-support-list"></ul>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="mark-decision-submit" type="button" class="primary">采纳</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 新建任务 modal —— title 必填，goal / owner 可选。submit 后服务端
+         open_task → emit task_open hint + task_info 权威快照；前端只关掉 modal，
+         面板自动渲染。校验失败走 NOTICE error（详见 server._inbound_open_task）。 -->
+    <div id="new-task-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span>新建任务</span>
+          <button type="button" class="modal-close" data-close>&times;</button>
+        </div>
+        <div class="modal-body">
+          <label class="modal-field">
+            <span>标题（必填，≤ 60 字）</span>
+            <input id="new-task-title" type="text" placeholder="例如：写 README" maxlength="60">
+          </label>
+          <label class="modal-field">
+            <span>目标（可选，支持多行 markdown）</span>
+            <textarea id="new-task-goal" class="modal-textarea modal-textarea-short" placeholder="目标 / 验收口径 / 当前进展…"></textarea>
+          </label>
+          <label class="modal-field">
+            <span>负责人（可选，P5.1 创建后不可改）</span>
+            <select id="new-task-owner" class="modal-select"></select>
+          </label>
+          <div class="modal-hint">「全员」= 不指定负责人。P5.2 起才支持改 owner / 关闭任务。</div>
+        </div>
+        <div class="modal-footer">
+          <button id="new-task-submit" type="button" class="primary">创建</button>
+        </div>
+      </div>
+    </div>
     <ul id="messages" aria-live="polite"></ul>
+    <!-- 任务面板：placeholder 留容器与折叠按钮让首屏样式稳定，子 DOM 由
+         task_panel.js 在订阅 task_state 时填。 -->
+    <aside id="task-panel" aria-label="任务" data-collapsed="0">
+      <div id="task-panel-header">
+        <button type="button" id="task-panel-toggle" class="task-panel-toggle" title="折叠 / 展开任务面板">▶</button>
+        <span class="task-panel-title">任务</span>
+        <button type="button" id="task-panel-new" class="task-panel-new" title="新建任务" disabled>+ 新任务</button>
+      </div>
+      <div id="task-panel-body" class="task-panel-body"></div>
+    </aside>
   </div>
   <form id="composer">
     <button type="button" id="attach-file" class="composer-attach" title="上传文件到房间共享目录（茶客可在 ./share/ 下读取）" disabled>+</button>
     <input id="file-input" type="file" multiple hidden>
     <div id="composer-wrap">
+      <!-- 当前任务 chip —— active 非空时显示 "📋 <title>"，静态 pill（无下拉无 ✕）。
+           P5.1 只有 0 或 1 个 active；P5.2 起 chip 会升级成下拉。 -->
+      <div id="composer-task-chip" class="composer-task-chip" hidden></div>
       <!-- 已上传待发送的文件 pill 列表。上传成功后挂入；submit 时清空。 -->
       <ul id="pending-files" class="pending-files" hidden></ul>
       <textarea id="text" rows="1" placeholder="说点什么…  (@ 茶客名 直接点；Shift+Enter 换行)" autocomplete="off" autofocus></textarea>

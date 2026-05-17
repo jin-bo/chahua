@@ -39,6 +39,9 @@ export function createUpload({
   isConnected,
   send,
   setStatus,
+  // 可选：点 pill 上的 📎 时调用。如不传，pill 不渲染该按钮。当前任务存在与否由
+  // 调用方在 body 上挂 .has-active-task class 控制按钮可见性（见 style.css）。
+  onAttachToTask = null,
 }) {
   // rel = "share/<safe-name>"（server 派发，filesystem 洗过名）；
   // original = 用户原文件名，pill 显示用 + sanitize 改过时挂 title 对齐"我点的"vs"落地的"。
@@ -81,6 +84,15 @@ export function createUpload({
         name.title = `已上传为 ${landedName}（原名 ${f.original} 含非法字符被替换）`;
       }
       li.appendChild(name);
+      if (onAttachToTask) {
+        const attach = document.createElement("button");
+        attach.type = "button";
+        attach.className = "pending-file-attach";
+        attach.textContent = "📎";
+        attach.title = "拷贝到当前任务（share/ 原文件保留）";
+        attach.addEventListener("click", () => onAttachToTask(f.rel));
+        li.appendChild(attach);
+      }
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "pending-file-remove";

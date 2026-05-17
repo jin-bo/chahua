@@ -99,6 +99,12 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **API key 永远不进 toml 也不进 envelope**。toml 最大让步是 `api_key_env = "MY_VAR"`（告诉装配层去哪读 env）；room_info envelope 只下发 `api_key_env` 名 + `api_key_ready` bool，绝不下发 key 本身。
 - **`[[guest.extra_mcp_servers]]` 自动信任 vs persona sidecar mcp 走 trust**。两套口径不对称：房间级 inline MCP 是用户在自己 toml 里手写的 → 等价用户意图，自动 trust=True 不进 trust 清单；persona sidecar `mcp.json` 可能从 GitHub 导入 `command` 任意可执行 → 必须 UI 勾"信任"才装载。合并时房间级覆盖 persona 同名。
 - **isolation 切换不自动迁移记忆**。`isolation = "room" | "global"` 决定茶客 cwd 路径；切换后旧路径下的 `.agentao/memory.db` / `sessions/` 保持原样（UI 提交前 confirm 提醒）。自动迁移的"两边都有怎么办"复杂度不值。
+- **任务房间：入站严格、落盘宽容**（P5.1）。`open_task` / `update_task` / `add_decision` / `attach_artifact` inbound 字段白名单**严格**（未知键 → NOTICE error + 丢帧，等价 `room.toml` 抓 typo 口径，**保护数据不被前端瞎写**）；`task.json` / `decisions.jsonl` 加载时未知字段 **warn 后忽略、必需字段缺才跳坏该条**（等价 `transcript.jsonl` 跳坏行口径，**保护跨版本向前兼容**）。两条规则**有意不对称**。
+- **`task_id` 只活在 `envelope.data`**（P5.1）。`message_start` / `message_end` 的 `data.task_id` 是可选标签，envelope 顶层字段不动，`schema_version` 不 bump。老前端忽略未知 data 字段不出错。
+- **TASK_INFO 是权威快照，其它 4 个是 hint**（P5.1）。任意 task 状态变更后服务端**重发整份** `task_info`（`tasks` 全量 + `active_task_id`），前端任务状态以最近一次 `task_info` 为准；`task_open` / `task_update` / `task_decision_added` / `task_artifact_added` 仅用于局部反馈（toast / 动画 / 高亮增量项），不进状态本身。开 / 改任务时 server emit hint + 紧跟一帧 `task_info` 是**故意**双重广播。
+- **artifact / decision / task 的写权限只在用户**（P5.1）。茶客可通过协议标签提议（P5.3 起 `task_propose_decision` / `task_propose_open` 工具），但 UI 渲染成"采纳"按钮等用户点；不允许茶客静默开任务 / 记决策（防 AI 自我接龙生成 50 个任务）。
+- **`attach_artifact` 是 copy 不是 move**（P5.1）。`share/` 是房间公共桌面 + 茶客 cwd / 历史消息 `<./share/xxx>` 引用 / 同一文件可挂多个任务 —— 移动都会断引用。MVP 一律拷贝；茶客视角 `share/` 永远在原位。后续 GC 入口与 attach 解耦。
+- **一房间最多 1 个任务**（P5.1 限制条款）。`open_task` 在已有任意有效 `task.json` 时直接拒绝（`TaskExistsError` → NOTICE error）。判定按 `tasks/*/task.json` 存在性扫盘，**不依赖 `state.json.active_task_id`** —— state.json 丢失时旧 task.json 仍是"已有任务"的真凭据，避免悄悄允许开第二个。P5.2 起解除限制。
 
 ## 测试
 

@@ -39,6 +39,8 @@ import { renderPersonaPicker, createPersonaImport } from "./persona.js";
 import { createSettings } from "./settings.js";
 import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
+import * as taskState from "./task_state.js";
+import { createTaskPanel } from "./task_panel.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -83,6 +85,20 @@ const roomTomlSubmitBtn = document.getElementById("room-toml-submit");
 const attachFileBtn = document.getElementById("attach-file");
 const fileInputEl = document.getElementById("file-input");
 const pendingFilesEl = document.getElementById("pending-files");
+const taskPanelEl = document.getElementById("task-panel");
+const taskPanelToggleBtn = document.getElementById("task-panel-toggle");
+const taskPanelBodyEl = document.getElementById("task-panel-body");
+const taskPanelNewBtn = document.getElementById("task-panel-new");
+const composerTaskChipEl = document.getElementById("composer-task-chip");
+const newTaskModal = document.getElementById("new-task-modal");
+const newTaskTitleEl = document.getElementById("new-task-title");
+const newTaskGoalEl = document.getElementById("new-task-goal");
+const newTaskOwnerEl = document.getElementById("new-task-owner");
+const newTaskSubmitBtn = document.getElementById("new-task-submit");
+const markDecisionModal = document.getElementById("mark-decision-modal");
+const markDecisionSummaryEl = document.getElementById("mark-decision-summary");
+const markDecisionSupportEl = document.getElementById("mark-decision-support");
+const markDecisionSubmitBtn = document.getElementById("mark-decision-submit");
 
 const wsUrl = window.chahua?.wsUrl;
 if (!wsUrl) {
@@ -143,9 +159,20 @@ function setInputEnabled(enabled) {
   importPersonaBtn.disabled = !enabled;
   addRoomBtn.disabled = !enabled;
   attachFileBtn.disabled = !enabled;
+  updateNewTaskBtn();
   // 双击 anchor 不走 disabled——dblclick handler 自己看 connected 决定弹不弹 popover。
   // 视觉上 .dblclick-anchor 的 hover 在 :not(.disconnected) 下亮，连接断时变灰。
   document.body.classList.toggle("disconnected", !enabled);
+}
+
+// "+ 新任务" 同时受 connected 与 task 存在性制约。setInputEnabled 与 task_info
+// 接帧两路都调这个汇合点；hasAny 直接派生自 task_state，不另留 cache。
+function updateNewTaskBtn() {
+  const hasAny = taskState.getState().tasks.length > 0;
+  taskPanelNewBtn.disabled = !connected || hasAny;
+  taskPanelNewBtn.title = hasAny
+    ? "当前已有任务 —— P5.2 起支持多任务"
+    : "新建任务";
 }
 
 // 按 currentTurnId 切换 submitBtn 的文字 + class —— 同一个按钮承担「发送 / 停止」
@@ -396,9 +423,11 @@ function appendDetailsEntry(pop, g) {
 // 整段重渲；cursor 与状态尾走 sibling 节点，避开 innerHTML 替换的擦除。
 //
 // 打分不挂在气泡里 —— 沿 sidebar 茶客名右侧显示，见 ``applyScoresToSidebar``。
-function makeGuestRow(speaker, { streaming = false } = {}) {
+function makeGuestRow(speaker, { streaming = false, messageId = null } = {}) {
   const li = document.createElement("li");
   li.className = "msg";
+  if (messageId) li.dataset.messageId = messageId;
+  li.dataset.speaker = speaker;
   li.appendChild(makeAvatar(speaker, "msg-avatar"));
   const bubble = document.createElement("div");
   bubble.className = "bubble bubble-guest";
@@ -423,9 +452,11 @@ function makeGuestRow(speaker, { streaming = false } = {}) {
 
 // 用户行：右对齐气泡 + 头像（无名字 —— 自己看自己 redundant）。镜像茶客布局：
 // 茶客是 [头像][气泡]，用户是 [气泡][头像]。
-function makeUserRow(text) {
+function makeUserRow(text, { messageId = null } = {}) {
   const li = document.createElement("li");
   li.className = "user";
+  if (messageId) li.dataset.messageId = messageId;
+  li.dataset.speaker = USER_SPEAKER_ID;
   const bubble = document.createElement("div");
   bubble.className = "bubble bubble-user";
   const t = document.createElement("span");
@@ -438,13 +469,13 @@ function makeUserRow(text) {
   return li;
 }
 
-function appendBubble({ speaker, text, kind }) {
+function appendBubble({ speaker, text, kind, messageId = null }) {
   stickToBottom(() => {
     let li;
     if (kind === "user") {
-      li = makeUserRow(text);
+      li = makeUserRow(text, { messageId });
     } else {
-      const row = makeGuestRow(speaker);
+      const row = makeGuestRow(speaker, { messageId });
       renderGuestText(row, text);
       if (kind === "error") row.li.classList.add("error");
       li = row.li;
@@ -476,7 +507,7 @@ function applyScoresToSidebar() {
 function startStreamingMessage(env) {
   stickToBottom(() => {
     const speaker = env.guest_name || "?";
-    const { li, textEl, bubble } = makeGuestRow(speaker, { streaming: true });
+    const { li, textEl, bubble } = makeGuestRow(speaker, { streaming: true, messageId: env.message_id });
     messagesEl.appendChild(li);
     // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
     // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
@@ -518,11 +549,11 @@ function endStreamingMessage(env) {
     // 没那个口子，单独装一行。
     const speaker = env.guest_name || "?";
     if (env.status === Status.OK) {
-      appendBubble({ speaker, text: env.data?.text ?? "" });
+      appendBubble({ speaker, text: env.data?.text ?? "", messageId: env.message_id });
       return;
     }
     const partial = env.data?.partial_text ?? "";
-    const row = makeGuestRow(speaker);
+    const row = makeGuestRow(speaker, { messageId: env.message_id });
     renderGuestText(row, partial);
     row.li.classList.add("error");
     setStatusTail(row.bubble, statusTail(env));
@@ -772,9 +803,9 @@ function renderHistory(messages) {
   stickToBottom(() => {
     for (const m of messages) {
       if (m.speaker_id === USER_SPEAKER_ID) {
-        messagesEl.appendChild(makeUserRow(m.text));
+        messagesEl.appendChild(makeUserRow(m.text, { messageId: m.message_id }));
       } else {
-        const row = makeGuestRow(m.speaker_id);
+        const row = makeGuestRow(m.speaker_id, { messageId: m.message_id });
         renderGuestText(row, m.text);
         messagesEl.appendChild(row.li);
       }
@@ -837,6 +868,18 @@ function handleEnvelope(env) {
     }
     case EventType.FILE_UPLOADED:
       upload.onServerEcho(env.data ?? {});
+      return;
+    // 任务房间（docs/P5-任务房间.md §4.2）。TASK_INFO 是权威快照 → 全量覆盖 taskState
+    // 让面板重渲；其它 4 个是 hint → 在对应 DOM 上闪一下，权威 state 等紧跟而至的
+    // TASK_INFO 推进。
+    case EventType.TASK_INFO:
+      taskState.setSnapshot(env.data ?? {});
+      return;
+    case EventType.TASK_OPEN:
+    case EventType.TASK_UPDATE:
+    case EventType.TASK_DECISION_ADDED:
+    case EventType.TASK_ARTIFACT_ADDED:
+      taskPanel.flashHint(env.type, env.data ?? {});
       return;
     case EventType.ROOM_EXPORT: {
       const markdown = env.data?.markdown;
@@ -1066,6 +1109,201 @@ const upload = createUpload({
   isConnected: () => connected,
   send,
   setStatus,
+  onAttachToTask: (rel) => attachArtifact(rel),
+});
+
+function attachArtifact(rel) {
+  const active = taskState.getActiveTask();
+  if (!active) {
+    // body.has-active-task gate 已隐了按钮，正常进不到这；保留兜底防 dev 加新触发点。
+    setStatus("error", "当前没有任务 —— 先新建任务才能拷贝产物");
+    return;
+  }
+  send({
+    type: Inbound.ATTACH_ARTIFACT,
+    task_id: active.id,
+    share_rel: rel,
+  });
+  setStatus("", `拷贝「${rel}」到任务「${active.title || "(无标题)"}」…`);
+}
+
+// 任务面板（订阅 task_state；TASK_INFO 到达 → 全量重渲）。模块级单例 —— 重连不重建，
+// 重连后服务端 _emit_room_snapshot 会重发 task_info 让面板状态前进。
+const taskPanel = createTaskPanel({
+  panelEl: taskPanelEl,
+  toggleBtnEl: taskPanelToggleBtn,
+  bodyEl: taskPanelBodyEl,
+  onPatchTask: (taskId, patch) => {
+    if (!connected) return;
+    send({ type: Inbound.UPDATE_TASK, task_id: taskId, patch });
+  },
+});
+
+// taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
+// 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json
+// 丢失时仍 disable，防止悄悄允许开第二个（docs §7.1 实现项第 4 条）。
+taskState.subscribe(() => {
+  const active = taskState.getActiveTask();
+  if (active) {
+    const label = `📋 ${active.title || "(无标题)"}`;
+    composerTaskChipEl.hidden = false;
+    // 标题没变就不写 —— 多数 task_info 是 artifact / decision 触发的，title 没动；
+    // 避免无谓的 textContent 写触发 layout invalidation。
+    if (composerTaskChipEl.textContent !== label) {
+      composerTaskChipEl.textContent = label;
+      composerTaskChipEl.title = `当前任务：${active.title || "(无标题)"}`;
+    }
+  } else {
+    composerTaskChipEl.hidden = true;
+  }
+  // body class 给 CSS 用 —— 控制 share/ pill 上 "拷贝到当前任务" 按钮是否可见。
+  document.body.classList.toggle("has-active-task", !!active);
+  updateNewTaskBtn();
+});
+
+taskPanelNewBtn.addEventListener("click", () => {
+  if (!connected || taskPanelNewBtn.disabled) return;
+  newTaskTitleEl.value = "";
+  newTaskGoalEl.value = "";
+  // owner 选项：当前 guests + "全员"。submit 时 "" 字符串 → null（语义"不指定"）。
+  newTaskOwnerEl.replaceChildren();
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = "全员";
+  newTaskOwnerEl.appendChild(noneOpt);
+  for (const g of guests) {
+    const opt = document.createElement("option");
+    opt.value = g.name;
+    opt.textContent = g.name;
+    newTaskOwnerEl.appendChild(opt);
+  }
+  newTaskOwnerEl.value = "";
+  openModal(newTaskModal);
+  newTaskTitleEl.focus();
+});
+
+newTaskSubmitBtn.addEventListener("click", () => {
+  if (!connected) return;
+  const title = newTaskTitleEl.value.trim();
+  if (!title) {
+    newTaskTitleEl.focus();
+    return;
+  }
+  const ownerRaw = newTaskOwnerEl.value;
+  const payload = {
+    type: Inbound.OPEN_TASK,
+    title,
+    goal: newTaskGoalEl.value,
+    owner: ownerRaw === "" ? null : ownerRaw,
+  };
+  send(payload);
+  setStatus("", `新建任务「${title}」…`);
+  closeModal(newTaskModal);
+});
+
+// 决策入口：右键消息气泡 → action popover → modal。message_id 仅在 server 落盘后
+// 才挂到 li 上（用户自己 echo 的那条没有，直到下次 room_history 才补），所以未带
+// id 的 li 一律跳过 —— 决策必须能引回 transcript 里的真实 message。
+// 同房间往上最多 4 条带 message_id 的兄弟节点纳入候选；prepend "右键的那条" 在最前
+// 且默认 checked。
+const DECISION_SUPPORT_MAX = 5;
+
+function snippetOf(li) {
+  // 取气泡里的可见文本 —— textContent 会把 markdown 渲染后的 DOM 拍平成纯文本。
+  const bubble = li.querySelector(".bubble");
+  if (!bubble) return "";
+  const text = bubble.querySelector(".text");
+  return (text ? text.textContent : bubble.textContent).trim().replace(/\s+/g, " ");
+}
+
+function collectSupportCandidates(anchorLi) {
+  const items = [{ li: anchorLi, defaultChecked: true }];
+  let cur = anchorLi.previousElementSibling;
+  while (cur && items.length < DECISION_SUPPORT_MAX) {
+    if (cur.dataset.messageId) {
+      items.push({ li: cur, defaultChecked: false });
+    }
+    cur = cur.previousElementSibling;
+  }
+  return items;
+}
+
+function renderDecisionSupportList(candidates) {
+  markDecisionSupportEl.replaceChildren();
+  for (const { li, defaultChecked } of candidates) {
+    const item = document.createElement("li");
+    item.className = "decision-support-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = li.dataset.messageId;
+    cb.checked = defaultChecked;
+    item.appendChild(cb);
+    const speaker = document.createElement("span");
+    speaker.className = "decision-support-speaker";
+    speaker.textContent = li.dataset.speaker || "?";
+    item.appendChild(speaker);
+    const snippet = document.createElement("span");
+    snippet.className = "decision-support-snippet";
+    snippet.textContent = snippetOf(li) || "(空)";
+    item.appendChild(snippet);
+    // 整行点击 = 切 checkbox（除非用户已直接点到 checkbox 本身，避免双触发）。
+    item.addEventListener("click", (ev) => {
+      if (ev.target === cb) return;
+      cb.checked = !cb.checked;
+    });
+    markDecisionSupportEl.appendChild(item);
+  }
+}
+
+function openMarkDecisionModal(anchorLi, taskId) {
+  // task_id 挂在 modal 节点上：ESC / backdrop 关闭也跟着 modal 一起消失，省一份
+  // 模块级 mutable state；下次 open 覆写即可。
+  markDecisionModal.dataset.taskId = taskId;
+  markDecisionSummaryEl.value = "";
+  renderDecisionSupportList(collectSupportCandidates(anchorLi));
+  openModal(markDecisionModal);
+  markDecisionSummaryEl.focus();
+}
+
+messagesEl.addEventListener("contextmenu", (ev) => {
+  if (!connected) return;
+  const li = ev.target.closest("li[data-message-id]");
+  if (!li) return;
+  ev.preventDefault();
+  const active = taskState.getActiveTask();
+  if (!active) {
+    setStatus("error", "当前没有任务 —— 先新建任务才能记决策");
+    return;
+  }
+  openActionPopover(li, "消息操作", [
+    {
+      label: "📌 标为决策",
+      desc: `把这条加进任务「${active.title || "(无标题)"}」`,
+      onClick: () => openMarkDecisionModal(li, active.id),
+    },
+  ]);
+});
+
+markDecisionSubmitBtn.addEventListener("click", () => {
+  if (!connected) return;
+  const taskId = markDecisionModal.dataset.taskId;
+  if (!taskId) return;
+  const summary = markDecisionSummaryEl.value.trim();
+  if (!summary) {
+    markDecisionSummaryEl.focus();
+    return;
+  }
+  const supporting_message_ids = Array.from(
+    markDecisionSupportEl.querySelectorAll("input[type='checkbox']:checked"),
+  ).map((el) => el.value);
+  send({
+    type: Inbound.ADD_DECISION,
+    task_id: taskId,
+    summary,
+    supporting_message_ids,
+  });
+  setStatus("", "已记录决策…");
+  closeModal(markDecisionModal);
 });
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
@@ -1073,7 +1311,8 @@ const editGuestModal = document.getElementById("edit-guest-modal");
 const editRoomModal = document.getElementById("edit-room-modal");
 const ALL_MODALS = [
   addGuestModal, addRoomModal, editUserModal, importPersonaModal,
-  editRoomTomlModal, editGuestModal, editRoomModal,
+  editRoomTomlModal, editGuestModal, editRoomModal, newTaskModal,
+  markDecisionModal,
 ];
 for (const modal of ALL_MODALS) {
   modal.addEventListener("click", (ev) => {
@@ -1166,6 +1405,24 @@ composer.addEventListener("submit", (ev) => {
     return;
   }
   const text = textInput.value.trim();
+  // 斜杠命令 —— /task <title> 走 open_task inbound 而非 user_message。已有任务等
+  // server 端拒绝（NOTICE error），前端不重复判定，让两条路径决断口径完全同源。
+  if (text.startsWith("/task ") || text === "/task") {
+    const title = text.slice("/task".length).trim();
+    if (!title) {
+      setStatus("error", "/task 后面要跟任务标题");
+      return;
+    }
+    if (upload.hasPending()) {
+      setStatus("error", "新建任务前先 × 掉待发文件 —— 任务不接附件");
+      return;
+    }
+    send({ type: Inbound.OPEN_TASK, title, goal: "", owner: null });
+    setStatus("", `新建任务「${title}」…`);
+    textInput.value = "";
+    autoResizeTextarea();
+    return;
+  }
   // 文件不空时即使 text 为空也允许发送 —— 用户拖了文件就是有意图。
   if (!text && !upload.hasPending()) return;
   const files = upload.snapshotRels();

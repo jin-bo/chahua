@@ -24,6 +24,15 @@ export const EventType = Object.freeze({
   // 服务端把整个房间 transcript 拼成 markdown 回吐：data.filename / data.markdown。
   // 前端走 Blob + a.download 触发浏览器下载，不写服务器盘。
   ROOM_EXPORT: "room_export",
+  // P5.1 任务房间（docs/P5-任务房间.md §4.2）。TASK_INFO 是权威快照：每次任务状态
+  // 变更（open / update / decision / artifact）后服务端重发整份 {tasks, active_task_id}，
+  // 前端任务状态以最近一次 TASK_INFO 为准。另外四个是 hint —— 给前端做 toast / 动画 /
+  // 高亮增量项，不进任务状态本身。
+  TASK_INFO: "task_info",
+  TASK_OPEN: "task_open",
+  TASK_UPDATE: "task_update",
+  TASK_DECISION_ADDED: "task_decision_added",
+  TASK_ARTIFACT_ADDED: "task_artifact_added",
 });
 
 export const Status = Object.freeze({
@@ -71,6 +80,13 @@ export const Inbound = Object.freeze({
   UPLOAD_FILE: "upload_file",
   // 导出当前房间为 markdown。无 payload，服务端读 transcript 全量后回 ROOM_EXPORT。
   EXPORT_ROOM: "export_room",
+  // P5.1 任务房间 inbound（docs/P5-任务房间.md §4.3）。set_active_task / close_task 留待
+  // P5.2 —— P5.1 严守"一房间最多 1 个任务"。服务端成功后会重发整份 task_info
+  // （权威快照）+ emit 对应 hint envelope；前端不做乐观更新，等回环。
+  OPEN_TASK: "open_task",
+  UPDATE_TASK: "update_task",
+  ATTACH_ARTIFACT: "attach_artifact",
+  ADD_DECISION: "add_decision",
 });
 
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /
@@ -95,3 +111,20 @@ export const ScoreKind = Object.freeze({
   COOLDOWN: "cooldown",
   ERROR: "error",
 });
+
+// 镜像 chahua/task.py::TaskStatus。task.status 的 wire 字符串 + 中文 label 同源 ——
+// 任务面板 / 状态下拉 / 历史列表都从这里取，避免散落到各 renderer 里手抄 5 个 case。
+// 顺序与 task.py 的 Literal 顺序一致；新加状态时两边同步。
+export const TASK_STATUS_OPTIONS = Object.freeze([
+  Object.freeze({ value: "open", label: "未开始" }),
+  Object.freeze({ value: "in_progress", label: "进行中" }),
+  Object.freeze({ value: "blocked", label: "被阻塞" }),
+  Object.freeze({ value: "done", label: "已完成" }),
+  Object.freeze({ value: "abandoned", label: "已放弃" }),
+]);
+
+const _TASK_STATUS_LABELS = new Map(TASK_STATUS_OPTIONS.map((o) => [o.value, o.label]));
+
+export function taskStatusLabel(status) {
+  return _TASK_STATUS_LABELS.get(status) ?? (status || TASK_STATUS_OPTIONS[0].label);
+}

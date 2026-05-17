@@ -13,6 +13,7 @@ wheels/
 .env
 .env.*
 !.env.example
+workspace/
 
 # Runtime data (per docs/DESIGN.md §3.7) —— workspaces / transcripts / cursors。
 # room.toml 是 shipped config，跟代码走；房间运行时数据全部忽略。
