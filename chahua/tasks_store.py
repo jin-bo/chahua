@@ -57,7 +57,7 @@ from ._persist import (
     read_json_or_none,
     write_json_atomic,
 )
-from .events import now_ms
+from .events import new_event_id, now_ms
 from .task import Decision, Task, TaskStatus
 
 # close_task 仅接受这两个"终结态"；update_task 仅接受非终结态。
@@ -241,13 +241,17 @@ class TasksStore:
         write_json_atomic(path, task.to_jsonl_dict())
 
     def _append_event(self, task_id: str, kind: str, **payload: object) -> None:
-        """task 级 events.jsonl append 一条 ``{ts_ms, kind, ...payload}``。
+        """task 级 events.jsonl append 一条 ``{event_id, ts_ms, kind, ...payload}``。
 
-        unknown task_id 在调用方就该过滤掉；这里不再校验（active_changed / closed 都
-        是 mutator 里现场拼，不会传错 id）。``append_jsonl`` 父目录不存在不补建 —— task
-        目录在 :meth:`open_task` 已经 ``mkdir(parents=True, exist_ok=True)``。
+        ``event_id`` 是 stable id（``evt_<hex>``），给前端 / 未来 audit tooling 引用具体
+        变更用；当前 envelope 不下发，只落盘。``append_jsonl`` 父目录不存在不补建
+        —— task 目录在 :meth:`open_task` 已经 ``mkdir(parents=True, exist_ok=True)``。
         """
-        record: dict = {"ts_ms": now_ms(), "kind": kind}
+        record: dict = {
+            "event_id": new_event_id(),
+            "ts_ms": now_ms(),
+            "kind": kind,
+        }
         record.update(payload)
         append_jsonl(self.events_path(task_id), record)
 

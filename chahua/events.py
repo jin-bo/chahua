@@ -84,6 +84,9 @@ class ChahuaEventType(str, Enum):
     TASK_UPDATE = "task_update"
     TASK_DECISION_ADDED = "task_decision_added"
     TASK_ARTIFACT_ADDED = "task_artifact_added"
+    # P5.2.4：任务关闭（done / abandoned）—— hint 事件，前端用做局部反馈
+    # （toast / 卡片样式翻灰），权威状态仍以紧跟其后的 TASK_INFO 为准。
+    TASK_CLOSE = "task_close"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。
@@ -110,6 +113,13 @@ def new_turn_id() -> str:
 def new_message_id() -> str:
     """``msg_<10字节 hex>``。前端 envelope 与 transcript.jsonl 共用同一 ID。"""
     return new_id("msg")
+
+
+def new_event_id() -> str:
+    """``evt_<10字节 hex>``。每行 ``tasks/<id>/events.jsonl`` 一个 stable id —— 给前端
+    / 未来 audit tooling 引用某条状态变更用；P5.2.5 envelope 不嵌（hint 事件够用），
+    后续如需"撤销 / 跳转到这条变更"再透传。"""
+    return new_id("evt")
 
 
 def now_ms() -> int:

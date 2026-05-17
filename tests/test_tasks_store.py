@@ -340,6 +340,12 @@ def test_events_jsonl_roundtrip_three_lines(tmp_path: Path):
     events = store.list_events(b.id)
     assert len(events) == 3
     assert [e["kind"] for e in events] == ["became_active", "closed", "became_inactive"]
+    # 每行带 stable event_id（P5.2.4）
+    for e in events:
+        assert isinstance(e["event_id"], str)
+        assert e["event_id"].startswith("evt_")
+    ids = {e["event_id"] for e in events}
+    assert len(ids) == 3  # 唯一
     # 重装 store 还能读回（落盘宽容）
     store2 = TasksStore(room_dir=tmp_path)
     events2 = store2.list_events(b.id)
