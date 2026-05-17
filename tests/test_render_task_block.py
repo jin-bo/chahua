@@ -78,13 +78,13 @@ def test_full_block_all_fields_present():
 
 
 def test_compact_block_short_header():
-    task = _task()
+    task = _task()  # 默认 goal 非空 → 完整 3 行
     out = _render_task_block(task, [], [], [], compact=True)
     lines = out.split("\n")
-    # 1-3 行：当前任务 / 目标 / 产物可从 ./task/
-    assert 2 <= len(lines) <= 3
+    assert len(lines) == 3
     assert lines[0] == "当前任务：写 README"
-    assert any("./task/" in line for line in lines)
+    assert lines[1] == "目标：把 README 写完"
+    assert "./task/" in lines[2]
     # compact 不含 full 块的小标题
     assert "近期决策" not in out
     assert "当前产物清单" not in out

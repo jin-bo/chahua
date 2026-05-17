@@ -37,6 +37,23 @@ MARKED_BY_USER = "user"
 """decisions.marked_by 的唯一合法值（P5.1）；P5.3 起茶客的 propose 也仍通过 UI"采纳"
 转译成 user 入库（设计文档 §6.3 / §8 不变量 #3）。"""
 
+TASK_UNTITLED = "(无标题)"
+"""title 为空时的展示 fallback。与 ``app/renderer/events.js::TASK_UNTITLED`` 同源
+（JS 那份镜像 Python；新增标题策略两边同步）。"""
+
+TASK_STATUS_DISPLAY: dict[TaskStatus, str] = {
+    "open": "未开始",
+    "in_progress": "进行中",
+    "blocked": "被阻塞",
+    "done": "已完成",
+    "abandoned": "已放弃",
+}
+"""``TaskStatus`` → 中文 label。与 ``app/renderer/events.js::TASK_STATUS_OPTIONS`` 同源
+（JS 那份镜像 Python；本模块 Literal 顺序与 JS options 顺序一致）。
+
+新增 status 时：① 改本 dict；② 改 ``TaskStatus`` Literal；③ 改 JS 的 ``TASK_STATUS_OPTIONS``。
+缺哪一项不会启动失败，但 LLM prompt / UI 任一面会暴露原始 enum 字面值。"""
+
 
 def new_task_id() -> str:
     """``task_<10字节 hex>`` —— 与 :func:`chahua.events.new_message_id` 同长度，扫读易认。"""
