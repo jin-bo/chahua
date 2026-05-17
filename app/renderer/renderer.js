@@ -14,10 +14,8 @@
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
 
-import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION, PERMISSION_OPTIONS } from "./events.js";
+import { EventType, Status, Inbound, ScoreKind, NoticeLevel, DEFAULT_PERMISSION } from "./events.js";
 import {
-  positionPopoverByAnchor,
-  attachPopoverDismissHandlers,
   closeActionPopover,
   openActionPopover,
 } from "./ui_popover.js";
@@ -39,6 +37,8 @@ import { renderPersonaPicker, createPersonaImport } from "./persona.js";
 import { createSettings } from "./settings.js";
 import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
+import { createPermissionPopover } from "./permission_popover.js";
+import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import { createTaskPanel } from "./task_panel.js";
 
@@ -209,207 +209,14 @@ function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
   return wrap;
 }
 
-// ── 权限 popover（点 sidebar 头像）───────────────────────────────────
-//
-// 三档权限文案 + 描述 —— 由 events.js::PERMISSION_OPTIONS 单点供给（与 chahua/
-// permissions.py::VALID_MODES 同口径）。.permission-badge 的 [data-permission] 走同一
-// value 枚举，read-only 不挂底色（默认浅灰）。
-
-let permissionPopoverGuest = null;
-let _detachPermissionPopoverDismiss = null;
-
+// 权限 popover（点 sidebar 头像）—— factory 实例化在 guestSettings 之后（依赖它的 open）。
+// 见 ./permission_popover.js。
+let permissionPopover = null;
 function closePermissionPopover() {
-  const pop = document.querySelector(".permission-popover");
-  if (pop) pop.remove();
-  if (_detachPermissionPopoverDismiss) {
-    _detachPermissionPopoverDismiss();
-    _detachPermissionPopoverDismiss = null;
-  }
-  permissionPopoverGuest = null;
+  permissionPopover?.close();
 }
-
-// 在 anchor 元素附近浮出权限选择 popover。再次点同一头像 → 切回关闭（toggle）。
 function showPermissionPopover(anchor, g) {
-  if (permissionPopoverGuest === g.name) {
-    closePermissionPopover();
-    return;
-  }
-  closePermissionPopover();
-  const current = g.permission || DEFAULT_PERMISSION;
-  const pop = document.createElement("div");
-  pop.className = "popover permission-popover";
-  const title = document.createElement("div");
-  title.className = "popover-title";
-  title.textContent = `设置「${g.name}」的权限`;
-  pop.appendChild(title);
-  for (const opt of PERMISSION_OPTIONS) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "popover-option permission-option";
-    btn.dataset.permission = opt.value;
-    if (opt.value === current) btn.classList.add("current");
-    // 左侧色点：与 V 标同色，read-only 用中性灰；视觉一眼分档。
-    const swatch = document.createElement("span");
-    swatch.className = "permission-swatch";
-    swatch.dataset.permission = opt.value;
-    btn.appendChild(swatch);
-    const meta = document.createElement("span");
-    meta.className = "popover-option-meta";
-    const label = document.createElement("span");
-    label.className = "popover-option-label";
-    label.textContent = opt.label;
-    if (opt.value === current) {
-      const tag = document.createElement("span");
-      tag.className = "popover-option-current";
-      tag.textContent = "（当前）";
-      label.appendChild(tag);
-    }
-    meta.appendChild(label);
-    const desc = document.createElement("span");
-    desc.className = "popover-option-desc";
-    desc.textContent = opt.desc;
-    meta.appendChild(desc);
-    btn.appendChild(meta);
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      if (opt.value === current) {
-        closePermissionPopover();
-        return;
-      }
-      ws.send(JSON.stringify({
-        type: Inbound.UPDATE_GUEST_PERMISSION,
-        name: g.name,
-        permission: opt.value,
-      }));
-      setStatus("", `设置「${g.name}」权限为 ${opt.label}…`);
-      closePermissionPopover();
-    });
-    pop.appendChild(btn);
-  }
-  appendMcpSection(pop, g);
-  appendSkillsSection(pop, g);
-  appendDetailsEntry(pop, g);
-  document.body.appendChild(pop);
-  positionPopoverByAnchor(pop, anchor);
-  permissionPopoverGuest = g.name;
-  _detachPermissionPopoverDismiss = attachPopoverDismissHandlers(
-    pop, closePermissionPopover,
-  );
-}
-
-// MCP 因为带来"任意可执行"风险，必须用户显式勾才装载；skills 是 prompt，无门控只展示。
-function appendListSection(pop, { title, listClass, items, renderItem, head }) {
-  if (items.length === 0 && !head) return;
-  const sec = document.createElement("div");
-  sec.className = "popover-section";
-  const titleEl = document.createElement("div");
-  titleEl.className = "popover-section-title";
-  titleEl.textContent = title;
-  sec.appendChild(titleEl);
-  if (head) sec.appendChild(head);
-  if (items.length > 0) {
-    const list = document.createElement("ul");
-    list.className = listClass;
-    for (const it of items) {
-      const li = document.createElement("li");
-      renderItem(li, it);
-      list.appendChild(li);
-    }
-    sec.appendChild(list);
-  }
-  pop.appendChild(sec);
-}
-
-function appendMcpSection(pop, g) {
-  // P4.4：envelope 把 MCP 拆成两块。
-  //   - persona_mcp_servers：persona sidecar mcp.json，整 persona 一刀切走 trust。
-  //   - room_mcp_servers：[[guest.extra_mcp_servers]]，自动信任，逐条可编辑（P4.5 UI）。
-  // popover 这里仅做"显示 + persona 信任开关"。逐条增删走详细设置 modal（P4.5）。
-  const personaServers = Array.isArray(g.persona_mcp_servers) ? g.persona_mcp_servers : [];
-  const roomServers = Array.isArray(g.room_mcp_servers) ? g.room_mcp_servers : [];
-  if (personaServers.length === 0 && roomServers.length === 0) return;
-
-  const renderRow = (li, s) => {
-    const name = document.createElement("span");
-    name.className = "popover-mcp-name";
-    name.textContent = s.name;
-    const cmd = document.createElement("span");
-    cmd.className = "popover-mcp-cmd";
-    const args = Array.isArray(s.args) ? s.args : [];
-    cmd.textContent = `${s.command || "?"} ${args.join(" ")}`.trim();
-    cmd.title = cmd.textContent;
-    li.append(name, cmd);
-  };
-
-  if (personaServers.length > 0) {
-    const head = document.createElement("label");
-    head.className = "popover-checkbox";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !!g.persona_mcp_trusted;
-    cb.addEventListener("change", () => {
-      if (!connected) {
-        cb.checked = !cb.checked;
-        return;
-      }
-      const trusted = cb.checked;
-      ws.send(JSON.stringify({
-        type: Inbound.SET_PERSONA_MCP_TRUST,
-        persona_rel: g.persona_rel,
-        trusted,
-      }));
-      setStatus(
-        "",
-        trusted
-          ? `信任「${g.name}」的 MCP 服务器…`
-          : `撤销对「${g.name}」MCP 的信任…`,
-      );
-      closePermissionPopover();
-    });
-    head.append(cb, document.createTextNode("信任此 persona 的 MCP（持续生效，跨房间）"));
-    appendListSection(pop, {
-      title: "persona 自带 MCP",
-      listClass: "popover-mcp-list",
-      items: personaServers,
-      head,
-      renderItem: renderRow,
-    });
-  }
-
-  if (roomServers.length > 0) {
-    appendListSection(pop, {
-      title: "房间级 MCP（自动信任）",
-      listClass: "popover-mcp-list",
-      items: roomServers,
-      renderItem: renderRow,
-    });
-  }
-}
-
-function appendSkillsSection(pop, g) {
-  const skills = Array.isArray(g.skills_available) ? g.skills_available : [];
-  appendListSection(pop, {
-    title: "Skills（持续加载）",
-    listClass: "popover-skills-list",
-    items: skills,
-    renderItem: (li, s) => { li.textContent = s; },
-  });
-}
-
-// 详细设置 modal 入口（P4.5）—— popover 末尾一条；快捷"切 permission / 勾 MCP"
-// 仍保留在 popover 上头（90% 场景一键搞定不必开 modal）。
-function appendDetailsEntry(pop, g) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "popover-option popover-details-entry";
-  btn.textContent = "详细设置…";
-  btn.title = "模型 / 隔离 / 房间级 MCP 一站式编辑";
-  btn.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    closePermissionPopover();
-    guestSettings.open(g);
-  });
-  pop.appendChild(btn);
+  permissionPopover?.show(anchor, g);
 }
 
 // ── 消息流渲染 ───────────────────────────────────────────────────────
@@ -1099,6 +906,13 @@ const roomSettings = createRoomSettings({
   openRawRoomToml: () => settings.openEditRoomToml(),
 });
 
+permissionPopover = createPermissionPopover({
+  send,
+  setStatus,
+  isConnected: () => connected,
+  openGuestSettings: (g) => guestSettings.open(g),
+});
+
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。
 
@@ -1110,6 +924,18 @@ const upload = createUpload({
   send,
   setStatus,
   onAttachToTask: (rel) => attachArtifact(rel),
+});
+
+const decisionSupport = createDecisionSupport({
+  modal: markDecisionModal,
+  summaryEl: markDecisionSummaryEl,
+  supportEl: markDecisionSupportEl,
+  submitBtn: markDecisionSubmitBtn,
+  send,
+  setStatus,
+  openModal,
+  closeModal,
+  isConnected: () => connected,
 });
 
 function attachArtifact(rel) {
@@ -1204,67 +1030,7 @@ newTaskSubmitBtn.addEventListener("click", () => {
 // 决策入口：右键消息气泡 → action popover → modal。message_id 仅在 server 落盘后
 // 才挂到 li 上（用户自己 echo 的那条没有，直到下次 room_history 才补），所以未带
 // id 的 li 一律跳过 —— 决策必须能引回 transcript 里的真实 message。
-// 同房间往上最多 4 条带 message_id 的兄弟节点纳入候选；prepend "右键的那条" 在最前
-// 且默认 checked。
-const DECISION_SUPPORT_MAX = 5;
-
-function snippetOf(li) {
-  // 取气泡里的可见文本 —— textContent 会把 markdown 渲染后的 DOM 拍平成纯文本。
-  const bubble = li.querySelector(".bubble");
-  if (!bubble) return "";
-  const text = bubble.querySelector(".text");
-  return (text ? text.textContent : bubble.textContent).trim().replace(/\s+/g, " ");
-}
-
-function collectSupportCandidates(anchorLi) {
-  const items = [{ li: anchorLi, defaultChecked: true }];
-  let cur = anchorLi.previousElementSibling;
-  while (cur && items.length < DECISION_SUPPORT_MAX) {
-    if (cur.dataset.messageId) {
-      items.push({ li: cur, defaultChecked: false });
-    }
-    cur = cur.previousElementSibling;
-  }
-  return items;
-}
-
-function renderDecisionSupportList(candidates) {
-  markDecisionSupportEl.replaceChildren();
-  for (const { li, defaultChecked } of candidates) {
-    const item = document.createElement("li");
-    item.className = "decision-support-item";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = li.dataset.messageId;
-    cb.checked = defaultChecked;
-    item.appendChild(cb);
-    const speaker = document.createElement("span");
-    speaker.className = "decision-support-speaker";
-    speaker.textContent = li.dataset.speaker || "?";
-    item.appendChild(speaker);
-    const snippet = document.createElement("span");
-    snippet.className = "decision-support-snippet";
-    snippet.textContent = snippetOf(li) || "(空)";
-    item.appendChild(snippet);
-    // 整行点击 = 切 checkbox（除非用户已直接点到 checkbox 本身，避免双触发）。
-    item.addEventListener("click", (ev) => {
-      if (ev.target === cb) return;
-      cb.checked = !cb.checked;
-    });
-    markDecisionSupportEl.appendChild(item);
-  }
-}
-
-function openMarkDecisionModal(anchorLi, taskId) {
-  // task_id 挂在 modal 节点上：ESC / backdrop 关闭也跟着 modal 一起消失，省一份
-  // 模块级 mutable state；下次 open 覆写即可。
-  markDecisionModal.dataset.taskId = taskId;
-  markDecisionSummaryEl.value = "";
-  renderDecisionSupportList(collectSupportCandidates(anchorLi));
-  openModal(markDecisionModal);
-  markDecisionSummaryEl.focus();
-}
-
+// 标为决策 modal —— 见 ./decision_support.js（factory 实例化在 createUpload 之后）。
 messagesEl.addEventListener("contextmenu", (ev) => {
   if (!connected) return;
   const li = ev.target.closest("li[data-message-id]");
@@ -1279,31 +1045,9 @@ messagesEl.addEventListener("contextmenu", (ev) => {
     {
       label: "📌 标为决策",
       desc: `把这条加进任务「${active.title || "(无标题)"}」`,
-      onClick: () => openMarkDecisionModal(li, active.id),
+      onClick: () => decisionSupport.open(li, active.id),
     },
   ]);
-});
-
-markDecisionSubmitBtn.addEventListener("click", () => {
-  if (!connected) return;
-  const taskId = markDecisionModal.dataset.taskId;
-  if (!taskId) return;
-  const summary = markDecisionSummaryEl.value.trim();
-  if (!summary) {
-    markDecisionSummaryEl.focus();
-    return;
-  }
-  const supporting_message_ids = Array.from(
-    markDecisionSupportEl.querySelectorAll("input[type='checkbox']:checked"),
-  ).map((el) => el.value);
-  send({
-    type: Inbound.ADD_DECISION,
-    task_id: taskId,
-    summary,
-    supporting_message_ids,
-  });
-  setStatus("", "已记录决策…");
-  closeModal(markDecisionModal);
 });
 
 // modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
