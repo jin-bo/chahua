@@ -28,7 +28,7 @@ from .orchestrator import Orchestrator, OrchestratorConfig
 from .persona_assets import discover_assets, persona_relative
 from .room import Room
 from .scoring import IntentScorer
-from .summarizer import Summarizer
+from .summarizer import Summarizer, TaskSummaries
 from .tasks_store import TasksStore
 from .trust import is_mcp_trusted
 from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
@@ -217,7 +217,14 @@ class RoomSession:
     写 transcript 时取 ``active_task_id`` 都走这个单例 —— 别在外面再 ``TasksStore(room_dir=...)``
     实例化（会绕过内存镜像导致双 source 不一致）。"""
 
+    task_summaries: TaskSummaries
+    """P5.2.12：per-task summarizer 池。``close()`` 一并 flush 所有 task cursor。
+    业务流不取这个 handle —— orchestrator 自己持引用做 ``_summarize_safe`` 的尾巴。"""
+
     def close(self) -> None:
+        # 先 flush task summary cursor —— 茶客关时会卡 stop_signal/event_loop，cursor
+        # IO 是同步 / 与茶客生命周期解耦的，放前面 fail-fast。
+        self.task_summaries.close()
         for guest in self.guests:
             try:
                 guest.close()
@@ -408,6 +415,7 @@ def build_room_session(
     )
 
     tasks_store = TasksStore(room_dir=room_config.room_dir)
+    task_summaries = TaskSummaries(summary_client, tasks_store=tasks_store)
 
     orchestrator = Orchestrator(
         room=room,
@@ -417,6 +425,7 @@ def build_room_session(
         cursor=GuestCursor(cursor_path=cursor_path),
         config=effective_orch_config,
         tasks_store=tasks_store,
+        task_summaries=task_summaries,
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
@@ -432,6 +441,7 @@ def build_room_session(
         summary_spec=summary_spec,
         guest_specs=guest_specs,
         tasks_store=tasks_store,
+        task_summaries=task_summaries,
     )
     relink_task_dirs(session)
     return session

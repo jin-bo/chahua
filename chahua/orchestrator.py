@@ -47,7 +47,7 @@ from .events import (
 from .guest import TeaGuest
 from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
-from .summarizer import Summarizer
+from .summarizer import Summarizer, TaskSummaries
 from .tasks_store import TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 
@@ -184,6 +184,7 @@ class Orchestrator:
         cursor: GuestCursor,
         config: OrchestratorConfig = OrchestratorConfig(),
         tasks_store: Optional[TasksStore] = None,
+        task_summaries: Optional[TaskSummaries] = None,
     ) -> None:
         self.room = room
         self.user_config = user_config
@@ -195,6 +196,9 @@ class Orchestrator:
         # orchestrator 仅在 ``submit_user_message`` 入口 snapshot 一次 ``active_task_id``，
         # 保证整轮归属同一 task；用户在 turn 中改 active 不回追已开的发言（docs §4.4）。
         self.tasks_store = tasks_store
+        # P5.2.12：per-task summarizer 池。``None`` = 旧测试 / 无任务房间，跳过任务级
+        # 摘要 kick。session.py 装配时必带（与 tasks_store 同生命周期）。
+        self.task_summaries = task_summaries
 
         self._guests: dict[str, _GuestEntry] = {}
         # 茶客名 → 剩余冷却轮数（每个"AI 子轮"递减 1，到 0 解冻）。
@@ -711,14 +715,18 @@ class Orchestrator:
         self._summary_task = asyncio.create_task(self._summarize_safe())
 
     async def _summarize_safe(self) -> None:
+        display = self._display_map()
         try:
             await self.summarizer.maybe_summarize(
-                self.room,
-                self._display_map(),
-                block_size=self.config.summary_block_size,
+                self.room, display, block_size=self.config.summary_block_size,
             )
         except Exception:
             _log.exception("summarize iteration failed")
+        # 任务级摘要 —— P5.2.12 落盘 only，与房间级共享同一后台 task，单次 kick 顺序走完。
+        if self.task_summaries is not None:
+            await self.task_summaries.kick(
+                self.room, display, block_size=self.config.summary_block_size,
+            )
 
 
 # ── 序列化 ───────────────────────────────────────────────────────────────────

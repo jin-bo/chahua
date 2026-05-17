@@ -21,8 +21,9 @@ from typing import Mapping, Optional
 from agentao.llm import LLMClient
 
 from ._llm_oneshot import chat_oneshot
-from ._persist import append_jsonl, read_jsonl_skip_bad
+from ._persist import append_jsonl, read_json_or_none, read_jsonl_skip_bad, write_json_atomic
 from .room import Message, Room, format_messages
+from .tasks_store import TasksStore
 
 _log = logging.getLogger(__name__)
 
@@ -141,20 +142,44 @@ class Summarizer:
         latest = room.latest_seq
         if latest < self._next_eligible_seq:
             return None
+        block = self._collect_block(room, block_size)
+        if not block:
+            return None
+        return await self._summarize_block(block, display_for, latest=latest)
 
+    # ── 内部 hook（P5.2.12 :class:`TaskSummarizer` 子类化扩展点）─────────
+
+    def _collect_block(
+        self, room: Room, block_size: int
+    ) -> Optional[list[Message]]:
+        """房间级：``covered_until`` 之后累计够 ``block_size`` 条就返回。
+
+        子类（任务级）按 ``task_id`` 过滤 + 用独立 cursor 推进。
+        """
         start = self.covered_until + 1
+        latest = room.latest_seq
         if latest - start + 1 < block_size:
             return None
-
         block = room.messages_since(self.covered_until)
         if not block:
             return None
-
         # 防过大块：失败累积或长时间没摘要时，块可能很长。截断到 2*block_size，
         # 保证单次 prompt 体积稳定（也让 LLM 真把"3~5 条要点"做得出）。
         if len(block) > 2 * block_size:
             block = block[: 2 * block_size]
+        return block
 
+    async def _summarize_block(
+        self,
+        block: list[Message],
+        display_for: Mapping[str, str],
+        *,
+        latest: int,
+    ) -> Optional[SummarySpan]:
+        """对已选好的 ``block`` 跑一次 LLM —— 失败退避，成功落盘 + 重置。
+
+        ``latest`` 是触发本次的 ``room.latest_seq``，失败退避按它算 next_eligible。
+        """
         body = format_messages(block, display_for)
         text = await chat_oneshot(
             self._llm,
@@ -186,3 +211,161 @@ class Summarizer:
         self._failures = 0
         self._next_eligible_seq = 0
         return span
+
+
+# ── 任务级摘要（P5.2.12）──────────────────────────────────────────────────
+
+
+_TASK_CURSOR_KEY = "considered_until_seq"
+
+
+class TaskSummarizer(Summarizer):
+    """每任务一份的 Summarizer：``_collect_block`` 过滤 ``task_id`` + 独立 cursor。
+
+    cursor (``considered_until_seq``) = 已扫过的最大 ``room.seq``。下次只看更高的 ——
+    避免大房间多任务时每轮重扫整本 transcript。失败 / 块未满也推进 cursor（已扫过
+    就是已扫过），区别于 ``covered_until`` 只在成功摘要后推进。
+
+    P5.2 阶段**只落盘**：``maybe_summarize`` 跑 LLM 写 ``summary.jsonl`` + 内存推
+    cursor；cursor 文件由 ``session.close()`` 通过 :class:`TaskSummaries.close`
+    统一 flush。P5.3 起 onboarding 注入会读 ``summary.jsonl`` + cursor。
+    """
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        *,
+        summary_path: Path,
+        cursor_path: Path,
+        task_id: str,
+    ) -> None:
+        super().__init__(llm_client, summary_path=summary_path)
+        self._task_id = task_id
+        self._cursor_path = cursor_path
+        self._considered_seq = self._load_cursor()
+
+    @property
+    def task_id(self) -> str:
+        return self._task_id
+
+    @property
+    def considered_seq(self) -> int:
+        return self._considered_seq
+
+    def _load_cursor(self) -> int:
+        obj = read_json_or_none(self._cursor_path)
+        if not isinstance(obj, dict):
+            return 0
+        try:
+            return max(0, int(obj.get(_TASK_CURSOR_KEY, 0)))
+        except (TypeError, ValueError):
+            _log.warning(
+                "task %s: summary_cursor.json %s 字段不合法，从 0 重算",
+                self._task_id, _TASK_CURSOR_KEY,
+            )
+            return 0
+
+    def flush_cursor(self) -> None:
+        """把 ``_considered_seq`` 落到 ``summary_cursor.json``。
+
+        :meth:`TaskSummaries.close` 在 session 关闭时统一调；中途 ``maybe_summarize``
+        每轮都写一遍小 json 没必要（成功摘要本身就 append summary.jsonl，cursor 丢
+        最多回退到上次重启时的值，下次重扫 N 条多花一次 LLM —— 远低于每轮 fsync 成本）。
+        """
+        self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(self._cursor_path, {_TASK_CURSOR_KEY: self._considered_seq})
+
+    def _collect_block(
+        self, room: Room, block_size: int
+    ) -> Optional[list[Message]]:
+        latest = room.latest_seq
+        if latest <= self._considered_seq:
+            return None
+        candidates = [
+            m for m in room.messages_since(self._considered_seq)
+            if m.task_id == self._task_id
+        ]
+        if len(candidates) < block_size:
+            # 不够一块：cursor 推到 latest 让下次只看更新的 —— 否则重扫已知不匹配的
+            # 那段（多任务房间里这段可能很长，每轮都白扫）。
+            self._considered_seq = latest
+            return None
+        if len(candidates) > 2 * block_size:
+            candidates = candidates[: 2 * block_size]
+        return candidates
+
+    async def _summarize_block(
+        self,
+        block: list[Message],
+        display_for: Mapping[str, str],
+        *,
+        latest: int,
+    ) -> Optional[SummarySpan]:
+        span = await super()._summarize_block(block, display_for, latest=latest)
+        if span is not None:
+            # 成功 → 已考察到块末（task-msg 的 seq），保险也推到 latest 以省下轮扫描。
+            self._considered_seq = max(self._considered_seq, latest)
+        return span
+
+
+class TaskSummaries:
+    """每房间一份的 per-task summarizer 池 —— lazy 装配（首次 ``kick`` 时按 store
+    当前的任务列表建实例）。每位茶客的 ``task_id`` 一份。
+
+    ``kick`` 在 :class:`Orchestrator._summarize_safe` 里跟在房间级 summarize 之后跑；
+    ``close`` 在 session 关闭时 flush 所有 cursor。P5.2 落盘 only —— 没人消费这些
+    ``summary.jsonl`` 内容（P5.3 onboarding 注入会读）。
+    """
+
+    def __init__(self, llm_client: LLMClient, tasks_store: TasksStore) -> None:
+        self._llm = llm_client
+        self._tasks_store = tasks_store
+        self._by_id: dict[str, TaskSummarizer] = {}
+
+    def _ensure(self, task_id: str) -> TaskSummarizer:
+        s = self._by_id.get(task_id)
+        if s is None:
+            task_dir = self._tasks_store.task_dir(task_id)
+            s = TaskSummarizer(
+                self._llm,
+                summary_path=task_dir / "summary.jsonl",
+                cursor_path=task_dir / "summary_cursor.json",
+                task_id=task_id,
+            )
+            self._by_id[task_id] = s
+        return s
+
+    async def kick(
+        self, room: Room, display_for: Mapping[str, str], *, block_size: int,
+    ) -> None:
+        """按 store 当前任务列表逐个 ``maybe_summarize``。
+
+        任意一个 task 抛错不阻断其他（与 :class:`Orchestrator._summarize_safe` 同口
+        径，摘要失败不该把房间 turn 状态弄花）。
+        """
+        for task in self._tasks_store.list_tasks():
+            summarizer = self._ensure(task.id)
+            try:
+                await summarizer.maybe_summarize(
+                    room, display_for, block_size=block_size,
+                )
+            except Exception:
+                _log.exception("task summarize iteration failed: task=%s", task.id)
+
+    def close(self) -> None:
+        """flush 所有 task cursor —— session 关闭时调一次。
+
+        失败 WARN 不抛：cursor 丢最多让下次启动多扫一次 transcript，不影响正确性。
+        """
+        for s in self._by_id.values():
+            try:
+                s.flush_cursor()
+            except OSError as e:
+                _log.warning(
+                    "task %s flush cursor 失败：%s（下次启动会从旧 cursor 重扫）",
+                    s.task_id, e,
+                )
+
+    def get(self, task_id: str) -> Optional[TaskSummarizer]:
+        """已装配的 summarizer 句柄 —— 仅给测试 / inspector 用，业务流不取。"""
+        return self._by_id.get(task_id)
