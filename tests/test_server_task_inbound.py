@@ -516,6 +516,34 @@ async def test_set_active_task_to_null(session_and_srv):
     assert session.tasks_store.active_task_id is None
 
 
+async def test_set_active_task_noop_does_not_cancel_inflight(session_and_srv):
+    """切到当前 active 是 no-op —— 不能借机 cancel 一个正在跑的 turn。"""
+    import asyncio
+    from chahua.server import INBOUND_SET_ACTIVE_TASK
+
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g")
+    # 模拟一个 inflight turn（任意 sleep 当占位）
+    async def _fake_turn() -> None:
+        await asyncio.sleep(1.0)
+    inflight = asyncio.create_task(_fake_turn(), name="chahua-turn")
+    srv._inflight_turn_task = inflight  # type: ignore[attr-defined]
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_SET_ACTIVE_TASK, "task_id": t.id},
+        lambda env: captured.append(env.to_dict()),
+    )
+    # No-op：inflight 仍在跑
+    assert not inflight.done()
+    # 没 NOTICE 没 envelope（最纯粹的 no-op；前端已经知道是 active 没必要重发 task_info）
+    assert captured == []
+    inflight.cancel()
+    try:
+        await inflight
+    except asyncio.CancelledError:
+        pass
+
+
 async def test_set_active_task_missing_id_field_rejected(session_and_srv):
     """task_id 必传（可为 null）—— 整段缺失 → NOTICE。"""
     from chahua.server import INBOUND_SET_ACTIVE_TASK

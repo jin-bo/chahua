@@ -25,8 +25,9 @@ from .session import ensure_room_share_dir
 from .task import MARKED_BY_USER
 from .tasks_store import (
     ArtifactSourceMissingError,
+    CLOSED_STATUSES,
+    NON_TERMINAL_STATUSES,
     TaskAlreadyClosedError,
-    TaskExistsError,
     TaskNotFoundError,
 )
 
@@ -53,13 +54,9 @@ _UPDATE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id", "patch"})
 _UPDATE_TASK_PATCH_ALLOWED: frozenset[str] = frozenset(
     {"title", "goal", "owner", "status"}
 )
-# update_task 仅接受非终结态；终结态走 close_task。两表必须与 tasks_store 内
-# _NON_TERMINAL_STATUSES / _CLOSED_STATUSES 同口径 —— 上下两层校验同一集合，避免
-# server 接住的 patch 落到 tasks_store 又再被 ValueError 拒。
-_UPDATE_TASK_PATCH_STATUSES: frozenset[str] = frozenset(
-    {"open", "in_progress", "blocked"}
-)
-_CLOSE_TASK_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
+# inbound status 白名单走 :data:`tasks_store.NON_TERMINAL_STATUSES` /
+# :data:`tasks_store.CLOSED_STATUSES` 单一真理源 —— 两层 (inbound 校验 + store 业务校验)
+# 共享同一集合，避免上下层"忘改一边"。
 _ATTACH_ARTIFACT_ALLOWED: frozenset[str] = frozenset({"task_id", "share_rel"})
 _ADD_DECISION_ALLOWED: frozenset[str] = frozenset(
     {"task_id", "summary", "supporting_message_ids"}
@@ -150,13 +147,6 @@ class TaskHandlers:
             task = self.server._session.tasks_store.open_task(
                 title=title, goal=goal, owner=owner_raw,
             )
-        except TaskExistsError as e:
-            self.server._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"开任务失败：{e}",
-            )
-            # 重发让前端按 tasks.length 把 "+新任务" 按钮 disable（防前端误判）。
-            self._emit_task_info(sink)
-            return
         except OSError as e:
             self.server._notice_persist_failure(sink, INBOUND_OPEN_TASK, e)
             return
@@ -228,7 +218,7 @@ class TaskHandlers:
                     text=f"{INBOUND_UPDATE_TASK}: patch.status 必须是 str",
                 )
                 return
-            if status in _CLOSE_TASK_STATUSES:
+            if status in CLOSED_STATUSES:
                 self.server._emit_notice(
                     sink, level=NOTICE_LEVEL_ERROR,
                     text=(
@@ -237,12 +227,12 @@ class TaskHandlers:
                     ),
                 )
                 return
-            if status not in _UPDATE_TASK_PATCH_STATUSES:
+            if status not in NON_TERMINAL_STATUSES:
                 self.server._emit_notice(
                     sink, level=NOTICE_LEVEL_ERROR,
                     text=(
                         f"{INBOUND_UPDATE_TASK}: patch.status={status!r} 非法；"
-                        f"非终结态白名单 {sorted(_UPDATE_TASK_PATCH_STATUSES)!r}"
+                        f"非终结态白名单 {sorted(NON_TERMINAL_STATUSES)!r}"
                     ),
                 )
                 return
@@ -305,6 +295,11 @@ class TaskHandlers:
                 text=f"{INBOUND_SET_ACTIVE_TASK}: task_id 必须是 str / null",
             )
             return
+        # 无变化（用户在下拉里点了当前 active / 前端 reconnect 重发）—— 早返避免无谓地
+        # cancel inflight turn。tasks_store.set_active 自身也是 no-op，但 cancel 必须在
+        # 这里挡住，否则用户那点一下会把正在跑的回答给杀了。
+        if self.server._session.tasks_store.active_task_id == task_id_raw:
+            return
         await self.server._cancel_and_drain_inflight()
         try:
             self.server._session.tasks_store.set_active(task_id_raw)
@@ -339,12 +334,12 @@ class TaskHandlers:
         status = require_str(data, "status", where=INBOUND_CLOSE_TASK)
         if status is None:
             return
-        if status not in _CLOSE_TASK_STATUSES:
+        if status not in CLOSED_STATUSES:
             self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR,
                 text=(
                     f"{INBOUND_CLOSE_TASK}: status={status!r} 非法，"
-                    f"必须是 {sorted(_CLOSE_TASK_STATUSES)!r} 之一"
+                    f"必须是 {sorted(CLOSED_STATUSES)!r} 之一"
                 ),
             )
             return
@@ -353,13 +348,7 @@ class TaskHandlers:
             task = self.server._session.tasks_store.close_task(
                 task_id, status=status,  # type: ignore[arg-type]
             )
-        except TaskNotFoundError as e:
-            self.server._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"关闭任务失败：{e}",
-            )
-            self._emit_task_info(sink)
-            return
-        except TaskAlreadyClosedError as e:
+        except (TaskNotFoundError, TaskAlreadyClosedError) as e:
             self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR, text=f"关闭任务失败：{e}",
             )

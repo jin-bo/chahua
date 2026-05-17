@@ -60,13 +60,20 @@ from ._persist import (
 from .events import new_event_id, now_ms
 from .task import Decision, Task, TaskStatus
 
-# close_task 仅接受这两个"终结态"；update_task 仅接受非终结态。
-# 同一对常量给 server inbound 白名单 import，避免字面值散落多处。
-_CLOSED_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
-_NON_TERMINAL_STATUSES: frozenset[str] = frozenset({"open", "in_progress", "blocked"})
+# close_task 仅接受 CLOSED_STATUSES；update_task 仅接受 NON_TERMINAL_STATUSES。
+# 两组都是 public —— :mod:`chahua.server_inbound_task` 直接 import 用做 inbound 白名单，
+# 避免字面值在两层重复（在 P5.2 重构里已经踩过一次"忘改一边"的坑）。
+CLOSED_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
+NON_TERMINAL_STATUSES: frozenset[str] = frozenset({"open", "in_progress", "blocked"})
+
+# events.jsonl `kind` 字段 —— 模块顶 single source（测试 + _append_event 都 import）。
+EVENT_KIND_BECAME_ACTIVE = "became_active"
+EVENT_KIND_BECAME_INACTIVE = "became_inactive"
+EVENT_KIND_CLOSED = "closed"  # payload: {"status": "done"|"abandoned"}
+EVENT_KIND_FIELD_CHANGED = "field_changed"  # payload: {"field", "before", "after"}
 
 # update_task 的 owner 参数 sentinel —— ``None`` 是合法值（清空 owner），不能复用 None
-# 表示"不改"。Python 没有 ``...`` 之外的轻量 marker，单独建一个 module-private 对象。
+# 表示"不改"。沿 :mod:`chahua.orchestrator` 的 ``_UNSET`` 同款 module-private 对象。
 _OWNER_UNSET: object = object()
 
 _log = logging.getLogger(__name__)
@@ -419,9 +426,9 @@ class TasksStore:
         # 宽容 §8.1），缺一行不影响 task_info 权威快照（events 是 hint 历史，不参与
         # state 重建）。
         if prev is not None:
-            self._append_event(prev, "became_inactive")
+            self._append_event(prev, EVENT_KIND_BECAME_INACTIVE)
         if task_id is not None:
-            self._append_event(task_id, "became_active")
+            self._append_event(task_id, EVENT_KIND_BECAME_ACTIVE)
 
     def close_task(self, task_id: str, *, status: TaskStatus) -> Task:
         """把任务状态推到终结态（``"done"`` / ``"abandoned"``）+ 写 closed_at_ms。
@@ -430,14 +437,14 @@ class TasksStore:
         已经 closed 的任务再 close → :class:`TaskAlreadyClosedError`。其它 status 值 →
         ``ValueError``（应走 :meth:`update_task`）。
         """
-        if status not in _CLOSED_STATUSES:
+        if status not in CLOSED_STATUSES:
             raise ValueError(
                 f"close_task: status={status!r} 不是终结态；in_progress / blocked 走 update_task"
             )
         task = self._tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
-        if task.status in _CLOSED_STATUSES:
+        if task.status in CLOSED_STATUSES:
             raise TaskAlreadyClosedError(
                 f"task {task_id!r} 已经 status={task.status!r}，不能重复关闭"
             )
@@ -447,7 +454,7 @@ class TasksStore:
         )
         self._write_task(new_task)
         self._tasks[task.id] = new_task
-        self._append_event(task.id, "closed", status=status)
+        self._append_event(task.id, EVENT_KIND_CLOSED, status=status)
         if self._active_task_id == task.id:
             # set_active(None) 会写 became_inactive 行 + state.json。失败时本函数仍返
             # 新 task（关闭已落盘）；上层应当看 state.json 与 task.status 一致性自愈。
@@ -480,7 +487,7 @@ class TasksStore:
         task = self._tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
-        if status is not None and status not in _NON_TERMINAL_STATUSES:
+        if status is not None and status not in NON_TERMINAL_STATUSES:
             raise ValueError(
                 f"update_task: status={status!r} 不可用；终结态 done / abandoned 请走 close_task"
             )
@@ -499,7 +506,7 @@ class TasksStore:
             changes.append(("status", task.status, status))
             patch["status"] = status
             # 重开闭合任务（done/abandoned → in_progress 等）：清 closed_at_ms。
-            if task.status in _CLOSED_STATUSES:
+            if task.status in CLOSED_STATUSES:
                 patch["closed_at_ms"] = None
         if not changes:
             return task  # no-op，不戳 updated_at_ms 也不写 events
@@ -509,7 +516,7 @@ class TasksStore:
         self._tasks[task.id] = new_task
         for field_name, before, after in changes:
             self._append_event(
-                task.id, "field_changed",
+                task.id, EVENT_KIND_FIELD_CHANGED,
                 field=field_name, before=before, after=after,
             )
         return new_task
