@@ -18,6 +18,9 @@ import { EventType, taskStatusLabel } from "./events.js";
 import * as taskState from "./task_state.js";
 
 const LS_COLLAPSED_KEY = "chahua.taskPanel.collapsed";
+// "其它任务" 折叠区的展开状态记到 user prefs —— 与面板整体折叠同口径，跨房 / 跨重启
+// 都保留。默认展开（首次进 P5.2 多任务时让用户看到入口）。
+const LS_OTHERS_OPEN_KEY = "chahua.taskPanel.othersOpen";
 // 高亮 hint 持续时间 —— 600ms 是 P3 sidebar 选中态淡出口径，复用同一感觉。
 const FLASH_MS = 600;
 // 第一帧后才挂回 transition 类，避免冷启动从 280px → 32px 的折叠态首屏抖动。
@@ -37,6 +40,24 @@ function writeCollapsed(collapsed) {
     window.localStorage.setItem(LS_COLLAPSED_KEY, collapsed ? "1" : "0");
   } catch {
     // 写失败就让它失败 —— 下次还是默认展开。
+  }
+}
+
+function readOthersOpen() {
+  try {
+    const v = window.localStorage.getItem(LS_OTHERS_OPEN_KEY);
+    // 首次访问（null）→ 默认展开；之前显式写过 "0" → 折叠。
+    return v !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function writeOthersOpen(open) {
+  try {
+    window.localStorage.setItem(LS_OTHERS_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // 同 writeCollapsed —— 失败就失败，下次默认展开。
   }
 }
 
@@ -79,6 +100,9 @@ export function createTaskPanel({
   // (taskId, patch) → 发 update_task inbound 的回调。title / goal blur 后调；调用方
   // 自己判断是否真的有变化（这里只在前后值不同时调）。无 callback 时不挂 inline 编辑。
   onPatchTask = null,
+  // (taskId | null) → 发 set_active_task inbound（P5.2.5）。"其它任务" 折叠区里点
+  // 卡片调；无 callback 时该区卡片仍渲染但不响应点击（用作纯只读概览）。
+  onSetActive = null,
 }) {
   let collapsed = readCollapsed();
   applyCollapsed();
@@ -101,26 +125,42 @@ export function createTaskPanel({
   function render(state) {
     bodyEl.replaceChildren();
     const active = taskState.getActiveTask();
-    if (!active) {
-      bodyEl.appendChild(renderEmpty(state));
-      return;
+    // 把"非 active"分支统一收口 —— P5.1 一房间最多一任务时 others 永远是空数组；P5.2
+    // 起可能有多任务并存，active 也可能为空（P5.2.6 双向修复对"多于一个 task.json"分支
+    // 不自动选 active，等用户在这个面板里点一个）。
+    const others = active
+      ? state.tasks.filter((t) => t && t.id !== active.id)
+      : state.tasks.slice();
+    if (active) {
+      bodyEl.appendChild(renderTaskCard(active));
+      bodyEl.appendChild(renderArtifacts(active));
+      bodyEl.appendChild(renderDecisions(active));
+    } else if (state.tasks.length === 0) {
+      bodyEl.appendChild(renderEmpty());
+    } else {
+      bodyEl.appendChild(renderNoActiveHint(state.tasks.length));
     }
-    bodyEl.appendChild(renderTaskCard(active));
-    bodyEl.appendChild(renderArtifacts(active));
-    bodyEl.appendChild(renderDecisions(active));
+    if (others.length > 0) {
+      bodyEl.appendChild(renderOthers(others));
+    }
     consumePendingFlashes();
   }
 
-  function renderEmpty(state) {
+  function renderEmpty() {
     const hint = document.createElement("div");
     hint.className = "task-empty";
-    // "有任务但 active 丢"在 P5.1 不会发生（一房间最多 1 任务 + 加载时双向修复
-    // state.json↔task.json）；保留 fallback 应对 P5.2 起的过渡窗口。
-    if (state.tasks.length === 0) {
-      hint.textContent = "还没有任务。新建一个把这场聊天升级为任务房间。";
-    } else {
-      hint.textContent = "任务暂未激活（state.json 缺失？）—— 重启 sidecar 应自动修复。";
-    }
+    hint.textContent = "还没有任务。新建一个把这场聊天升级为任务房间。";
+    return hint;
+  }
+
+  function renderNoActiveHint(count) {
+    // P5.2.6 多任务无 active：state.json 缺 + 多于一个有效 task.json 时服务端不自动选；
+    // 也覆盖用户在下拉里主动选"🗨 房间级"的状态。两种都靠下面"其它任务"列表点回去。
+    const hint = document.createElement("div");
+    hint.className = "task-empty";
+    hint.textContent = onSetActive
+      ? `当前没有正在做的任务（共 ${count} 个待选）—— 在下面"其它任务"里点一个。`
+      : `当前没有正在做的任务（共 ${count} 个）。`;
     return hint;
   }
 
@@ -285,6 +325,83 @@ export function createTaskPanel({
     });
   }
 
+  // "其它任务"折叠区（P5.2.7）。走原生 <details>/<summary> —— 浏览器兜底键盘 / 屏阅读
+  // 器语义，比手搓 chevron 省心。toggle 写 localStorage（默认展开），用 details.open 单源。
+  // 单卡片是"compact"形态：图标 + 标题（截断）+ 状态 / 负责人小字 —— active 卡才显完整
+  // goal / artifacts / decisions（信息密度区分让 active vs others 一眼分清）。
+  function renderOthers(tasks) {
+    const details = document.createElement("details");
+    details.className = "task-others";
+    details.open = readOthersOpen();
+    details.addEventListener("toggle", () => writeOthersOpen(details.open));
+
+    const summary = document.createElement("summary");
+    summary.className = "task-others-summary";
+    summary.textContent = `其它任务 (${tasks.length})`;
+    details.appendChild(summary);
+
+    const ul = document.createElement("ul");
+    ul.className = "task-others-list";
+    for (const t of tasks) {
+      ul.appendChild(renderOtherItem(t));
+    }
+    details.appendChild(ul);
+    return details;
+  }
+
+  function renderOtherItem(task) {
+    const li = document.createElement("li");
+    li.className = "task-other";
+    li.dataset.taskId = task.id;
+    // closed (done / abandoned) 给个额外 modifier class，让 CSS 把卡片"翻灰"得更彻底
+    // —— 仍是非 active 的，但语义上"已结束"应该比"还在跑但不是当前"更暗。
+    if (task.status === "done" || task.status === "abandoned") {
+      li.classList.add("task-other-closed");
+    }
+
+    const title = document.createElement("div");
+    title.className = "task-other-title";
+    const icon = document.createElement("span");
+    icon.className = "task-other-icon";
+    icon.textContent = "📌";
+    title.appendChild(icon);
+    const text = document.createElement("span");
+    text.className = "task-other-title-text";
+    text.textContent = task.title || "(无标题)";
+    title.appendChild(text);
+    li.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "task-other-meta";
+    const status = document.createElement("span");
+    status.className = "task-other-status";
+    status.dataset.status = task.status || "";
+    status.textContent = taskStatusLabel(task.status);
+    meta.appendChild(status);
+    const owner = document.createElement("span");
+    owner.className = "task-other-owner";
+    owner.textContent = `负责人：${task.owner || "全员"}`;
+    meta.appendChild(owner);
+    li.appendChild(meta);
+
+    if (onSetActive) {
+      li.classList.add("task-other-clickable");
+      li.tabIndex = 0;
+      li.title = `切到任务「${task.title || "(无标题)"}」`;
+      const activate = () => onSetActive(task.id);
+      li.addEventListener("click", activate);
+      // 键盘可达 —— 与 sidebar 头像 / 房间行 click 口径相近，但任务列表更可能被键盘党
+      // 用，Enter / Space 都接。空格默认会滚动，preventDefault 一下。
+      li.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          activate();
+        }
+      });
+    }
+    return li;
+  }
+
   function renderDecisions(task) {
     return renderListSection({
       kind: "decisions",
@@ -327,6 +444,11 @@ export function createTaskPanel({
       pendingFlashes.push({ selector: `.task-artifact[data-rel="${cssEscape(data.rel)}"]` });
     } else if (envType === EventType.TASK_DECISION_ADDED && data.decision_id) {
       pendingFlashes.push({ selector: `.task-decision[data-decision-id="${cssEscape(data.decision_id)}"]` });
+    } else if (envType === EventType.TASK_CLOSE && data.task_id) {
+      // 关任务后 tasks_store.close_task 会顺带把它 set_active(None)（若它原本是 active）
+      // —— 紧跟的 TASK_INFO 把该 task 从 active 卡踢到"其它任务"列表里。flash 命中新
+      // 出现的 .task-other[data-task-id=X]；若 active 仍非空（关了别人）则也命中同一项。
+      pendingFlashes.push({ selector: `.task-other[data-task-id="${cssEscape(data.task_id)}"]` });
     }
   }
 

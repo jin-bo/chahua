@@ -33,6 +33,9 @@ export const EventType = Object.freeze({
   TASK_UPDATE: "task_update",
   TASK_DECISION_ADDED: "task_decision_added",
   TASK_ARTIFACT_ADDED: "task_artifact_added",
+  // P5.2.4：任务推入终结态（done / abandoned）后的 hint。与其它四个 hint 同口径 —— 紧
+  // 跟一帧 TASK_INFO 才是权威状态；这里仅给前端做 toast / 卡片翻灰动画用。
+  TASK_CLOSE: "task_close",
 });
 
 export const Status = Object.freeze({
@@ -80,13 +83,17 @@ export const Inbound = Object.freeze({
   UPLOAD_FILE: "upload_file",
   // 导出当前房间为 markdown。无 payload，服务端读 transcript 全量后回 ROOM_EXPORT。
   EXPORT_ROOM: "export_room",
-  // P5.1 任务房间 inbound（docs/P5-任务房间.md §4.3）。set_active_task / close_task 留待
-  // P5.2 —— P5.1 严守"一房间最多 1 个任务"。服务端成功后会重发整份 task_info
-  // （权威快照）+ emit 对应 hint envelope；前端不做乐观更新，等回环。
+  // P5.1 / P5.2 任务房间 inbound（docs/P5-任务房间.md §4.3）。服务端成功后会重发整份
+  // task_info（权威快照）+ emit 对应 hint envelope；前端不做乐观更新，等回环。
   OPEN_TASK: "open_task",
   UPDATE_TASK: "update_task",
   ATTACH_ARTIFACT: "attach_artifact",
   ADD_DECISION: "add_decision",
+  // P5.2.5：多任务管理 —— 切 active / 关闭任务。set_active_task 的 task_id 可为 null
+  // （清回房间级闲聊）；close_task 的 status 仅接受 "done" / "abandoned"，其余非法值
+  // 走服务端 NOTICE error 退回。
+  SET_ACTIVE_TASK: "set_active_task",
+  CLOSE_TASK: "close_task",
 });
 
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /

@@ -686,6 +686,7 @@ function handleEnvelope(env) {
     case EventType.TASK_UPDATE:
     case EventType.TASK_DECISION_ADDED:
     case EventType.TASK_ARTIFACT_ADDED:
+    case EventType.TASK_CLOSE:
       taskPanel.flashHint(env.type, env.data ?? {});
       return;
     case EventType.ROOM_EXPORT: {
@@ -962,6 +963,14 @@ const taskPanel = createTaskPanel({
   onPatchTask: (taskId, patch) => {
     if (!connected) return;
     send({ type: Inbound.UPDATE_TASK, task_id: taskId, patch });
+  },
+  // 点"其它任务"折叠区的卡片 → 切 active。任务名先一步进 status 提示，回环到的
+  // task_info 会让面板重渲；server 端 _inbound_set_active_task 走前 cancel inflight turn，
+  // 没必要在前端再判 connected 之外的状态。
+  onSetActive: (taskId) => {
+    if (!connected) return;
+    send({ type: Inbound.SET_ACTIVE_TASK, task_id: taskId });
+    setStatus("", "切换任务…");
   },
 });
 

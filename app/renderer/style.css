@@ -471,8 +471,105 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .task-decision-meta { font-size: 11px; color: #999; margin-top: 2px; }
 
 /* hint 高亮 —— task_open / task_update / task_decision_added /
-   task_artifact_added 命中 DOM 时短暂打底色 600ms，让用户感知"刚加 / 刚改"。 */
+   task_artifact_added / task_close 命中 DOM 时短暂打底色 600ms，让用户感知"刚加 /
+   刚改 / 刚关"。 */
 .task-flash { background: #fff4c2 !important; border-color: #e0c068 !important; }
+
+/* "其它任务"折叠区（P5.2.7）。<details>/<summary> 走原生交互，summary 自带 disclosure
+   三角；这里仅给它一点呼吸 + 与 task-section 同款 head 排版。 */
+.task-others {
+  margin-top: 4px;
+  border-top: 1px solid #ece4cf;
+  padding-top: 10px;
+}
+.task-others-summary {
+  font-size: 11px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: revert; /* 兜底某些 UA reset 把 summary 的三角清掉 */
+}
+.task-others-summary:hover { color: #6a4f25; }
+.task-others-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+/* 单卡片"compact"形态：标题 + 状态 / owner 小字。背景比 active 卡浅一档 —— 既区分
+   active vs others，又不至于让"其它任务"看着像被废弃。 */
+.task-other {
+  background: #fbf8ee;
+  border: 1px solid #ece4cf;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  color: #555;
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+.task-other-clickable {
+  cursor: pointer;
+}
+.task-other-clickable:hover {
+  background: #fffbef;
+  border-color: #d0c8b4;
+}
+.task-other-clickable:focus-visible {
+  outline: 2px solid #d0c8b4;
+  outline-offset: 1px;
+}
+.task-other-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+}
+.task-other-title-text {
+  flex: 1;
+  word-break: break-word;
+  /* 截到两行截断 —— 任务标题理论上 ≤ 60 字（room.toml 校验），但用户也会复制段落进来；
+     -webkit-line-clamp 单 vendor 但所有 Chromium 都接，Electron 不需要兜底。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.task-other-icon { font-size: 13px; line-height: 1; flex-shrink: 0; }
+.task-other-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #888;
+}
+.task-other-status {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #ece4cf;
+  color: #6a4f25;
+}
+/* 状态色：进行中 = 浅金；完成 = 浅绿；放弃 = 浅红；阻塞 = 浅橙；未开始 = 默认。
+   per status 不爱手抄 5 个，留默认 + 三档区分即可（done / abandoned / blocked）。 */
+.task-other-status[data-status="done"] { background: #d9ead3; color: #406c2a; }
+.task-other-status[data-status="abandoned"] { background: #e6d4d4; color: #8a4040; }
+.task-other-status[data-status="blocked"] { background: #f0d9b8; color: #80531a; }
+.task-other-status[data-status="in_progress"] { background: #d4e3ec; color: #2a567c; }
+.task-other-owner {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* closed (done / abandoned) 把整张卡再翻灰一档 —— 语义"已结束 ≠ 仅"非 active""。 */
+.task-other-closed {
+  background: #f5f1e3;
+  opacity: 0.75;
+}
+.task-other-closed .task-other-title { color: #888; font-weight: 500; }
 
 /* 标为决策 modal 的"支持消息"列表 —— 每行 [✔][speaker]：[文本片段]。 */
 .decision-support-list {
