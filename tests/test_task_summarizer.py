@@ -12,9 +12,11 @@ from pathlib import Path
 import pytest
 
 from chahua._persist import read_jsonl_skip_bad
-from chahua.room import Room
 from chahua.summarizer import TaskSummaries, TaskSummarizer
 from chahua.user_md import USER_SPEAKER_ID
+
+
+# ``room`` fixture 在 tests/conftest.py。
 
 
 class _StubClient:
@@ -23,13 +25,6 @@ class _StubClient:
     不被取属性，任意对象都成。"""
 
     pass
-
-
-@pytest.fixture
-def room():
-    r = Room(name="t")
-    r.add_participant(USER_SPEAKER_ID)
-    return r
 
 
 def _make_summarizer(tmp_path: Path, task_id: str = "t-1") -> TaskSummarizer:
@@ -74,9 +69,9 @@ def test_collect_block_advances_cursor_when_below_threshold(tmp_path, room):
     s = _make_summarizer(tmp_path)
     for i in range(20):
         room.append(USER_SPEAKER_ID, f"x{i}", task_id="t-other")
-    assert s.considered_seq == 0
+    assert s.considered_until_seq == 0
     assert s._collect_block(room, block_size=3) is None
-    assert s.considered_seq == 20
+    assert s.considered_until_seq == 20
 
 
 def test_collect_block_caps_at_double_block_size(tmp_path, room):
@@ -89,9 +84,9 @@ def test_collect_block_caps_at_double_block_size(tmp_path, room):
 
 
 def test_collect_block_no_new_messages(tmp_path, room):
-    """latest_seq <= considered_seq 直接返 None。"""
+    """latest_seq <= considered_until_seq 直接返 None。"""
     s = _make_summarizer(tmp_path)
-    s._considered_seq = 100  # 假装已扫到 100
+    s._considered_until_seq = 100  # 假装已扫到 100
     for i in range(5):
         room.append(USER_SPEAKER_ID, f"a{i}", task_id="t-1")
     # room.latest_seq = 5 < 100，return None
@@ -104,16 +99,16 @@ def test_collect_block_no_new_messages(tmp_path, room):
 def test_cursor_flush_roundtrip(tmp_path):
     """flush_cursor 写文件，新实例从同一路径加载得到同值。"""
     s = _make_summarizer(tmp_path)
-    s._considered_seq = 42
+    s._considered_until_seq = 42
     s.flush_cursor()
     s2 = _make_summarizer(tmp_path)
-    assert s2.considered_seq == 42
+    assert s2.considered_until_seq == 42
 
 
 def test_cursor_missing_means_zero(tmp_path):
     """没 cursor 文件 → 从 0 开始（与 room-level Summarizer 同口径）。"""
     s = _make_summarizer(tmp_path)
-    assert s.considered_seq == 0
+    assert s.considered_until_seq == 0
 
 
 def test_cursor_corrupt_treated_as_zero(tmp_path):
@@ -121,22 +116,24 @@ def test_cursor_corrupt_treated_as_zero(tmp_path):
     s = _make_summarizer(tmp_path)
     s._cursor_path.write_text("not json", encoding="utf-8")
     s2 = _make_summarizer(tmp_path)
-    assert s2.considered_seq == 0
+    assert s2.considered_until_seq == 0
 
 
 # ── maybe_summarize 端到端（monkeypatch chat_oneshot）────────────────────
 
 
-async def _fake_oneshot_ok(*_args, **_kwargs) -> str:
-    return "- 任务要点一\n- 任务要点二"
-
-
-async def _fake_oneshot_empty(*_args, **_kwargs) -> str:
-    return ""
+def _canned_oneshot(text: str):
+    """工厂：返回一个 async 假 chat_oneshot，结果固定 ``text``。"""
+    async def _fake(*_args, **_kwargs) -> str:
+        return text
+    return _fake
 
 
 async def test_maybe_summarize_writes_summary_jsonl(tmp_path, room, monkeypatch):
-    monkeypatch.setattr("chahua.summarizer.chat_oneshot", _fake_oneshot_ok)
+    monkeypatch.setattr(
+        "chahua.summarizer.chat_oneshot",
+        _canned_oneshot("- 任务要点一\n- 任务要点二"),
+    )
     s = _make_summarizer(tmp_path)
     for i in range(15):
         room.append(USER_SPEAKER_ID, f"m{i}", task_id="t-1")
@@ -147,12 +144,12 @@ async def test_maybe_summarize_writes_summary_jsonl(tmp_path, room, monkeypatch)
     assert s._summary_path.exists()
     rows = list(read_jsonl_skip_bad(s._summary_path))
     assert len(rows) == 1 and rows[0]["text"] == span.text
-    assert s.considered_seq >= room.latest_seq  # 成功后推到 latest 上
+    assert s.considered_until_seq >= room.latest_seq  # 成功后推到 latest 上
 
 
 async def test_maybe_summarize_failure_backoff(tmp_path, room, monkeypatch):
     """LLM 空返回 → 不写 summary，但拉 next_eligible_seq 退避。"""
-    monkeypatch.setattr("chahua.summarizer.chat_oneshot", _fake_oneshot_empty)
+    monkeypatch.setattr("chahua.summarizer.chat_oneshot", _canned_oneshot(""))
     s = _make_summarizer(tmp_path)
     for i in range(15):
         room.append(USER_SPEAKER_ID, f"m{i}", task_id="t-1")
@@ -196,21 +193,23 @@ def test_task_summaries_close_flushes_all(tmp_path):
     t2 = store.open_task(title="二", goal="...")
 
     pool = TaskSummaries(_StubClient(), tasks_store=store)  # type: ignore[arg-type]
-    pool._ensure(t1.id)._considered_seq = 5
-    pool._ensure(t2.id)._considered_seq = 9
+    pool._ensure(t1.id)._considered_until_seq = 5
+    pool._ensure(t2.id)._considered_until_seq = 9
     pool.close()
 
     # 重建池 → ensure 时从盘读 cursor，应当还原。
     pool2 = TaskSummaries(_StubClient(), tasks_store=store)  # type: ignore[arg-type]
-    assert pool2._ensure(t1.id).considered_seq == 5
-    assert pool2._ensure(t2.id).considered_seq == 9
+    assert pool2._ensure(t1.id).considered_until_seq == 5
+    assert pool2._ensure(t2.id).considered_until_seq == 9
 
 
 async def test_task_summaries_kick_iterates_all_tasks(tmp_path, room, monkeypatch):
     """``kick`` 对 store 当前每个任务都走一次 maybe_summarize。"""
     from chahua.tasks_store import TasksStore
 
-    monkeypatch.setattr("chahua.summarizer.chat_oneshot", _fake_oneshot_ok)
+    monkeypatch.setattr(
+        "chahua.summarizer.chat_oneshot", _canned_oneshot("- ok"),
+    )
     store = TasksStore(room_dir=tmp_path)
     t1 = store.open_task(title="一", goal="...")
     t2 = store.open_task(title="二", goal="...")

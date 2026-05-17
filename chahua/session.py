@@ -218,12 +218,11 @@ class RoomSession:
     实例化（会绕过内存镜像导致双 source 不一致）。"""
 
     task_summaries: TaskSummaries
-    """P5.2.12：per-task summarizer 池。``close()`` 一并 flush 所有 task cursor。
-    业务流不取这个 handle —— orchestrator 自己持引用做 ``_summarize_safe`` 的尾巴。"""
+    """per-task summarizer 池。``close()`` 一并 flush 所有 task cursor。业务流不取这个
+    handle —— orchestrator 自己持引用做 ``_summarize_safe`` 的尾巴。"""
 
     def close(self) -> None:
-        # 先 flush task summary cursor —— 茶客关时会卡 stop_signal/event_loop，cursor
-        # IO 是同步 / 与茶客生命周期解耦的，放前面 fail-fast。
+        # cursor flush 是廉价同步 IO，先做完再走茶客 close（后者偶发卡 event loop）。
         self.task_summaries.close()
         for guest in self.guests:
             try:

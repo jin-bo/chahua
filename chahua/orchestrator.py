@@ -196,8 +196,8 @@ class Orchestrator:
         # orchestrator 仅在 ``submit_user_message`` 入口 snapshot 一次 ``active_task_id``，
         # 保证整轮归属同一 task；用户在 turn 中改 active 不回追已开的发言（docs §4.4）。
         self.tasks_store = tasks_store
-        # P5.2.12：per-task summarizer 池。``None`` = 旧测试 / 无任务房间，跳过任务级
-        # 摘要 kick。session.py 装配时必带（与 tasks_store 同生命周期）。
+        # per-task summarizer 池。``None`` = 测试 / 无任务房间，跳过任务级摘要 kick。
+        # session.py 装配时必带（与 tasks_store 同生命周期）。
         self.task_summaries = task_summaries
 
         self._guests: dict[str, _GuestEntry] = {}
@@ -722,7 +722,7 @@ class Orchestrator:
             )
         except Exception:
             _log.exception("summarize iteration failed")
-        # 任务级摘要 —— P5.2.12 落盘 only，与房间级共享同一后台 task，单次 kick 顺序走完。
+        # 任务级摘要：与房间级共享同一后台 task，单次 kick 顺序走完。
         if self.task_summaries is not None:
             await self.task_summaries.kick(
                 self.room, display, block_size=self.config.summary_block_size,

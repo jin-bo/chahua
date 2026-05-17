@@ -23,6 +23,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
+def room():
+    """裸 :class:`Room`（USER_SPEAKER_ID 已加），不挂 transcript_path。
+
+    需要落盘 transcript 的测试别用这条，自己 ``Room(name=..., transcript_path=...)``
+    在 test 里现造（持久化路径与 ``tmp_path`` 强耦合，fixture 复用收益不大）。"""
+    r = Room(name="t")
+    r.add_participant(USER_SPEAKER_ID)
+    return r
+
+
+@pytest.fixture
 def env_paths(tmp_path, monkeypatch):
     """与 dev/prod 二根隔离的 Paths 夹具 —— ``user_data_root`` 指向 tmp，
     ``app_root`` 指向仓库根（persona / templates 找得到）。LLM 凭据全打假值，

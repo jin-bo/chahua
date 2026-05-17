@@ -147,7 +147,7 @@ class Summarizer:
             return None
         return await self._summarize_block(block, display_for, latest=latest)
 
-    # ── 内部 hook（P5.2.12 :class:`TaskSummarizer` 子类化扩展点）─────────
+    # ── 内部 hook（:class:`TaskSummarizer` 子类化扩展点）─────────
 
     def _collect_block(
         self, room: Room, block_size: int
@@ -156,9 +156,7 @@ class Summarizer:
 
         子类（任务级）按 ``task_id`` 过滤 + 用独立 cursor 推进。
         """
-        start = self.covered_until + 1
-        latest = room.latest_seq
-        if latest - start + 1 < block_size:
+        if room.latest_seq - self.covered_until < block_size:
             return None
         block = room.messages_since(self.covered_until)
         if not block:
@@ -213,7 +211,7 @@ class Summarizer:
         return span
 
 
-# ── 任务级摘要（P5.2.12）──────────────────────────────────────────────────
+# ── 任务级摘要 ───────────────────────────────────────────────────────────
 
 
 _TASK_CURSOR_KEY = "considered_until_seq"
@@ -226,9 +224,9 @@ class TaskSummarizer(Summarizer):
     避免大房间多任务时每轮重扫整本 transcript。失败 / 块未满也推进 cursor（已扫过
     就是已扫过），区别于 ``covered_until`` 只在成功摘要后推进。
 
-    P5.2 阶段**只落盘**：``maybe_summarize`` 跑 LLM 写 ``summary.jsonl`` + 内存推
+    本阶段**只落盘**：``maybe_summarize`` 跑 LLM 写 ``summary.jsonl`` + 内存推
     cursor；cursor 文件由 ``session.close()`` 通过 :class:`TaskSummaries.close`
-    统一 flush。P5.3 起 onboarding 注入会读 ``summary.jsonl`` + cursor。
+    统一 flush。onboarding 注入将读 ``summary.jsonl`` + cursor（P5.3 起）。
     """
 
     def __init__(
@@ -242,15 +240,15 @@ class TaskSummarizer(Summarizer):
         super().__init__(llm_client, summary_path=summary_path)
         self._task_id = task_id
         self._cursor_path = cursor_path
-        self._considered_seq = self._load_cursor()
+        self._considered_until_seq = self._load_cursor()
 
     @property
     def task_id(self) -> str:
         return self._task_id
 
     @property
-    def considered_seq(self) -> int:
-        return self._considered_seq
+    def considered_until_seq(self) -> int:
+        return self._considered_until_seq
 
     def _load_cursor(self) -> int:
         obj = read_json_or_none(self._cursor_path)
@@ -266,29 +264,29 @@ class TaskSummarizer(Summarizer):
             return 0
 
     def flush_cursor(self) -> None:
-        """把 ``_considered_seq`` 落到 ``summary_cursor.json``。
+        """把 ``_considered_until_seq`` 落到 ``summary_cursor.json``。
 
         :meth:`TaskSummaries.close` 在 session 关闭时统一调；中途 ``maybe_summarize``
         每轮都写一遍小 json 没必要（成功摘要本身就 append summary.jsonl，cursor 丢
         最多回退到上次重启时的值，下次重扫 N 条多花一次 LLM —— 远低于每轮 fsync 成本）。
         """
         self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json_atomic(self._cursor_path, {_TASK_CURSOR_KEY: self._considered_seq})
+        write_json_atomic(self._cursor_path, {_TASK_CURSOR_KEY: self._considered_until_seq})
 
     def _collect_block(
         self, room: Room, block_size: int
     ) -> Optional[list[Message]]:
         latest = room.latest_seq
-        if latest <= self._considered_seq:
+        if latest <= self._considered_until_seq:
             return None
         candidates = [
-            m for m in room.messages_since(self._considered_seq)
+            m for m in room.messages_since(self._considered_until_seq)
             if m.task_id == self._task_id
         ]
         if len(candidates) < block_size:
             # 不够一块：cursor 推到 latest 让下次只看更新的 —— 否则重扫已知不匹配的
             # 那段（多任务房间里这段可能很长，每轮都白扫）。
-            self._considered_seq = latest
+            self._considered_until_seq = latest
             return None
         if len(candidates) > 2 * block_size:
             candidates = candidates[: 2 * block_size]
@@ -304,7 +302,7 @@ class TaskSummarizer(Summarizer):
         span = await super()._summarize_block(block, display_for, latest=latest)
         if span is not None:
             # 成功 → 已考察到块末（task-msg 的 seq），保险也推到 latest 以省下轮扫描。
-            self._considered_seq = max(self._considered_seq, latest)
+            self._considered_until_seq = max(self._considered_until_seq, latest)
         return span
 
 
