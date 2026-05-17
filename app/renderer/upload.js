@@ -13,6 +13,19 @@ const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
 
 const SHARE_PREFIX = "share/";
 
+// pending-file card 左侧色块图标。当前所有文件类型共用一个 emoji —— 想做按扩展名分图
+// 标时改这里。
+const PENDING_FILE_ICON = "📄";
+
+// "." 在首位（dotfile，如 .gitignore）当作无扩展名走 fallback，避免把整个文件名当 type
+// 显示出来。
+function fileTypeLabel(name) {
+  if (typeof name !== "string") return "FILE";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return "FILE";
+  return name.slice(dot + 1).toUpperCase();
+}
+
 // File → 纯 base64 字符串（去掉 data URI 头）。FileReader.readAsDataURL 比手写
 // ArrayBuffer → btoa 链路省一次大数组中转。
 function readFileAsBase64(file) {
@@ -77,17 +90,32 @@ export function createUpload({
       const li = document.createElement("li");
       li.className = "pending-file";
       const landedName = f.rel.slice(SHARE_PREFIX.length);
+      const displayName = f.original || landedName;
+
+      const icon = document.createElement("div");
+      icon.className = "pending-file-icon";
+      icon.textContent = PENDING_FILE_ICON;
+
+      const info = document.createElement("div");
+      info.className = "pending-file-info";
       const name = document.createElement("span");
       name.className = "pending-file-name";
-      name.textContent = f.original || landedName;
+      name.textContent = displayName;
+      // sanitize 后落地文件名变了才挂 title 提示用户"我点的 vs 落地的"差异；同名时
+      // title 加 ellipsis 后才有用，这里就不挂了。
       if (f.original && f.original !== landedName) {
         name.title = `已上传为 ${landedName}（原名 ${f.original} 含非法字符被替换）`;
       }
-      li.appendChild(name);
+      const type = document.createElement("span");
+      type.className = "pending-file-type";
+      type.textContent = fileTypeLabel(displayName);
+      info.append(name, type);
+
+      li.append(icon, info);
       if (onAttachToTask) {
         const attach = document.createElement("button");
         attach.type = "button";
-        attach.className = "pending-file-attach";
+        attach.className = "pending-file-action pending-file-attach";
         attach.textContent = "📎";
         attach.title = "拷贝到当前任务（share/ 原文件保留）";
         attach.addEventListener("click", () => onAttachToTask(f.rel));
@@ -95,7 +123,7 @@ export function createUpload({
       }
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.className = "pending-file-remove";
+      remove.className = "pending-file-action pending-file-remove";
       remove.textContent = "×";
       remove.title = "不发送这个文件（文件已在房间 share 目录里，下次还能引用）";
       remove.addEventListener("click", () => {

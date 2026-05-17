@@ -466,18 +466,17 @@
     </aside>
   </div>
   <form id="composer">
-    <button type="button" id="attach-file" class="composer-attach" title="上传文件到房间共享目录（茶客可在 ./share/ 下读取）" disabled>+</button>
     <input id="file-input" type="file" multiple hidden>
+    <ul id="pending-files" class="pending-files" hidden></ul>
     <div id="composer-wrap">
-      <!-- 当前任务 chip —— active 非空时显示 "📋 <title>"，静态 pill（无下拉无 ✕）。
-           P5.1 只有 0 或 1 个 active；P5.2 起 chip 会升级成下拉。 -->
-      <div id="composer-task-chip" class="composer-task-chip" hidden></div>
-      <!-- 已上传待发送的文件 pill 列表。上传成功后挂入；submit 时清空。 -->
-      <ul id="pending-files" class="pending-files" hidden></ul>
       <textarea id="text" rows="1" placeholder="说点什么…  (@ 茶客名 直接点；Shift+Enter 换行)" autocomplete="off" autofocus></textarea>
       <ul id="mention-dropdown" class="mention-dropdown" hidden></ul>
     </div>
-    <button type="submit">发送</button>
+    <div class="composer-bottom-bar">
+      <button type="button" id="attach-file" class="composer-attach" title="上传文件到房间共享目录（茶客可在 ./share/ 下读取）" aria-label="添加文件" disabled>+</button>
+      <div id="composer-task-chip" class="composer-task-chip" hidden></div>
+      <button type="submit" class="composer-send" title="发送 (Enter)" aria-label="发送">↑</button>
+    </div>
   </form>
   <script type="module" src="renderer.js"></script>
 </body>

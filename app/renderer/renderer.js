@@ -190,17 +190,16 @@ function updateNewTaskBtn() {
     : "新建任务";
 }
 
-// 按 currentTurnId 切换 submitBtn 的文字 + class —— 同一个按钮承担「发送 / 停止」
-// 双重职责（参照 Claude / ChatGPT 输入框右侧的 send/stop 形变）；颜色由 .stop 类 +
-// style.css 控制。
+// 同一个按钮承担「发送 / 停止」双重职责；aria-label 同步切，屏读器读"发送"/"停止"而
+// 不是裸符号。颜色由 .stop 类 + style.css 控制。
+const SEND_ICON = "↑";
+const STOP_ICON = "■";
 function updateSendButton() {
-  if (currentTurnId === null) {
-    submitBtn.textContent = "发送";
-    submitBtn.classList.remove("stop");
-  } else {
-    submitBtn.textContent = "停止";
-    submitBtn.classList.add("stop");
-  }
+  const busy = currentTurnId !== null;
+  submitBtn.textContent = busy ? STOP_ICON : SEND_ICON;
+  submitBtn.setAttribute("aria-label", busy ? "停止" : "发送");
+  submitBtn.title = busy ? "停止当前轮次" : "发送 (Enter)";
+  submitBtn.classList.toggle("stop", busy);
 }
 
 function stickToBottom(mutate) {

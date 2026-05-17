@@ -891,48 +891,67 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 }
 #messages li.error .bubble .status-tail { color: #c66; }
 
-#composer { display: flex; align-items: flex-end; padding: 8px; border-top: 1px solid #ddd; background: #fff; }
-#composer-wrap { position: relative; flex: 1; }
+#composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin: 8px 12px 12px;
+  background: #fff;
+  border: 1px solid #d8d2c4;
+  border-radius: 18px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+/* textarea 去边框后，焦点反馈整体托给卡片本体（focus-within）。 */
+#composer:focus-within {
+  border-color: #999;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
+}
+/* mention-dropdown 走 absolute 锚 textarea 上方 —— 这层得保 position: relative。 */
+#composer-wrap { position: relative; }
 
-/* 附件按钮 —— 与发送按钮 / textarea 同尺寸（36px 高），透明底 + 边框，低对比度直到 hover。
-   inline-flex 居中"+"字符：单靠 height + line-height 在不同浏览器对齐有 1~2px 偏差。 */
+/* 底栏：左 attach + 任务 chip，靠 .composer-send 的 margin-left:auto 把发送推到最右。 */
+.composer-bottom-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 附件按钮 —— 卡片内 ghost button，与发送圆按钮形成"小 ghost vs 大 primary"对照。 */
 .composer-attach {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  margin-right: 8px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   font-size: 20px;
   line-height: 1;
-  color: #888;
+  color: #666;
   background: transparent;
-  border: 1px solid #ccc;
-  border-radius: 4px;
+  border: none;
+  border-radius: 50%;
   cursor: pointer;
   font-family: inherit;
   flex-shrink: 0;
 }
-.composer-attach:hover:not(:disabled) { background: #f5f1e6; color: #555; border-color: #999; }
-.composer-attach:disabled { color: #ccc; border-color: #e5e5e5; cursor: not-allowed; }
+.composer-attach:hover:not(:disabled) { background: #f0ebdc; color: #333; }
+.composer-attach:disabled { color: #ccc; cursor: not-allowed; }
 
-/* 当前任务 chip —— composer 输入框上方 pill，提示"这条消息会归到任务 X"。
-   P5.2.8 升级成下拉触发器：右侧 ▾ chevron 暗示可点；空 active 时切到"房间级"灰调
-   （提示无任务挂靠 = 房间级闲聊）。max-width 80% 让长 title 截到省略号、chevron 永远
-   不被挤出去。 */
+/* 当前任务 chip —— 底栏紧挨 + 号。无 active 时切 .composer-task-chip-empty 灰调。
+   max-width + min-width:0 让长 title 截省略号、chevron 永远不被挤出去。 */
 .composer-task-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin: 0 0 4px;
-  padding: 3px 10px;
+  padding: 4px 10px;
   background: #fff4d6;
   border: 1px solid #e0c068;
-  border-radius: 12px;
+  border-radius: 14px;
   font-size: 12px;
   color: #6a4f25;
-  max-width: 80%;
+  max-width: 280px;
+  min-width: 0;
   cursor: pointer;
   user-select: none;
 }
@@ -981,108 +1000,138 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 }
 .task-chip-option.current .popover-option-label { font-weight: 600; }
 
-/* 待发文件 pills —— 浮在输入框上方一行；每个 pill 是文件名 + 右侧 ×。
-   样式参考 mention-dropdown 的 list + 圆角 chip 风。 */
+/* 待发文件 cards —— 多文件 flex-wrap 自动换行。 */
 .pending-files {
   list-style: none;
-  margin: 0 0 4px;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 8px;
 }
 .pending-files[hidden] { display: none; }
 .pending-file {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 4px 3px 8px;
-  background: #f5f1e6;
-  border: 1px solid #d0c8b4;
+  gap: 10px;
+  padding: 6px 8px 6px 6px;
+  background: #fff;
+  border: 1px solid #e5e2d8;
   border-radius: 12px;
-  font-size: 12px;
-  color: #444;
-  max-width: 220px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  font-size: 13px;
+  color: #333;
+  max-width: 280px;
+  min-width: 0;
+}
+/* 暖橙色图标方块 —— 与房间黄/任务黄 chip 同系但更饱和。 */
+.pending-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  background: #d96749;
+  color: #fff;
+  border-radius: 8px;
+  font-size: 16px;
+  line-height: 1;
+}
+.pending-file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 .pending-file-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13px;
+  color: #333;
 }
-/* 📎 "拷贝到当前任务" 按钮 —— pill 上的次要动作，body 没 .has-active-task 时隐藏。 */
-.pending-file-attach {
-  width: 18px;
-  height: 18px;
-  padding: 0;
+.pending-file-type {
   font-size: 11px;
-  line-height: 1;
-  color: #888;
-  background: transparent;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
-.pending-file-attach:hover { color: #6a4f25; background: #fff; }
-body:not(.has-active-task) .pending-file-attach { display: none; }
-
-.pending-file-remove {
-  width: 16px;
-  height: 16px;
+/* card 上的圆形小按钮基类（attach / remove 共用骨架，颜色 / 字号各覆盖）。 */
+.pending-file-action {
+  width: 22px;
+  height: 22px;
   padding: 0;
-  font-size: 12px;
   line-height: 1;
-  color: #888;
-  background: transparent;
   border: none;
   border-radius: 50%;
   cursor: pointer;
   font-family: inherit;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-.pending-file-remove:hover { background: #ece5d2; color: #c66; }
+/* 📎 "拷贝到当前任务" —— body 没 .has-active-task 时整体隐藏。 */
+.pending-file-attach {
+  font-size: 12px;
+  color: #888;
+  background: transparent;
+}
+.pending-file-attach:hover { color: #6a4f25; background: #f5f1e6; }
+body:not(.has-active-task) .pending-file-attach { display: none; }
+
+.pending-file-remove {
+  font-size: 14px;
+  color: #fff;
+  background: #1a1a1a;
+}
+.pending-file-remove:hover { background: #333; }
 
 /* 多行输入：rows="1" 起步，autoResizeTextarea 撑开到 200px 后切滚动。
    resize:none 关掉拐角拖动手柄（手动 + 自动两套尺寸源会打架）。
-   高度算式（与发送 / 附件按钮一致到 36px）：
-     padding 7+7 + border 1+1 + line-height 20 = 36
-   line-height 用 px 而非 1.x 倍率，避免不同浏览器对 normal 的解释差出 1~2px。 */
+   边框移给 #composer 卡片本体；line-height 用 px 而非 1.x 倍率，避免不同浏览器对
+   normal 的解释差出 1~2px。 */
 #text {
   width: 100%;
-  padding: 7px 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
+  padding: 6px 4px;
+  border: none;
+  background: transparent;
   font: inherit;
   line-height: 20px;
-  min-height: 36px;
+  min-height: 32px;
   max-height: 200px;
   resize: none;
   overflow-y: hidden;
   display: block;
 }
-#text:focus { outline: none; border-color: #888; }
-/* 发送按钮 —— 显式 [type="submit"]，避免和 .composer-attach（type="button"）的
-   class 选择器撞 specificity（#composer button 是 (1,0,1)，会盖掉 .composer-attach
-   的 background/padding/border，让附件按钮被错染成发送按钮的深底）。
-   flex-shrink:0 防止"发送"在窄窗下被压成 1 字宽。
-   height:36px + inline-flex 居中 —— 与附件按钮 / textarea 单行视图三者顶 / 底对齐。 */
-#composer button[type="submit"] {
+#text:focus { outline: none; }
+/* 发送按钮 —— margin-left:auto 把它推到底栏最右；用 .composer-send 类 + .composer-attach
+   类同级 specificity，不依赖 #composer button[type="submit"] 选择器（旧版那条会盖掉
+   .composer-attach 的样式让附件按钮被错染）。 */
+.composer-send {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  width: 36px;
   height: 36px;
-  margin-left: 8px;
-  padding: 0 16px;
+  margin-left: auto;
+  padding: 0;
   border: none;
-  border-radius: 4px;
-  background: #444;
+  border-radius: 50%;
+  background: #1a1a1a;
   color: #fff;
+  font-size: 18px;
+  line-height: 1;
   cursor: pointer;
+  font-family: inherit;
 }
-#composer button[type="submit"]:disabled { background: #aaa; cursor: not-allowed; }
-/* 「停止」形态 —— turn 进行中按钮文字切「停止」，背景切沉稳的暗红提示"危险"动作（点
-   下去会中断 AI 输出）；不用鲜红是怕跟 status.error 撞 + 视觉刺。 */
-#composer button[type="submit"].stop { background: #a04040; }
-#composer button[type="submit"].stop:hover { background: #b04848; }
+.composer-send:hover:not(:disabled) { background: #333; }
+.composer-send:disabled { background: #c8c8c8; cursor: not-allowed; }
+/* 「停止」形态 —— 暗红提示"危险"动作；不用鲜红怕跟 status.error 撞 + 视觉刺。 */
+.composer-send.stop { background: #a04040; }
+.composer-send.stop:hover { background: #b04848; }
 
 /* P3.2.2：@ 补全 dropdown —— 浮在输入框上方，键盘 ↑↓ Enter 选中。 */
 .mention-dropdown {
