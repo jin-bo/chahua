@@ -304,12 +304,12 @@ async def test_attach_artifact_share_dir_oserror_becomes_notice(
     """ensure_room_share_dir 失败（只读 / 满）不能逃出 handler 把 ws 断了。"""
     session, srv = session_and_srv
     t = session.tasks_store.open_task(title="t", goal="g")
-    import chahua.server as server_mod
+    import chahua.server_inbound_task as task_mod
 
     def _boom(_room_dir):
         raise OSError(13, "Permission denied")
 
-    monkeypatch.setattr(server_mod, "ensure_room_share_dir", _boom)
+    monkeypatch.setattr(task_mod, "ensure_room_share_dir", _boom)
     captured: list[dict] = []
     await srv._handle_inbound(
         {

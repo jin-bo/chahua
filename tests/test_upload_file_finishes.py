@@ -143,8 +143,8 @@ async def test_inbound_upload_missing_content_b64_emits_file_uploaded(session_an
 def test_upload_too_large_still_emits_file_uploaded(session_and_srv, monkeypatch):
     """模拟 size 超限 —— file_uploaded(error) 仍发，避免前端 await echo 永挂。"""
     session, srv = session_and_srv
-    import chahua.server as server_mod
-    monkeypatch.setattr(server_mod, "_UPLOAD_MAX_BYTES", 1)
+    import chahua.server_inbound_io as io_mod
+    monkeypatch.setattr(io_mod, "_UPLOAD_MAX_BYTES", 1)
     captured: list[dict] = []
     srv._upload_file(
         filename="a.txt",

@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **`chahua/server.py` 按 inbound feature 拆 mixin**（2026-05-17，P5.2 重构起步，详见 [`docs/P5-任务房间.md`](docs/P5-任务房间.md) §7.2）：`server.py` 2116 → 1022 行（-52%）。30+ 个 `_inbound_*` handler 切到 4 个 mixin 文件 `server_inbound_{admin,task,io,settings}.py`；模块顶共享小工具集中到 `_server_helpers.py`。`ChahuaServer` 通过多继承装配；外部 API（`from chahua.server import ChahuaServer` / `_INBOUND_HANDLERS` 表 / 主入口）零变化，383 测试全过。`_UPLOAD_MAX_BYTES` 与 `ensure_room_share_dir` 等模块级符号位置改变，monkeypatch 测试需要点到 `chahua.server_inbound_io` / `chahua.server_inbound_task` 而不是 `chahua.server`。
+
 ### Added
 - **P5.1 任务房间 MVP**（2026-05-16，详见 [`docs/P5-任务房间.md`](docs/P5-任务房间.md)）：把房间从纯聊天容器升级为带任务的工作容器。**P5.1 严守"一房间最多 1 任务"窄路径**：开任务 → 消息打 tag → 拷贝产物 → 记决策；切换 / 关闭 / 多任务延后到 P5.2。
   - **核心模型**：`tasks/state.json`（`active_task_id` 覆写式 tmp+rename）+ `tasks/<id>/{task.json, decisions.jsonl, artifacts/}`。`transcript.jsonl` 每条多可选 `task_id` 字段（缺 = 房间级，向后兼容）。加载期双向修复 state.json↔task.json：state 指向不存在 → 清回 None；state 缺但只有一个 task.json → 自动设为 active 并回写。

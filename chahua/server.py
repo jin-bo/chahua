@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
-import binascii
 import ctypes
 import json
 import logging
@@ -38,35 +36,61 @@ from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from . import admin, exporter, persona_import, trust
+from . import admin, trust
 from ._paths import Paths, resolve_under
-from ._persist import write_bytes_atomic
-from .admin import sanitize_fs_name
+from ._server_helpers import (
+    check_keys_whitelist as _check_keys_whitelist,
+    require_str as _require_str,
+)
 from .config import ORCH_FIELD_BOUNDS, RoomConfigError
 from .events import (
     ChahuaEnvelope,
     ChahuaEventType,
     EnvelopeSink,
     NOTICE_LEVEL_ERROR,
-    NOTICE_LEVEL_INFO,
 )
 from .orchestrator import OrchestratorConfig
-from .permissions import DEFAULT_MODE
 from .persona_assets import discover_assets, persona_relative
+from .server_inbound_admin import (
+    AdminHandlersMixin,
+    INBOUND_ADD_GUEST,
+    INBOUND_CREATE_ROOM,
+    INBOUND_DELETE_ROOM,
+    INBOUND_REMOVE_GUEST,
+    INBOUND_SET_PERSONA_MCP_TRUST,
+    INBOUND_UPDATE_GUEST_EXTRA_MCP,
+    INBOUND_UPDATE_GUEST_ISOLATION,
+    INBOUND_UPDATE_GUEST_LLM,
+    INBOUND_UPDATE_GUEST_PERMISSION,
+    INBOUND_UPDATE_ROOM_LLM,
+    INBOUND_UPDATE_ROOM_ORCHESTRATOR,
+)
+from .server_inbound_io import (
+    INBOUND_EXPORT_ROOM,
+    INBOUND_IMPORT_PERSONA_FOLDER,
+    INBOUND_IMPORT_PERSONA_GITHUB,
+    INBOUND_UPLOAD_FILE,
+    IOHandlersMixin,
+)
+from .server_inbound_settings import (
+    INBOUND_UPDATE_ROOM_TOML,
+    INBOUND_UPDATE_USER_AVATAR,
+    INBOUND_UPDATE_USER_MD,
+    SettingsHandlersMixin,
+)
+from .server_inbound_task import (
+    INBOUND_ADD_DECISION,
+    INBOUND_ATTACH_ARTIFACT,
+    INBOUND_OPEN_TASK,
+    INBOUND_UPDATE_TASK,
+    TaskHandlersMixin,
+)
 from .session import (
     DEFAULT_ROOM_REL,
-    ROOM_SHARE_DIRNAME,
     RoomSession,
     build_room_session,
     discover_rooms,
-    ensure_room_share_dir,
     load_env_files,
-)
-from .task import MARKED_BY_USER
-from .tasks_store import (
-    ArtifactSourceMissingError,
-    TaskExistsError,
-    TaskNotFoundError,
 )
 
 _log = logging.getLogger(__name__)
@@ -86,35 +110,9 @@ INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
 INBOUND_CLEAR_ROOM = "clear_room"
 INBOUND_CANCEL = "cancel"
-INBOUND_ADD_GUEST = "add_guest"
-INBOUND_REMOVE_GUEST = "remove_guest"
-INBOUND_UPDATE_GUEST_PERMISSION = "update_guest_permission"
-INBOUND_SET_PERSONA_MCP_TRUST = "set_persona_mcp_trust"
-INBOUND_CREATE_ROOM = "create_room"
-INBOUND_DELETE_ROOM = "delete_room"
-INBOUND_UPDATE_USER_MD = "update_user_md"
-INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
-INBOUND_UPDATE_ROOM_TOML = "update_room_toml"
-INBOUND_UPDATE_ROOM_ORCHESTRATOR = "update_room_orchestrator"
-INBOUND_UPDATE_ROOM_LLM = "update_room_llm"
-INBOUND_UPDATE_GUEST_LLM = "update_guest_llm"
-INBOUND_UPDATE_GUEST_ISOLATION = "update_guest_isolation"
-INBOUND_UPDATE_GUEST_EXTRA_MCP = "update_guest_extra_mcp"
-INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
-INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
-INBOUND_UPLOAD_FILE = "upload_file"
-INBOUND_EXPORT_ROOM = "export_room"
-# P5.1.7 任务房间 inbound（docs/P5-任务房间.md §4.3）。P5.1 不接 set_active_task /
-# close_task —— 严守"一房间最多 1 个任务"窄路径；这两条到 P5.2 再开放。
-INBOUND_OPEN_TASK = "open_task"
-INBOUND_UPDATE_TASK = "update_task"
-INBOUND_ATTACH_ARTIFACT = "attach_artifact"
-INBOUND_ADD_DECISION = "add_decision"
-
-# 单文件上限。WS 入站帧 max=300MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
-# 文件极限 ~225MB。设 200MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
-_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
-
+# P5.2 mixin 重构（docs/P5-任务房间.md §7.2）：admin / io / settings / task 四类 inbound
+# 常量分别从 ``.server_inbound_*`` import 上来，保留在 ``_INBOUND_HANDLERS`` 表里继续做
+# wire 字符串映射。
 
 def _read_room_toml(room_dir: Path) -> str:
     """读 ``room_dir/room.toml`` 原文。读盘失败 → 空串（room_info 不会因为这个炸掉）。"""
@@ -214,100 +212,15 @@ def _attach_files_to_text(text: str, files: object) -> str:
     return f"{text}\n{appendix}" if text else appendix
 
 
-def _require_str(
-    data: dict, key: str, *, where: str, allow_empty: bool = False
-) -> Optional[str]:
-    """从入站 payload 取一个 str 字段，校验失败 → WARN + 返回 ``None``。
-
-    ``where`` 取 :data:`INBOUND_*` 常量值 —— 让 WARN 日志一眼看出是哪条 wire 帧
-    不合法。``allow_empty=True`` 给 ``content`` 这种允许空串的字段（用户清空
-    USER.md 等）。
-    """
-    v = data.get(key)
-    if not isinstance(v, str) or (not allow_empty and not v):
-        _log.warning(
-            "ignoring %s: %s 必须是%sstr，收到 %r",
-            where, key, "" if allow_empty else "非空 ", v,
-        )
-        return None
-    return v
-
-
-def _require_bool(data: dict, key: str, *, where: str) -> Optional[bool]:
-    """同 :func:`_require_str` —— 取 bool 字段，非 bool → WARN + None。"""
-    v = data.get(key)
-    if not isinstance(v, bool):
-        _log.warning("ignoring %s: %s 必须是 bool，收到 %r", where, key, type(v))
-        return None
-    return v
-
-
-def _require_list(data: dict, key: str, *, where: str) -> Optional[list]:
-    """同 :func:`_require_str` —— 取 list 字段。空 list 是合法值（语义"清整段"），不拒。"""
-    v = data.get(key)
-    if not isinstance(v, list):
-        _log.warning("ignoring %s: %s 必须是 list，收到 %r", where, key, type(v))
-        return None
-    return v
-
-
-def _check_optional_dict(data: dict, key: str, *, where: str) -> bool:
-    """``data[key]`` 必须是 dict 或缺/null；其它类型 → WARN + ``False``（让 caller 丢弃帧）。
-    本身不取值 —— 用 ``data.get(key)`` 拿；只表态校验过了。
-    """
-    v = data.get(key)
-    if v is not None and not isinstance(v, dict):
-        _log.warning(
-            "ignoring %s: %s 必须是对象 / null，收到 %r", where, key, type(v)
-        )
-        return False
-    return True
-
-
-def _check_keys_whitelist(
-    data: dict,
-    allowed: frozenset[str],
-    *,
-    where: str,
-) -> Optional[str]:
-    """严格白名单：payload 顶层只接 ``allowed`` 里的字段（``type`` 已被 dispatcher 吃）。
-
-    合法 → ``None``；多余键 → 返回错误文案（caller emit NOTICE + 丢帧）。P5.1.7 任务
-    inbound 用 —— 等价 ``_require_str`` 同款 "校验失败给个反馈" 接口。
-    """
-    extra = set(data) - allowed - {"type"}
-    if not extra:
-        return None
-    return f"{where}: 未知字段 {sorted(extra)!r}"
-
-
-def _import_success_text(result: "persona_import.ImportedPersona") -> str:
-    """导入成功的 notice 文案 —— 含 persona 名 + 头像状态 + sidecar 文件数提示。"""
-    parts = [f"已导入 persona「{result.name}」"]
-    parts.append("（含头像）" if result.has_avatar else "（无头像）")
-    if result.extras:
-        parts.append(
-            f"另有 {len(result.extras)} 个 sidecar 文件被保留（mcp.json / skills 等，目前运行时尚未消费）"
-        )
-    return "".join(parts)
-
-
-# 任务 inbound payload 白名单（P5.1.7，docs §4.3）。集中在模块顶让"加字段就动这里"
-# 一目了然；任何不在集合里的顶层键 → NOTICE error。``type`` 字段单独豁免（dispatcher
-# 已消费）。`update_task` 的 patch 字段另设一组（嵌套不在顶层白名单里）。
-_OPEN_TASK_ALLOWED: frozenset[str] = frozenset({"title", "goal", "owner"})
-_UPDATE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id", "patch"})
-_UPDATE_TASK_PATCH_ALLOWED: frozenset[str] = frozenset({"title", "goal"})
-_ATTACH_ARTIFACT_ALLOWED: frozenset[str] = frozenset({"task_id", "share_rel"})
-_ADD_DECISION_ALLOWED: frozenset[str] = frozenset(
-    {"task_id", "summary", "supporting_message_ids"}
-)
-
-
 # ── server ────────────────────────────────────────────────────────────────
 
 
-class ChahuaServer:
+class ChahuaServer(
+    AdminHandlersMixin,
+    IOHandlersMixin,
+    SettingsHandlersMixin,
+    TaskHandlersMixin,
+):
     """单房间 ws server。
 
     在同一 session 上跨多次客户端连接复用 —— 客户端断开后房间状态保留，下次连上
@@ -632,412 +545,6 @@ class ChahuaServer:
             _log.exception("%s: 旧 session close 出错（已切换，忽略）", label)
         return True
 
-    def _add_guest(
-        self,
-        *,
-        persona: str,
-        name: Optional[str],
-        permission: str,
-        sink: EnvelopeSink,
-    ) -> None:
-        """往当前房间加一位茶客：改 room.toml + 重装 session + 重发 snapshot。"""
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.add_guest(
-                paths=self._paths,
-                room_dir=room_dir,
-                persona=persona,
-                name=name,
-                permission=permission,
-            )
-        except Exception:
-            _log.exception("add_guest: persona=%r name=%r 失败", persona, name)
-            # 写 toml 失败 / 校验失败：room.toml 已被回滚到 snapshot，session 还是旧的。
-            # 重发 snapshot 让前端 UI 复位（添加按钮的 loading 等状态消除）。
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="add_guest"):
-            return
-        _log.info("add_guest: %r 加入 room=%r", name or persona, room_dir.name)
-        self._emit_room_snapshot(sink)
-
-    def _set_persona_mcp_trust(
-        self, *, persona_rel: str, trusted: bool, sink: EnvelopeSink
-    ) -> None:
-        """改一份 persona 的 MCP 信任状态：写信任清单 + 重装当前 session + 重发 snapshot。
-
-        信任是 user-level（跨房），但只有当前房间载着这位 persona 的茶客时改的"立刻生效"
-        才有意义；本函数只重装当前 session，其它房间下次进房时自然拿到新状态。
-
-        ``persona_rel`` 校验：必须命中当前房间某位茶客的 persona —— 防止前端发任意路径
-        让我们写任意 trust 键（攻击面有限但口径要严）。
-        """
-        # 校验：本房间确实有这位 persona 的茶客，避免被注入任意 trust 键。
-        rc = self._session.room_config
-        known = {
-            persona_relative(gc.persona_path, self._paths) for gc in rc.guests
-        }
-        if persona_rel not in known:
-            _log.warning(
-                "set_persona_mcp_trust: persona_rel=%r 不在本房间茶客列表 %s 内，拒绝",
-                persona_rel, sorted(known),
-            )
-            self._emit_room_info(sink)
-            return
-        try:
-            trust.set_mcp_trust(self._paths, persona_rel, trusted)
-        except Exception:
-            _log.exception(
-                "set_persona_mcp_trust: persona_rel=%r trusted=%r 写盘失败",
-                persona_rel, trusted,
-            )
-            self._emit_room_snapshot(sink)
-            return
-        _log.info(
-            "set_persona_mcp_trust: %s → %s", persona_rel, "trusted" if trusted else "untrusted"
-        )
-        room_dir = rc.room_dir
-        if not self._replace_session(room_dir, sink, label="set_persona_mcp_trust"):
-            return
-        self._emit_room_snapshot(sink)
-
-    def _update_guest_permission(
-        self, *, name: str, permission: str, sink: EnvelopeSink
-    ) -> None:
-        """改一位茶客 permission：改 room.toml + 重装 session + 重发 snapshot。
-
-        session 重装是必要的 —— permission 挂在 agent.permission_engine + tool_runner 上
-        （:func:`chahua.permissions.apply_permission_mode`），运行时切要么挨个茶客重新
-        ``apply_permission_mode``、要么直接重建。后者复用 :meth:`_replace_session`
-        与 add/remove guest 同口径，简单可靠。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.update_guest_permission(
-                paths=self._paths, room_dir=room_dir, name=name, permission=permission
-            )
-        except Exception:
-            _log.exception(
-                "update_guest_permission: name=%r permission=%r 失败", name, permission
-            )
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="update_guest_permission"):
-            return
-        _log.info("update_guest_permission: %r → %r", name, permission)
-        self._emit_room_snapshot(sink)
-
-    def _update_room_orchestrator(
-        self, *, overrides: dict, sink: EnvelopeSink
-    ) -> None:
-        """整体覆盖 ``[room]`` 段的编排参数键集 + 热替 ``orchestrator.config`` + 重发 snapshot。
-
-        走 :meth:`RoomSession.swap_room_config` 一次 attribute swap —— 编排参数是纯数值
-        声明（``OrchestratorConfig`` 的字段在 Orchestrator 热循环里都靠 ``self.config.X``
-        live 读），无需 cancel in-flight turn / 重建茶客 / 重新 onboarding。校验失败回
-        ``admin.update_room_orchestrator`` 那条路径，磁盘旧 bytes 已回滚，session 不动。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            new_rc = admin.update_room_orchestrator(
-                paths=self._paths, room_dir=room_dir, overrides=overrides
-            )
-        except Exception:
-            _log.exception(
-                "update_room_orchestrator: overrides=%r 失败", overrides
-            )
-            self._emit_room_snapshot(sink)
-            return
-        self._session.swap_room_config(new_rc)
-        _log.info("update_room_orchestrator: %r", overrides)
-        self._emit_room_snapshot(sink)
-
-    def _update_room_llm(
-        self, *, section: str, spec_dict: Optional[dict], sink: EnvelopeSink
-    ) -> None:
-        """覆盖 ``[scoring]`` / ``[summary]`` 顶层 LLM 段 + 重装 session + 重发 snapshot。
-
-        session 重装是必要的 —— LLMClient 在装配期注入 IntentScorer / Summarizer / Agentao
-        实例内部，不像 OrchestratorConfig 那样可热替（agentao 没暴露热换 client 接口）。
-        改完即 ``_replace_session`` 让茶客 / scorer / summarizer 全部带新 client 起。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.update_room_llm(
-                paths=self._paths, room_dir=room_dir,
-                section=section, spec_dict=spec_dict,
-            )
-        except Exception:
-            _log.exception(
-                "update_room_llm: section=%r spec=%r 失败", section, spec_dict
-            )
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="update_room_llm"):
-            return
-        _log.info("update_room_llm: section=%r spec=%r", section, spec_dict)
-        self._emit_room_snapshot(sink)
-
-    def _update_guest_isolation(
-        self, *, name: str, isolation: str, sink: EnvelopeSink
-    ) -> None:
-        """改一位茶客的 isolation + 重装 session + 重发 snapshot。
-
-        session 重装是必要的 —— cwd 路径变了，TeaGuest 持的 ``working_directory`` 是
-        agentao 工具 sandbox 边界（无法热改）。改完即 ``_replace_session`` 让那位
-        茶客以新 cwd 起。旧路径下的 ``.agentao/memory.db`` 不自动 rm（设计 §2.5）。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.update_guest_isolation(
-                paths=self._paths, room_dir=room_dir,
-                name=name, isolation=isolation,
-            )
-        except Exception:
-            _log.exception(
-                "update_guest_isolation: name=%r isolation=%r 失败", name, isolation
-            )
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="update_guest_isolation"):
-            return
-        _log.info("update_guest_isolation: %r → %r", name, isolation)
-        self._emit_room_snapshot(sink)
-
-    def _update_guest_llm(
-        self, *, name: str, spec_dict: Optional[dict], sink: EnvelopeSink
-    ) -> None:
-        """覆盖一位茶客的 LLM 字段 + 重装 session + 重发 snapshot。
-
-        ``spec_dict=None`` 即清掉该茶客的 model/base_url/api_key_env，回到房间默认。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.update_guest_llm(
-                paths=self._paths, room_dir=room_dir,
-                name=name, spec_dict=spec_dict,
-            )
-        except Exception:
-            _log.exception(
-                "update_guest_llm: name=%r spec=%r 失败", name, spec_dict
-            )
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="update_guest_llm"):
-            return
-        _log.info("update_guest_llm: name=%r spec=%r", name, spec_dict)
-        self._emit_room_snapshot(sink)
-
-    def _update_guest_extra_mcp(
-        self, *, name: str, servers: list, sink: EnvelopeSink
-    ) -> None:
-        """覆盖一位茶客的 ``[[guest.extra_mcp_servers]]`` 数组段 + 重装 session + 重发 snapshot。
-
-        ``servers=[]`` 即清掉该茶客的所有房间级 MCP entry（与 admin 层语义一致）。
-        session 重装是必要的 —— Agentao 在 ``__init__`` 时把 mcp_manager 装进去，运行时
-        无法热改；改完即 ``_replace_session`` 让那位茶客以新 MCP 装载起。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.update_guest_extra_mcp(
-                paths=self._paths, room_dir=room_dir,
-                name=name, servers=servers,
-            )
-        except Exception:
-            _log.exception(
-                "update_guest_extra_mcp: name=%r servers=%r 失败", name, servers
-            )
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="update_guest_extra_mcp"):
-            return
-        _log.info(
-            "update_guest_extra_mcp: name=%r servers=%d 项", name, len(servers)
-        )
-        self._emit_room_snapshot(sink)
-
-    def _remove_guest(self, *, name: str, sink: EnvelopeSink) -> None:
-        """从当前房间移除一位茶客：改 room.toml + 重装 session + 重发 snapshot。"""
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.remove_guest(paths=self._paths, room_dir=room_dir, name=name)
-        except Exception:
-            _log.exception("remove_guest: name=%r 失败", name)
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="remove_guest"):
-            return
-        _log.info("remove_guest: %r 离开 room=%r", name, room_dir.name)
-        self._emit_room_snapshot(sink)
-
-    def _create_room(
-        self,
-        *,
-        room_id: str,
-        name: str,
-        topic: str,
-        rules: str,
-        guests: list,
-        sink: EnvelopeSink,
-    ) -> None:
-        """新建房间 + 切换到它：mkdir + 写 toml + load 校验 + replace session + emit snapshot。"""
-        try:
-            rc = admin.create_room(
-                paths=self._paths,
-                room_id=room_id,
-                name=name,
-                topic=topic,
-                rules=rules,
-                guests=guests,
-            )
-        except Exception:
-            _log.exception("create_room: room_id=%r 失败", room_id)
-            # 创建失败：磁盘已 rmtree 回滚（admin.create_room 内部）；前端没切走，重发当
-            # 前 snapshot 让"创建中…"按钮态归位。
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(rc.room_dir, sink, label=f"create_room→{rc.room_dir.name!r}"):
-            return
-        _log.info("create_room: → %r", rc.room_dir.name)
-        self._emit_room_snapshot(sink)
-
-    def _update_user_md(self, *, content: str, sink: EnvelopeSink) -> None:
-        """覆盖 USER.md + 原地 reload user_config（不重装整个 session）+ 重发 snapshot。
-
-        优先沿用 user_config.source（若用户用了 room 级 USER.md 或 explicit override，
-        编辑就改那个；不偷偷新建 user_data_root/USER.md 让两份并存）。
-
-        在 ``reload_user_config`` 之前不需要 cancel inflight —— ``_handle_inbound`` 已经
-        cancel 过了，且 user_config 是纯数据 swap，没有"半个茶客"的中间态。
-        """
-        try:
-            admin.update_user_md(
-                self._paths,
-                content,
-                source=self._session.user_config.source,
-            )
-        except Exception:
-            _log.exception("update_user_md 失败")
-            self._emit_room_snapshot(sink)
-            return
-        self._session.reload_user_config(self._paths)
-        _log.info("update_user_md: %d 字节已落盘", len(content))
-        self._emit_room_snapshot(sink)
-
-    def _update_room_toml(self, *, content: str, sink: EnvelopeSink) -> None:
-        """覆盖当前房间 room.toml 全文 + 重装 session + 重发 snapshot。
-
-        校验失败（语法 / 白名单 / persona 找不到）→ emit error notice + 重发当前 snapshot
-        让前端 UI 复位；admin.update_room_toml 已经把磁盘内容回滚到旧 toml。
-        """
-        room_dir = self._session.room_config.room_dir
-        try:
-            admin.update_room_toml(room_dir, content, paths=self._paths)
-        except (ValueError, RoomConfigError) as e:
-            _log.warning("update_room_toml: room=%r 校验失败：%s", room_dir.name, e)
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"房间配置保存失败：{e}"
-            )
-            self._emit_room_snapshot(sink)
-            return
-        except Exception:
-            _log.exception("update_room_toml: room=%r 失败", room_dir.name)
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text="房间配置保存失败（详见服务端日志）"
-            )
-            self._emit_room_snapshot(sink)
-            return
-        if not self._replace_session(room_dir, sink, label="update_room_toml"):
-            return
-        _log.info("update_room_toml: room=%r 已落盘", room_dir.name)
-        self._emit_room_snapshot(sink)
-
-    def _update_user_avatar(self, *, data_uri: str, sink: EnvelopeSink) -> None:
-        """覆盖 USER.png；不重装 session（avatar 不是 UserConfig 字段，靠 sidebar 重发即可）。
-
-        admin 层 cache_clear 已让下次 read_avatar_data_uri 拿到新文件；这里只发 room_info
-        让前端拿到新 user_avatar_data_uri，transcript 不动 —— 用 _emit_room_info 而非全
-        snapshot，省一次历史回放。
-        """
-        try:
-            png_bytes = admin.parse_png_data_uri(data_uri)
-            admin.update_user_avatar(
-                self._paths,
-                png_bytes,
-                source=self._session.user_config.source,
-            )
-        except Exception:
-            _log.exception("update_user_avatar 失败")
-            self._emit_room_info(sink)
-            return
-        _log.info("update_user_avatar: %d 字节已落盘", len(png_bytes))
-        self._emit_room_info(sink)
-
-    def _upload_file(
-        self, *, filename: str, content_b64: str, sink: EnvelopeSink
-    ) -> None:
-        """把前端传上来的文件落到房间共享目录 ``<room_dir>/share/``。
-
-        - 文件名经 :func:`sanitize_fs_name` 洗一遍（防 ``../`` traversal 写到 share 外）。
-          洗完为空 / 全点 → 拒。
-        - base64 解码失败 / 超 :data:`_UPLOAD_MAX_BYTES` → 拒。
-        - 重名直接覆盖 —— 用户主动选了同名文件意味着想替换，比"自动加 (1)"明确。
-        - 写盘走 :func:`write_bytes_atomic` —— tmp+rename，写一半被 kill 不留残骸。
-
-        **每次入站请求恒发一条 ``file_uploaded`` envelope**（成功 / 失败都发）——
-        前端的串行上传循环靠这条 echo 推进队列，没 echo 就永远 await 卡住。data 形态：
-
-        - 成功：``{rel, name, size, original}``
-        - 失败：``{original, error}`` —— 无 ``rel``，前端 onServerEcho 跳过 pill 追加。
-
-        失败路径同时 emit 一条 ``notice(level=error)`` 让用户看见可读原因（与 persona
-        导入失败口径一致）。
-        """
-        original = filename
-        try:
-            safe_name = sanitize_fs_name(filename, label="filename")
-        except ValueError as e:
-            self._fail_upload(sink, original=original, text=f"文件名非法：{e}")
-            return
-        try:
-            data = base64.b64decode(content_b64, validate=True)
-        except (binascii.Error, ValueError) as e:
-            self._fail_upload(
-                sink, original=original, text=f"上传失败（base64 解码）：{e}",
-            )
-            return
-        if len(data) > _UPLOAD_MAX_BYTES:
-            self._fail_upload(
-                sink, original=original,
-                text=f"文件太大（{len(data)} bytes，上限 {_UPLOAD_MAX_BYTES}）",
-            )
-            return
-        try:
-            share_dir = ensure_room_share_dir(self._session.room_config.room_dir)
-            target = share_dir / safe_name
-            write_bytes_atomic(target, data)
-        except Exception as e:
-            _log.exception("upload_file: 写盘失败 name=%r", safe_name)
-            self._fail_upload(sink, original=original, text=f"上传失败：{e}")
-            return
-        rel = f"{ROOM_SHARE_DIRNAME}/{safe_name}"
-        _log.info("upload_file: %s (%d bytes)", rel, len(data))
-        sink(
-            ChahuaEnvelope(
-                room_id=self._session.room.name,
-                turn_id=None,
-                guest_name=None,
-                message_id=None,
-                type=ChahuaEventType.FILE_UPLOADED,
-                data={
-                    "rel": rel,
-                    "name": safe_name,
-                    "size": len(data),
-                    "original": original,
-                },
-            )
-        )
-
     def _emit_notice(self, sink: EnvelopeSink, *, level: str, text: str) -> None:
         """发一条 ``notice`` envelope —— 给 mutator 返回用户可见的成功 / 失败原因。
 
@@ -1055,53 +562,6 @@ class ChahuaServer:
             )
         )
 
-    def _run_import(
-        self,
-        label: str,
-        op: Callable[[], "persona_import.ImportedPersona"],
-        sink: EnvelopeSink,
-    ) -> None:
-        """跑一次 persona import + 统一 notice/room_info emit。
-
-        统一三态：``PersonaImportError`` 拿用户可见原因；其它异常吞成"内部错误"避免
-        把 traceback / 路径泄到前端；成功打 success 文案。失败也重发 room_info 让前端
-        modal 状态复位（与 add_guest / create_room 同款）。
-        """
-        try:
-            result = op()
-        except persona_import.PersonaImportError as e:
-            _log.info("%s 失败：%s", label, e)
-            self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
-            self._emit_room_info(sink)
-            return
-        except Exception as e:
-            _log.exception("%s 意外错", label)
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"导入失败（内部错误）：{e}"
-            )
-            self._emit_room_info(sink)
-            return
-        _log.info("%s → %s", label, result.persona_rel)
-        self._emit_notice(
-            sink, level=NOTICE_LEVEL_INFO, text=_import_success_text(result)
-        )
-        self._emit_room_info(sink)
-
-    def _delete_room(self, *, room_id: str, sink: EnvelopeSink) -> None:
-        """删除一个非当前房间。当前房间在 admin.delete_room 那层硬拒。"""
-        current = self._session.room_config.room_dir.name
-        try:
-            admin.delete_room(
-                paths=self._paths, room_id=room_id, current_room_id=current
-            )
-        except Exception:
-            _log.exception("delete_room: room_id=%r 失败", room_id)
-            self._emit_room_snapshot(sink)
-            return
-        _log.info("delete_room: %r 已删", room_id)
-        # 房间没动当前 session —— 只重发 room_info 让 sidebar 列表更新（rooms_available 少一项）。
-        self._emit_room_info(sink)
-
     def _emit_room_snapshot(self, sink: EnvelopeSink) -> None:
         """下发 room_info + room_history + task_info —— 前端拿来全量复位 sidebar + 消息区
         + 任务面板。
@@ -1117,77 +577,6 @@ class ChahuaServer:
         self._emit_room_info(sink)
         self._emit_room_history(sink)
         self._emit_task_info(sink)
-
-    def _emit_task_envelope(
-        self,
-        sink: EnvelopeSink,
-        *,
-        type: ChahuaEventType,
-        data: dict,
-    ) -> None:
-        """连接级任务 envelope（``turn_id`` / ``message_id`` / ``guest_name`` 全 None）。
-        P5.1.7 四个 hint 事件与 ``task_info`` 共用 —— 避免每个 callsite 写一遍三个 None。
-        """
-        sink(
-            ChahuaEnvelope(
-                room_id=self._session.room.name,
-                turn_id=None,
-                guest_name=None,
-                message_id=None,
-                type=type,
-                data=data,
-            )
-        )
-
-    def _emit_task_info(self, sink: EnvelopeSink) -> None:
-        """下发 ``task_info`` envelope —— 权威快照，前端任务状态以此为准（docs §4.2）。
-
-        每次任务状态变更（open / update / decision / artifact）后重发整份
-        ``{tasks, active_task_id}``。task entry 字段沿 :meth:`Task.to_jsonl_dict`，外加
-        ``artifacts`` / ``decisions`` 子列表，让前端一次拿全。空房间也下发（空 tasks），
-        前端用这帧确认任务协议生效。
-        """
-        store = self._session.tasks_store
-        tasks_payload = [
-            {
-                **t.to_jsonl_dict(),
-                "artifacts": store.list_artifacts(t.id),
-                "decisions": [d.to_jsonl_dict() for d in store.list_decisions(t.id)],
-            }
-            for t in store.list_tasks()
-        ]
-        self._emit_task_envelope(
-            sink,
-            type=ChahuaEventType.TASK_INFO,
-            data={
-                "tasks": tasks_payload,
-                "active_task_id": store.active_task_id,
-            },
-        )
-
-    def _export_room(self, sink: EnvelopeSink) -> None:
-        # read-only：不动 session、不写盘。导出物只活在用户的 Downloads/ 里（renderer
-        # 端走 Blob + <a download>），房间目录 transcript.jsonl / summary.jsonl 不动。
-        msgs = self._session.room.messages_since(0)
-        filename, content = exporter.format_room_markdown(
-            self._session.room_config,
-            msgs,
-            self._session.user_config.display_name,
-        )
-        sink(
-            ChahuaEnvelope(
-                room_id=self._session.room.name,
-                turn_id=None,
-                guest_name=None,
-                message_id=None,
-                type=ChahuaEventType.ROOM_EXPORT,
-                data={"filename": filename, "markdown": content},
-            )
-        )
-        _log.info(
-            "export_room: room=%r %d msg → %s (%d bytes)",
-            self._session.room.name, len(msgs), filename, len(content),
-        )
 
     def _clear_room(self, sink: EnvelopeSink) -> None:
         """清空当前房间公共状态 + 重发 room snapshot 让前端复位。
@@ -1296,273 +685,6 @@ class ChahuaServer:
         await self._cancel_and_drain_inflight()
         self._clear_room(sink)
 
-    async def _inbound_add_guest(self, data: dict, sink: EnvelopeSink) -> None:
-        persona = _require_str(data, "persona", where=INBOUND_ADD_GUEST)
-        if persona is None:
-            return
-        # name 是 optional（null 让 admin 端按 persona stem 推），但传了就必须是 str。
-        name = data.get("name")
-        if name is not None and not isinstance(name, str):
-            _log.warning(
-                "ignoring %s: name 必须是 str 或 null，收到 %r",
-                INBOUND_ADD_GUEST, type(name),
-            )
-            return
-        # permission 缺 / falsy → DEFAULT_MODE；显式传就必须是 str。
-        permission = data.get("permission") or DEFAULT_MODE
-        if not isinstance(permission, str):
-            _log.warning("ignoring %s: permission 必须是 str", INBOUND_ADD_GUEST)
-            return
-        await self._cancel_and_drain_inflight()
-        self._add_guest(persona=persona, name=name, permission=permission, sink=sink)
-
-    async def _inbound_remove_guest(self, data: dict, sink: EnvelopeSink) -> None:
-        name = _require_str(data, "name", where=INBOUND_REMOVE_GUEST)
-        if name is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._remove_guest(name=name, sink=sink)
-
-    async def _inbound_set_persona_mcp_trust(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        persona_rel = _require_str(
-            data, "persona_rel", where=INBOUND_SET_PERSONA_MCP_TRUST
-        )
-        if persona_rel is None:
-            return
-        trusted = _require_bool(data, "trusted", where=INBOUND_SET_PERSONA_MCP_TRUST)
-        if trusted is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._set_persona_mcp_trust(
-            persona_rel=persona_rel, trusted=trusted, sink=sink
-        )
-
-    async def _inbound_update_guest_permission(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_PERMISSION)
-        if name is None:
-            return
-        permission = _require_str(
-            data, "permission", where=INBOUND_UPDATE_GUEST_PERMISSION
-        )
-        if permission is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_guest_permission(name=name, permission=permission, sink=sink)
-
-    async def _inbound_update_room_orchestrator(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        overrides = data.get("overrides")
-        if not isinstance(overrides, dict):
-            _log.warning(
-                "ignoring %s: overrides 必须是对象，收到 %r",
-                INBOUND_UPDATE_ROOM_ORCHESTRATOR, type(overrides),
-            )
-            return
-        # 不 cancel inflight —— 编排参数走 swap_room_config 热替 self.config，下一轮
-        # 迭代当场生效，无需打断当前发言 / 评分。
-        self._update_room_orchestrator(overrides=overrides, sink=sink)
-
-    async def _inbound_update_room_llm(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        section = data.get("section")
-        if section not in ("room", "scoring", "summary"):
-            _log.warning(
-                "ignoring %s: section 必须是 'room'/'scoring'/'summary'，收到 %r",
-                INBOUND_UPDATE_ROOM_LLM, section,
-            )
-            return
-        if not _check_optional_dict(data, "spec", where=INBOUND_UPDATE_ROOM_LLM):
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_room_llm(
-            section=section, spec_dict=data.get("spec"), sink=sink
-        )
-
-    async def _inbound_update_guest_llm(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_LLM)
-        if name is None:
-            return
-        if not _check_optional_dict(data, "spec", where=INBOUND_UPDATE_GUEST_LLM):
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_guest_llm(name=name, spec_dict=data.get("spec"), sink=sink)
-
-    async def _inbound_update_guest_isolation(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_ISOLATION)
-        if name is None:
-            return
-        isolation = _require_str(
-            data, "isolation", where=INBOUND_UPDATE_GUEST_ISOLATION
-        )
-        if isolation is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_guest_isolation(name=name, isolation=isolation, sink=sink)
-
-    async def _inbound_update_guest_extra_mcp(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        name = _require_str(data, "name", where=INBOUND_UPDATE_GUEST_EXTRA_MCP)
-        if name is None:
-            return
-        # 每项 dict 内字段校验在 admin 层 _build_extra_mcp_servers；这里只挡 wire 层。
-        servers = _require_list(data, "servers", where=INBOUND_UPDATE_GUEST_EXTRA_MCP)
-        if servers is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_guest_extra_mcp(name=name, servers=servers, sink=sink)
-
-    async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
-        room_id = _require_str(data, "room_id", where=INBOUND_CREATE_ROOM)
-        if room_id is None:
-            return
-        name = _require_str(data, "name", where=INBOUND_CREATE_ROOM)
-        if name is None:
-            return
-        guests = data.get("guests")
-        if not isinstance(guests, list) or not guests:
-            _log.warning("ignoring %s: guests 缺 / 空", INBOUND_CREATE_ROOM)
-            return
-        # 防御：guests 每项至少要 persona:str —— admin.create_room 也校验，这里
-        # 早一步报"前端协议不对"而不是被动等到 KeyError。
-        if not all(
-            isinstance(g, dict) and isinstance(g.get("persona"), str) and g["persona"]
-            for g in guests
-        ):
-            _log.warning("ignoring %s: guests 每项必须含 persona:str", INBOUND_CREATE_ROOM)
-            return
-        # topic / rules 是可选 str；缺 / 非 str → 空串。一个表达式收 None / 其它类型。
-        topic = data.get("topic") if isinstance(data.get("topic"), str) else ""
-        rules = data.get("rules") if isinstance(data.get("rules"), str) else ""
-        await self._cancel_and_drain_inflight()
-        self._create_room(
-            room_id=room_id,
-            name=name,
-            topic=topic,
-            rules=rules,
-            guests=guests,
-            sink=sink,
-        )
-
-    async def _inbound_delete_room(self, data: dict, sink: EnvelopeSink) -> None:
-        room_id = _require_str(data, "room_id", where=INBOUND_DELETE_ROOM)
-        if room_id is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._delete_room(room_id=room_id, sink=sink)
-
-    async def _inbound_update_user_md(self, data: dict, sink: EnvelopeSink) -> None:
-        # content 允许空串：用户清空 USER.md 也算合法状态。
-        content = _require_str(
-            data, "content", where=INBOUND_UPDATE_USER_MD, allow_empty=True
-        )
-        if content is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_user_md(content=content, sink=sink)
-
-    async def _inbound_update_room_toml(self, data: dict, sink: EnvelopeSink) -> None:
-        # room.toml 内容理论上不该为空，但 admin 层会用 RoomConfigError 拦住，校验
-        # 责任不在这层；allow_empty 让传 "" 也走到 admin 拿到结构化错误。
-        content = _require_str(
-            data, "content", where=INBOUND_UPDATE_ROOM_TOML, allow_empty=True
-        )
-        if content is None:
-            return
-        await self._cancel_and_drain_inflight()
-        self._update_room_toml(content=content, sink=sink)
-
-    async def _inbound_update_user_avatar(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        data_uri = _require_str(data, "data_uri", where=INBOUND_UPDATE_USER_AVATAR)
-        if data_uri is None:
-            return
-        # 头像写不动 session，无需 cancel inflight —— 让正在跑的 turn 自然结束。
-        self._update_user_avatar(data_uri=data_uri, sink=sink)
-
-    async def _inbound_import_persona_folder(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        src = _require_str(data, "path", where=INBOUND_IMPORT_PERSONA_FOLDER)
-        if src is None:
-            return
-        # 导入不动 session，无需 cancel inflight。
-        self._run_import(
-            f"import_persona_folder src={src!r}",
-            lambda: persona_import.import_from_folder(self._paths, Path(src)),
-            sink,
-        )
-
-    async def _inbound_import_persona_github(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        url = _require_str(data, "url", where=INBOUND_IMPORT_PERSONA_GITHUB)
-        if url is None:
-            return
-        self._run_import(
-            f"import_persona_github url={url!r}",
-            lambda: persona_import.import_from_github(self._paths, url),
-            sink,
-        )
-
-    async def _inbound_upload_file(self, data: dict, sink: EnvelopeSink) -> None:
-        # 任意校验失败也要 emit FILE_UPLOADED(error) —— 前端串行上传循环靠 echo 推进
-        # 队列；inbound 早返不发 echo 会让循环永挂（典型 case：零字节文件 content_b64
-        # 为空，_require_str 没 allow_empty 时返 None）。
-        raw_filename = data.get("filename")
-        # 用 raw 当 echo.original：哪怕是 None / 非 str，转 str 也好让前端能匹配到 pill
-        # 占位（虽然 valid 上传里不会触发；这条路径是 wscat 直发的兜底）。
-        echo_original = (
-            raw_filename if isinstance(raw_filename, str) else ""
-        )
-        filename = _require_str(data, "filename", where=INBOUND_UPLOAD_FILE)
-        if filename is None:
-            self._fail_upload(sink, original=echo_original, text="文件名缺失或非法")
-            return
-        content_b64 = data.get("content_b64")
-        if not isinstance(content_b64, str):
-            self._fail_upload(
-                sink, original=echo_original, text="content_b64 缺失或非 str",
-            )
-            return
-        # 上传不动 session、不挡 inflight turn —— 让正在跑的 turn 自然结束；
-        # 文件落房间共享目录，下一条 user_message 才把它带进上下文。
-        # 允许 content_b64 == ""（零字节文件）—— _upload_file 内 base64.b64decode("") = b""。
-        self._upload_file(filename=filename, content_b64=content_b64, sink=sink)
-
-    def _fail_upload(
-        self, sink: EnvelopeSink, *, original: str, text: str,
-    ) -> None:
-        """上传请求失败的统一回吐：NOTICE 给用户看 + FILE_UPLOADED(error) 让前端推进队列。
-
-        ``_upload_file`` 内部错误路径与 ``_inbound_upload_file`` 的早返路径共用 —— 任何
-        UPLOAD_FILE 入帧都必须以一条 FILE_UPLOADED envelope 收尾（成功 / 失败）。
-        """
-        self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
-        sink(
-            ChahuaEnvelope(
-                room_id=self._session.room.name,
-                turn_id=None, guest_name=None, message_id=None,
-                type=ChahuaEventType.FILE_UPLOADED,
-                data={"original": original, "error": text},
-            )
-        )
-
-    async def _inbound_export_room(self, data: dict, sink: EnvelopeSink) -> None:
-        # read-only：不动 session、不挡 inflight turn。
-        self._export_room(sink)
-
     # ── P5.1.7 任务 inbound（docs/P5-任务房间.md §4.3 P5.1 段）─────────────
     #
     # 共通契约：
@@ -1573,215 +695,6 @@ class ChahuaServer:
     #     append 不冲突。
     #   - **成功路径**：emit hint 事件（``task_open`` / ``task_update`` / 等）+ 重发整份
     #     ``task_info``（权威快照）。前端任务状态以最近 ``task_info`` 为准（§4.2 事件分工）。
-
-    async def _inbound_open_task(self, data: dict, sink: EnvelopeSink) -> None:
-        if not self._reject_unknown_keys(
-            data, _OPEN_TASK_ALLOWED, where=INBOUND_OPEN_TASK, sink=sink,
-        ):
-            return
-        title = _require_str(data, "title", where=INBOUND_OPEN_TASK)
-        if title is None:
-            return
-        goal = _require_str(
-            data, "goal", where=INBOUND_OPEN_TASK, allow_empty=True,
-        )
-        if goal is None:
-            return
-        owner_raw = data.get("owner")
-        if owner_raw is not None and not isinstance(owner_raw, str):
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR,
-                text=f"{INBOUND_OPEN_TASK}: owner 必须是 str / null",
-            )
-            return
-        try:
-            task = self._session.tasks_store.open_task(
-                title=title, goal=goal, owner=owner_raw,
-            )
-        except TaskExistsError as e:
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"开任务失败：{e}",
-            )
-            # 重发让前端按 tasks.length 把 "+新任务" 按钮 disable（防前端误判）。
-            self._emit_task_info(sink)
-            return
-        except OSError as e:
-            self._notice_persist_failure(sink, INBOUND_OPEN_TASK, e)
-            return
-        _log.info("open_task: %r (id=%s)", title, task.id)
-        self._emit_task_envelope(
-            sink, type=ChahuaEventType.TASK_OPEN, data=task.to_jsonl_dict(),
-        )
-        self._emit_task_info(sink)
-
-    async def _inbound_update_task(self, data: dict, sink: EnvelopeSink) -> None:
-        if not self._reject_unknown_keys(
-            data, _UPDATE_TASK_ALLOWED, where=INBOUND_UPDATE_TASK, sink=sink,
-        ):
-            return
-        task_id = _require_str(data, "task_id", where=INBOUND_UPDATE_TASK)
-        if task_id is None:
-            return
-        patch_raw = data.get("patch")
-        if not isinstance(patch_raw, dict):
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR,
-                text=f"{INBOUND_UPDATE_TASK}: patch 必须是对象",
-            )
-            return
-        extra = set(patch_raw) - _UPDATE_TASK_PATCH_ALLOWED
-        if extra:
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR,
-                text=(
-                    f"{INBOUND_UPDATE_TASK}: patch 含未知字段 {sorted(extra)!r}；"
-                    "P5.1 只支持 title / goal"
-                ),
-            )
-            return
-        title = patch_raw.get("title")
-        goal = patch_raw.get("goal")
-        for key, val in (("title", title), ("goal", goal)):
-            if val is not None and not isinstance(val, str):
-                self._emit_notice(
-                    sink, level=NOTICE_LEVEL_ERROR,
-                    text=f"{INBOUND_UPDATE_TASK}: patch.{key} 必须是 str",
-                )
-                return
-        # title 与 open_task 同口径不接受空串（避免改成"无标题"任务卡）；goal 允许空。
-        if title == "":
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR,
-                text=f"{INBOUND_UPDATE_TASK}: patch.title 不能为空",
-            )
-            return
-        try:
-            task = self._session.tasks_store.update_task(
-                task_id, title=title, goal=goal,
-            )
-        except TaskNotFoundError as e:
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"更新任务失败：{e}",
-            )
-            self._emit_task_info(sink)
-            return
-        except OSError as e:
-            self._notice_persist_failure(sink, INBOUND_UPDATE_TASK, e)
-            return
-        _log.info("update_task: id=%s title=%r goal=%r", task.id, title, goal)
-        applied_patch: dict = {}
-        if title is not None:
-            applied_patch["title"] = title
-        if goal is not None:
-            applied_patch["goal"] = goal
-        self._emit_task_envelope(
-            sink,
-            type=ChahuaEventType.TASK_UPDATE,
-            data={"task_id": task.id, "patch": applied_patch},
-        )
-        self._emit_task_info(sink)
-
-    async def _inbound_attach_artifact(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        if not self._reject_unknown_keys(
-            data, _ATTACH_ARTIFACT_ALLOWED, where=INBOUND_ATTACH_ARTIFACT, sink=sink,
-        ):
-            return
-        task_id = _require_str(data, "task_id", where=INBOUND_ATTACH_ARTIFACT)
-        if task_id is None:
-            return
-        share_rel = _require_str(
-            data, "share_rel", where=INBOUND_ATTACH_ARTIFACT,
-        )
-        if share_rel is None:
-            return
-        try:
-            # 移入 try：room_dir 只读 / 磁盘满时 mkdir 抛 OSError 也不能逃出 handler。
-            share_root = ensure_room_share_dir(self._session.room_config.room_dir)
-            info = self._session.tasks_store.attach_artifact(
-                task_id, share_rel=share_rel, share_root=share_root,
-            )
-        except TaskNotFoundError as e:
-            # 任务在 UI render 与 click 之间消失 —— 重发 task_info 让前端任务列表复位。
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"挂产物失败：{e}",
-            )
-            self._emit_task_info(sink)
-            return
-        except ArtifactSourceMissingError as e:
-            # 用户给了错路径 —— 任务列表本身没变化，仅 NOTICE 提示即可。
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"挂产物失败：{e}",
-            )
-            return
-        except OSError as e:
-            self._notice_persist_failure(sink, INBOUND_ATTACH_ARTIFACT, e)
-            return
-        _log.info(
-            "attach_artifact: task=%s share_rel=%r → %s",
-            task_id, share_rel, info["rel"],
-        )
-        self._emit_task_envelope(
-            sink,
-            type=ChahuaEventType.TASK_ARTIFACT_ADDED,
-            data={
-                "task_id": task_id,
-                "name": info["name"],
-                "size": info["size"],
-                "rel": info["rel"],
-                # P5.1 仅 user 一种来源；P5.4 茶客自动归集会出现 "<guest_name>" 值。
-                "created_by": MARKED_BY_USER,
-            },
-        )
-        self._emit_task_info(sink)
-
-    async def _inbound_add_decision(
-        self, data: dict, sink: EnvelopeSink
-    ) -> None:
-        if not self._reject_unknown_keys(
-            data, _ADD_DECISION_ALLOWED, where=INBOUND_ADD_DECISION, sink=sink,
-        ):
-            return
-        task_id = _require_str(data, "task_id", where=INBOUND_ADD_DECISION)
-        if task_id is None:
-            return
-        summary = _require_str(data, "summary", where=INBOUND_ADD_DECISION)
-        if summary is None:
-            return
-        sup_raw = data.get("supporting_message_ids", [])
-        if not isinstance(sup_raw, list):
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR,
-                text=f"{INBOUND_ADD_DECISION}: supporting_message_ids 必须是 list",
-            )
-            return
-        supporting = [x for x in sup_raw if isinstance(x, str)]
-        # 防 wscat 绕过前端 maxlength 灌长文。
-        summary = summary[:200]
-        try:
-            decision = self._session.tasks_store.add_decision(
-                task_id, supporting_message_ids=supporting, summary=summary,
-            )
-        except TaskNotFoundError as e:
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"记决策失败：{e}",
-            )
-            self._emit_task_info(sink)
-            return
-        except OSError as e:
-            self._notice_persist_failure(sink, INBOUND_ADD_DECISION, e)
-            return
-        _log.info(
-            "add_decision: task=%s decision=%s sup=%d",
-            task_id, decision.decision_id, len(supporting),
-        )
-        self._emit_task_envelope(
-            sink,
-            type=ChahuaEventType.TASK_DECISION_ADDED,
-            data=decision.to_jsonl_dict(),
-        )
-        self._emit_task_info(sink)
 
     def _reject_unknown_keys(
         self,
@@ -1838,13 +751,6 @@ class ChahuaServer:
             self._run_turn(text, sink, task_id=snapshot_task_id),
             name="chahua-turn",
         )
-
-    def _snapshot_active_task_id(self) -> Optional[str]:
-        """接帧同步快照当前 active task —— 不能延到 _run_turn 里再读：从这次
-        ``create_task`` 到 turn 被调度之间，inbound 队列里排在后面的 ``open_task`` 会改
-        active，回追后已经在 transcript 里的用户消息会被错挂到新任务上。
-        """
-        return self._session.orchestrator.snapshot_active_task_id()
 
 
 # inbound 帧类型 → handler unbound method 的注册表。``_handle_inbound`` 拿到 type

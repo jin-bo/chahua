@@ -69,6 +69,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - `transport_bridge.py` — `ChahuaTransport`（`SdkTransport` 子类），把 agentao 事件转译成 envelope。
 - `summarizer.py` — 用 cheap LLM 增量产出 `summary.jsonl`，onboarding 窗口里拼用。
 - `permissions.py` — **read-only 双 API 同步**：`PermissionEngine.set_mode()` 与 `agent.tool_runner.set_readonly_mode()` 必须同时设。统一走 `apply_permission_mode(agent, mode_str)` 一个入口，别处禁止单独调 `set_mode`。
+- `server.py` + `server_inbound_{admin,task,io,settings}.py` + `_server_helpers.py` — ws 生命周期 / 帧路由 / room snapshot 留在 `server.py`；30+ 个 `_inbound_*` 帧 handler 按 feature 切到 4 个 mixin（P5.2 重构）。`ChahuaServer(AdminHandlersMixin, IOHandlersMixin, SettingsHandlersMixin, TaskHandlersMixin)` 多继承装配，所有 `self.xxx` 通过 MRO 解析。`_INBOUND_HANDLERS` 帧字符串 → method 映射表只在 `server.py` 顶层维护。**改动 `_inbound_*` handler 时先看模块归属**：admin（guest/room/persona/permission）/ task（open/update/attach/decision + emit_task_*）/ io（upload/export/persona import）/ settings（USER.md / 头像 / room.toml）。模块顶 payload 校验小工具 `require_str` / `check_keys_whitelist` 等在 `_server_helpers.py`，所有 mixin import 自这里（避免 mixin ←→ server.py 循环 import）。
 
 ### WebSocket 线协议（`chahua/server.py`）
 
