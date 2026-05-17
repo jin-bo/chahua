@@ -60,8 +60,14 @@ from ._persist import (
 from .events import now_ms
 from .task import Decision, Task, TaskStatus
 
-# close_task 仅接受这两个"终结态"。in_progress / blocked / open 走 update_task。
+# close_task 仅接受这两个"终结态"；update_task 仅接受非终结态。
+# 同一对常量给 server inbound 白名单 import，避免字面值散落多处。
 _CLOSED_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
+_NON_TERMINAL_STATUSES: frozenset[str] = frozenset({"open", "in_progress", "blocked"})
+
+# update_task 的 owner 参数 sentinel —— ``None`` 是合法值（清空 owner），不能复用 None
+# 表示"不改"。Python 没有 ``...`` 之外的轻量 marker，单独建一个 module-private 对象。
+_OWNER_UNSET: object = object()
 
 _log = logging.getLogger(__name__)
 
@@ -413,24 +419,58 @@ class TasksStore:
         *,
         title: Optional[str] = None,
         goal: Optional[str] = None,
+        owner: object = _OWNER_UNSET,
+        status: Optional[TaskStatus] = None,
     ) -> Task:
-        """更新 title / goal。P5.1 不接 owner / status —— 调用方传了会被本签名挡掉。
+        """更新 title / goal / owner / status。
 
-        ``None`` 表示"不改这个字段"，与 inbound payload 的 patch 语义一致。
+        P5.2.3 扩展：owner / status 可改。语义：
+
+        - ``title`` / ``goal`` / ``status`` 传 ``None`` = "不改"。
+        - ``owner`` 沿 inbound patch 语义可显式置 None（清归属），所以用 sentinel
+          ``_OWNER_UNSET`` 区分"不改"与"置 None"。调用方应传 str / None 或 不传。
+        - ``status`` 仅接受非终结态 ``{open, in_progress, blocked}``；``done`` / ``abandoned``
+          必须走 :meth:`close_task`（保证 ``closed_at_ms`` 落盘）。无效 status → ``ValueError``。
+        - 把 closed 任务的 status 改回非终结态（"重开"）→ 清 ``closed_at_ms``。
+
+        每个改变的字段落一行 ``events.jsonl``：
+        ``{kind: "field_changed", field, before, after}``。返回更新后的 Task。
         """
         task = self._tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
-        if title is None and goal is None:
-            return task  # no-op
-        patch: dict = {"updated_at_ms": now_ms()}
-        if title is not None:
+        if status is not None and status not in _NON_TERMINAL_STATUSES:
+            raise ValueError(
+                f"update_task: status={status!r} 不可用；终结态 done / abandoned 请走 close_task"
+            )
+        changes: list[tuple[str, object, object]] = []
+        patch: dict = {}
+        if title is not None and title != task.title:
+            changes.append(("title", task.title, title))
             patch["title"] = title
-        if goal is not None:
+        if goal is not None and goal != task.goal:
+            changes.append(("goal", task.goal, goal))
             patch["goal"] = goal
+        if owner is not _OWNER_UNSET and owner != task.owner:
+            changes.append(("owner", task.owner, owner))
+            patch["owner"] = owner
+        if status is not None and status != task.status:
+            changes.append(("status", task.status, status))
+            patch["status"] = status
+            # 重开闭合任务（done/abandoned → in_progress 等）：清 closed_at_ms。
+            if task.status in _CLOSED_STATUSES:
+                patch["closed_at_ms"] = None
+        if not changes:
+            return task  # no-op，不戳 updated_at_ms 也不写 events
+        patch["updated_at_ms"] = now_ms()
         new_task = dataclasses.replace(task, **patch)
         self._write_task(new_task)
         self._tasks[task.id] = new_task
+        for field_name, before, after in changes:
+            self._append_event(
+                task.id, "field_changed",
+                field=field_name, before=before, after=after,
+            )
         return new_task
 
     def add_decision(

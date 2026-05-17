@@ -242,6 +242,94 @@ def test_close_task_not_found(tmp_path: Path):
         store.close_task("task_ghost", status="done")
 
 
+# ── P5.2.3: update_task patch 扩 owner / status ───────────────────────────
+
+
+def test_update_task_changes_owner(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g", owner="user")
+    updated = store.update_task(t.id, owner="宝总")
+    assert updated.owner == "宝总"
+    # field_changed 落 events
+    fc = [e for e in store.list_events(t.id) if e["kind"] == "field_changed"]
+    assert len(fc) == 1
+    assert fc[0]["field"] == "owner"
+    assert fc[0]["before"] == "user"
+    assert fc[0]["after"] == "宝总"
+
+
+def test_update_task_clears_owner_with_explicit_none(tmp_path: Path):
+    """owner=None 是合法值（清归属）—— sentinel 区分"不改"与"清"。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g", owner="user")
+    updated = store.update_task(t.id, owner=None)
+    assert updated.owner is None
+    fc = [e for e in store.list_events(t.id) if e["kind"] == "field_changed"]
+    assert fc[0]["field"] == "owner"
+    assert fc[0]["before"] == "user"
+    assert fc[0]["after"] is None
+
+
+def test_update_task_omitted_owner_is_noop(tmp_path: Path):
+    """完全不传 owner 参数 —— 走 sentinel "不改"分支，不发 field_changed。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g", owner="user")
+    store.update_task(t.id, title="t2")
+    fields = [e["field"] for e in store.list_events(t.id) if e["kind"] == "field_changed"]
+    assert "owner" not in fields  # owner 未传 → 不触发 field_changed
+
+
+def test_update_task_changes_status_non_terminal(tmp_path: Path):
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    updated = store.update_task(t.id, status="in_progress")
+    assert updated.status == "in_progress"
+    fc = [e for e in store.list_events(t.id) if e["kind"] == "field_changed"]
+    assert fc[0]["field"] == "status"
+    assert fc[0]["before"] == "open"
+    assert fc[0]["after"] == "in_progress"
+
+
+def test_update_task_rejects_terminal_status(tmp_path: Path):
+    """status=done / abandoned 必须走 close_task —— 保证 closed_at_ms 落盘。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    with pytest.raises(ValueError):
+        store.update_task(t.id, status="done")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        store.update_task(t.id, status="abandoned")  # type: ignore[arg-type]
+
+
+def test_update_task_reopen_clears_closed_at(tmp_path: Path):
+    """关闭后再 update_task(status=in_progress) → status 回非终结态 + closed_at_ms 清。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    store.close_task(t.id, status="done")
+    reopened = store.update_task(t.id, status="in_progress")
+    assert reopened.status == "in_progress"
+    assert reopened.closed_at_ms is None
+
+
+def test_update_task_same_value_is_noop(tmp_path: Path):
+    """title 改成与现值相同 → 不戳 updated_at_ms 也不写 events.jsonl。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    events_before = store.list_events(t.id)
+    updated = store.update_task(t.id, title="t", goal="g")
+    assert updated.updated_at_ms == t.updated_at_ms
+    assert store.list_events(t.id) == events_before
+
+
+def test_update_task_multi_field_logs_each(tmp_path: Path):
+    """同一次 update 改 title + status → 落两行 field_changed。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    store.update_task(t.id, title="t2", status="in_progress")
+    fc = [e for e in store.list_events(t.id) if e["kind"] == "field_changed"]
+    fields = {e["field"] for e in fc}
+    assert fields == {"title", "status"}
+
+
 def test_events_jsonl_roundtrip_three_lines(tmp_path: Path):
     """① open A → ② open B（A 切走，B 上）→ ③ close B —— B 的 events.jsonl 3 行可读回。"""
     store = TasksStore(room_dir=tmp_path)
