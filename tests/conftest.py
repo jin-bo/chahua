@@ -7,12 +7,37 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+from chahua._paths import ENV_APP_ROOT, ENV_USER_DATA_ROOT, Paths
 from chahua.cursor import GuestCursor
 from chahua.orchestrator import Orchestrator, OrchestratorConfig
 from chahua.room import Room
 from chahua.scoring import IntentScorer
 from chahua.summarizer import Summarizer
 from chahua.user_md import USER_SPEAKER_ID, UserConfig
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def env_paths(tmp_path, monkeypatch):
+    """与 dev/prod 二根隔离的 Paths 夹具 —— ``user_data_root`` 指向 tmp，
+    ``app_root`` 指向仓库根（persona / templates 找得到）。LLM 凭据全打假值，
+    任何 ``build_room_session`` 都能跑到尾不真请 LLM。
+
+    server_inbound / room_info / task_link / upload 等"装真房间"的测全靠这条。
+    """
+    user_data = tmp_path / "userdata"
+    user_data.mkdir()
+    monkeypatch.setenv(ENV_APP_ROOT, str(REPO_ROOT))
+    monkeypatch.setenv(ENV_USER_DATA_ROOT, str(user_data))
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    return Paths.from_env()
 
 
 class StubGuest:

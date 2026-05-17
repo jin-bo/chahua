@@ -7,29 +7,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from chahua import admin
-from chahua._paths import ENV_APP_ROOT, ENV_USER_DATA_ROOT, Paths
 from chahua.events import ChahuaEventType
 from chahua.server import ChahuaServer
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-@pytest.fixture
-def env_paths(tmp_path, monkeypatch):
-    user_data = tmp_path / "userdata"
-    user_data.mkdir()
-    monkeypatch.setenv(ENV_APP_ROOT, str(REPO_ROOT))
-    monkeypatch.setenv(ENV_USER_DATA_ROOT, str(user_data))
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
-    return Paths.from_env()
+# env_paths fixture 在 tests/conftest.py。
 
 
 def _build_session_and_server(env_paths):

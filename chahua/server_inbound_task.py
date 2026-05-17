@@ -150,7 +150,6 @@ class TaskHandlers:
         except OSError as e:
             self.server._notice_persist_failure(sink, INBOUND_OPEN_TASK, e)
             return
-        # open_task 内部已 set_active 到新任务 —— relink 茶客 ./task/ 到新 artifacts/。
         relink_task_dirs(self.server._session)
         _log.info("open_task: %r (id=%s)", title, task.id)
         self._emit_task_envelope(
@@ -360,8 +359,6 @@ class TaskHandlers:
         except OSError as e:
             self.server._notice_persist_failure(sink, INBOUND_CLOSE_TASK, e)
             return
-        # 关掉的若是当前 active，close_task 内部已 set_active(None) —— relink 拆链。
-        # 关掉非 active 任务时 store.active_task_id 不变，relink 是 no-op。
         relink_task_dirs(self.server._session)
         _log.info("close_task: id=%s status=%s", task.id, status)
         self._emit_task_envelope(

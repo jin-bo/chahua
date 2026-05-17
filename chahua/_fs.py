@@ -90,13 +90,15 @@ def link_dir_idempotent(
         return False
 
 
+_WINDOWS_REPARSE_POINT_ATTR = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
 def unlink_managed_link(target: Path, *, label: str) -> bool:
     """删一个本模块管理的软链 / junction。target 不存在 / 不是链时 no-op 返 True。
 
-    POSIX 上 ``is_symlink()`` 判即可走 ``unlink()``；Windows 上 junction 是 reparse
-    point，``is_symlink()`` 返 False 但 ``is_dir()`` 真 —— 这里靠 ``os.path.realpath``
-    比对路径异化判 junction，再走 ``rmdir()``（拆链不动 target）。真目录 / 真文件直接
-    WARN 跳过（保护用户数据）。
+    POSIX 走 ``is_symlink() → unlink()``；Windows 上 junction 是 reparse point，
+    ``is_symlink()`` 返 False 但 ``lstat().st_file_attributes`` 带 reparse 位，
+    走 ``rmdir()`` 拆链不动 target。真目录 / 真文件 WARN 跳过（保护用户数据）。
     """
     if target.is_symlink():
         try:
@@ -109,7 +111,8 @@ def unlink_managed_link(target: Path, *, label: str) -> bool:
         return True
     if os.name == "nt" and target.is_dir():
         try:
-            if Path(os.path.realpath(target)) != target.resolve(strict=False):
+            attrs = getattr(target.lstat(), "st_file_attributes", 0)
+            if attrs & _WINDOWS_REPARSE_POINT_ATTR:
                 target.rmdir()
                 return True
         except OSError as e:

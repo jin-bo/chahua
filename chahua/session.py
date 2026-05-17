@@ -85,14 +85,17 @@ def relink_task_dirs(session: "RoomSession") -> None:
     """
     store = session.tasks_store
     active = store.active_task_id
+    # artifacts/ 是 per-task 而非 per-guest —— hoist 出循环避免 N 次 stat。
+    artifacts: Optional[Path] = None
+    if active is not None:
+        artifacts = store.artifacts_dir(active)
+        artifacts.mkdir(parents=True, exist_ok=True)
     for guest in session.guests:
         link_path = guest.working_directory / TASK_LINK_DIRNAME
         label = f"guest {guest.name} task link"
-        if active is None:
+        if artifacts is None:
             unlink_managed_link(link_path, label=label)
             continue
-        artifacts = store.artifacts_dir(active)
-        artifacts.mkdir(parents=True, exist_ok=True)
         link_dir_idempotent(
             link_path, artifacts,
             wipe_real_target=False,
@@ -430,7 +433,5 @@ def build_room_session(
         guest_specs=guest_specs,
         tasks_store=tasks_store,
     )
-    # 装配末尾按当前 active 建 ./task/ 软链（active=None 时 no-op）—— 双向修复后
-    # active_task_id 已稳定，此处不会再变。
     relink_task_dirs(session)
     return session
