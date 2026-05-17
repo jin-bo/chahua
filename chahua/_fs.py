@@ -8,7 +8,9 @@ edge-case 修一处就同步，不再两边各自漂。
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -20,6 +22,7 @@ def link_dir_idempotent(
     *,
     wipe_real_target: bool,
     label: str,
+    windows_junction_fallback: bool = False,
 ) -> bool:
     """让 ``target`` 软链到 ``source``，幂等。返回 True = 软链已就绪。
 
@@ -34,6 +37,11 @@ def link_dir_idempotent(
     所有失败（清理 / mkdir / symlink）走同一路径：WARN 返 False。Windows 普通用户
     没 ``SeCreateSymbolicLinkPrivilege`` 时 ``symlink_to`` 抛 ``OSError`` —— 调用方
     据返回值决定是否走 copy 兜底。
+
+    ``windows_junction_fallback=True`` 时 Windows symlink 失败后再试 ``mklink /J``
+    建 junction（reparse point，普通用户即可建，agentao cwd 边界仍能拦住越界 IO）。
+    POSIX 上不走 fallback —— OSError 直接 WARN。任务房间 ``./task/`` 软链用这条；
+    ``./share/`` 既有口径保持 WARN（broken share 比"意外突然能写"更安全）。
     """
     if target.is_symlink():
         try:
@@ -66,5 +74,46 @@ def link_dir_idempotent(
         target.symlink_to(source, target_is_directory=True)
         return True
     except (OSError, NotImplementedError) as e:
+        if windows_junction_fallback and os.name == "nt":
+            try:
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(target), str(source)],
+                    check=True, capture_output=True,
+                )
+                return True
+            except (OSError, subprocess.CalledProcessError) as e2:
+                _log.warning(
+                    "%s: junction fallback %s → %s 失败：%s", label, target, source, e2,
+                )
+                return False
         _log.warning("%s: symlink %s → %s 失败：%s", label, target, source, e)
         return False
+
+
+def unlink_managed_link(target: Path, *, label: str) -> bool:
+    """删一个本模块管理的软链 / junction。target 不存在 / 不是链时 no-op 返 True。
+
+    POSIX 上 ``is_symlink()`` 判即可走 ``unlink()``；Windows 上 junction 是 reparse
+    point，``is_symlink()`` 返 False 但 ``is_dir()`` 真 —— 这里靠 ``os.path.realpath``
+    比对路径异化判 junction，再走 ``rmdir()``（拆链不动 target）。真目录 / 真文件直接
+    WARN 跳过（保护用户数据）。
+    """
+    if target.is_symlink():
+        try:
+            target.unlink()
+            return True
+        except OSError as e:
+            _log.warning("%s: unlink %s 失败：%s", label, target, e)
+            return False
+    if not target.exists():
+        return True
+    if os.name == "nt" and target.is_dir():
+        try:
+            if Path(os.path.realpath(target)) != target.resolve(strict=False):
+                target.rmdir()
+                return True
+        except OSError as e:
+            _log.warning("%s: rmdir junction %s 失败：%s", label, target, e)
+            return False
+    _log.warning("%s: %s 不是软链/junction，跳过（保护用户数据）", label, target)
+    return False

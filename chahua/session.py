@@ -18,7 +18,7 @@ from typing import Any, Optional
 from agentao.llm import LLMClient
 from dotenv import load_dotenv
 
-from ._fs import link_dir_idempotent
+from ._fs import link_dir_idempotent, unlink_managed_link
 from ._paths import Paths
 from .config import RoomConfig, RoomConfigError, load_room_config
 from .cursor import GuestCursor
@@ -54,6 +54,10 @@ def load_env_files(paths: Paths) -> None:
 # 房间共享子目录名。room.toml 不可改 —— 所有茶客 cwd 下都靠这个软链名访问。
 ROOM_SHARE_DIRNAME = "share"
 
+# 茶客 cwd 下的任务桌面软链名（P5.2.11 通道 2）。与 ``share/`` 对仗 —— 茶客 prompt
+# 里写 ``./task/<file>`` 是固定口径，room.toml 不可改。active=None 时整链消失。
+TASK_LINK_DIRNAME = "task"
+
 
 def ensure_room_share_dir(room_dir: Path) -> Path:
     """房间共享目录 ``<room_dir>/share/``。茶客 ``work_dir/share`` 都链到这里，
@@ -65,6 +69,36 @@ def ensure_room_share_dir(room_dir: Path) -> Path:
     share = room_dir / ROOM_SHARE_DIRNAME
     share.mkdir(parents=True, exist_ok=True)
     return share
+
+
+def relink_task_dirs(session: "RoomSession") -> None:
+    """把每位茶客 cwd 下 ``./task/`` 刷到当前 active task 的 ``artifacts/``（通道 2）。
+
+    ``active = None`` 仅解链；切到新任务先解再建。装配末尾调一次（初始 active）；
+    server inbound 改 active 的三处（``open_task`` / ``set_active_task`` / ``close_task``）
+    也各调一次 —— 集中在 server 层而不是 tasks_store 内部，因为 store 不该知道
+    guest workspace 这层概念（docs §6.2 / §7.2 P5.2 通道 2）。
+
+    Windows fallback junction（mklink /J）—— 普通用户即可建，agentao ``working_directory``
+    cwd 边界对软链 / junction 一视同仁拦写。失败 WARN 不阻断，但茶客就看不到
+    ``./task/`` 内容。
+    """
+    store = session.tasks_store
+    active = store.active_task_id
+    for guest in session.guests:
+        link_path = guest.working_directory / TASK_LINK_DIRNAME
+        label = f"guest {guest.name} task link"
+        if active is None:
+            unlink_managed_link(link_path, label=label)
+            continue
+        artifacts = store.artifacts_dir(active)
+        artifacts.mkdir(parents=True, exist_ok=True)
+        link_dir_idempotent(
+            link_path, artifacts,
+            wipe_real_target=False,
+            label=label,
+            windows_junction_fallback=True,
+        )
 
 
 def _link_guest_share(guest_workdir: Path, room_share: Path) -> None:
@@ -384,7 +418,7 @@ def build_room_session(
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
 
-    return RoomSession(
+    session = RoomSession(
         room=room,
         orchestrator=orchestrator,
         guests=guests,
@@ -396,3 +430,7 @@ def build_room_session(
         guest_specs=guest_specs,
         tasks_store=tasks_store,
     )
+    # 装配末尾按当前 active 建 ./task/ 软链（active=None 时 no-op）—— 双向修复后
+    # active_task_id 已稳定，此处不会再变。
+    relink_task_dirs(session)
+    return session
