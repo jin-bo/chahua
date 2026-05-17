@@ -165,6 +165,7 @@ class TeaGuest:
         turn_id: str,
         sink: EnvelopeSink,
         cancellation_token: Optional[CancellationToken] = None,
+        task_id: Optional[str] = None,
     ) -> Optional[Message]:
         """让茶客说一句话。
 
@@ -177,10 +178,13 @@ class TeaGuest:
           重抛让 orchestrator 决定是否中止后续。
         - 失败：``message_end(status=error, data={partial_text, error})``；不写 transcript；
           异常被吞，函数返回 ``None`` —— orchestrator 让链跑下去（与 P1 一致）。
+
+        ``task_id``：orchestrator 在 turn_start 时 snapshot 的 active_task_id。本轮所有
+        message_* envelope 的 data 都带这个 tag；transcript 落盘也带。``None`` = 房间级闲聊。
         """
         message_id = new_message_id()
         with self._transport.bind(
-            sink=sink, turn_id=turn_id, message_id=message_id
+            sink=sink, turn_id=turn_id, message_id=message_id, task_id=task_id,
         ):
             self._transport.emit_chahua(ChahuaEventType.MESSAGE_START, {})
             try:
@@ -196,7 +200,9 @@ class TeaGuest:
                 self._emit_failure(STATUS_ERROR, str(e))
                 return None
 
-            msg = self.room.append(self.name, text, message_id=message_id)
+            msg = self.room.append(
+                self.name, text, message_id=message_id, task_id=task_id,
+            )
             # message_end.data.text 是兜底字段（前端可以靠它做一次性渲染，不用拼 chunk）。
             self._transport.emit_chahua(
                 ChahuaEventType.MESSAGE_END,

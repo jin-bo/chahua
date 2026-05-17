@@ -62,6 +62,12 @@ from .session import (
     ensure_room_share_dir,
     load_env_files,
 )
+from .task import MARKED_BY_USER
+from .tasks_store import (
+    ArtifactSourceMissingError,
+    TaskExistsError,
+    TaskNotFoundError,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -69,11 +75,11 @@ _log = logging.getLogger(__name__)
 DEFAULT_PORT = 7860
 DEFAULT_HOST = "127.0.0.1"
 
-# 入站帧上限。``websockets`` 默认 1MB —— 头像 PNG 上限 1.5MB（admin._AVATAR_MAX_BYTES）
-# × 4/3 base64 ≈ 2MB，再加 JSON quoting 必爆默认。设 4MB 给上传留头：用户传 1.5MB
-# 上限的 PNG 不会被默默断线（websockets 会发 1009 + close 链接，sidecar 看上去是
-# 中途挂掉，排查噩梦）。
-_WS_MAX_INBOUND_BYTES = 4 * 1024 * 1024
+# 入站帧上限。``websockets`` 默认 1MB —— 房间文件上限 200MB（_UPLOAD_MAX_BYTES）
+# × 4/3 base64 ≈ 267MB，再加 JSON quoting + 字段开销。设 300MB 给上传留头：用户传
+# 200MB 上限的文件不会被默默断线（websockets 会发 1009 + close 链接，sidecar 看上
+# 去是中途挂掉，排查噩梦）。
+_WS_MAX_INBOUND_BYTES = 300 * 1024 * 1024
 
 # 客户端 → 服务端 message type 字段值。
 INBOUND_USER_MESSAGE = "user_message"
@@ -98,10 +104,16 @@ INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
 INBOUND_EXPORT_ROOM = "export_room"
+# P5.1.7 任务房间 inbound（docs/P5-任务房间.md §4.3）。P5.1 不接 set_active_task /
+# close_task —— 严守"一房间最多 1 个任务"窄路径；这两条到 P5.2 再开放。
+INBOUND_OPEN_TASK = "open_task"
+INBOUND_UPDATE_TASK = "update_task"
+INBOUND_ATTACH_ARTIFACT = "attach_artifact"
+INBOUND_ADD_DECISION = "add_decision"
 
-# 单文件上限。WS 入站帧 max=4MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
-# 文件极限 ~3MB。设 2MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
-_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+# 单文件上限。WS 入站帧 max=300MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
+# 文件极限 ~225MB。设 200MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
+_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
 
 
 def _read_room_toml(room_dir: Path) -> str:
@@ -252,6 +264,23 @@ def _check_optional_dict(data: dict, key: str, *, where: str) -> bool:
     return True
 
 
+def _check_keys_whitelist(
+    data: dict,
+    allowed: frozenset[str],
+    *,
+    where: str,
+) -> Optional[str]:
+    """严格白名单：payload 顶层只接 ``allowed`` 里的字段（``type`` 已被 dispatcher 吃）。
+
+    合法 → ``None``；多余键 → 返回错误文案（caller emit NOTICE + 丢帧）。P5.1.7 任务
+    inbound 用 —— 等价 ``_require_str`` 同款 "校验失败给个反馈" 接口。
+    """
+    extra = set(data) - allowed - {"type"}
+    if not extra:
+        return None
+    return f"{where}: 未知字段 {sorted(extra)!r}"
+
+
 def _import_success_text(result: "persona_import.ImportedPersona") -> str:
     """导入成功的 notice 文案 —— 含 persona 名 + 头像状态 + sidecar 文件数提示。"""
     parts = [f"已导入 persona「{result.name}」"]
@@ -261,6 +290,18 @@ def _import_success_text(result: "persona_import.ImportedPersona") -> str:
             f"另有 {len(result.extras)} 个 sidecar 文件被保留（mcp.json / skills 等，目前运行时尚未消费）"
         )
     return "".join(parts)
+
+
+# 任务 inbound payload 白名单（P5.1.7，docs §4.3）。集中在模块顶让"加字段就动这里"
+# 一目了然；任何不在集合里的顶层键 → NOTICE error。``type`` 字段单独豁免（dispatcher
+# 已消费）。`update_task` 的 patch 字段另设一组（嵌套不在顶层白名单里）。
+_OPEN_TASK_ALLOWED: frozenset[str] = frozenset({"title", "goal", "owner"})
+_UPDATE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id", "patch"})
+_UPDATE_TASK_PATCH_ALLOWED: frozenset[str] = frozenset({"title", "goal"})
+_ATTACH_ARTIFACT_ALLOWED: frozenset[str] = frozenset({"task_id", "share_rel"})
+_ADD_DECISION_ALLOWED: frozenset[str] = frozenset(
+    {"task_id", "summary", "supporting_message_ids"}
+)
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -943,32 +984,31 @@ class ChahuaServer:
         - 重名直接覆盖 —— 用户主动选了同名文件意味着想替换，比"自动加 (1)"明确。
         - 写盘走 :func:`write_bytes_atomic` —— tmp+rename，写一半被 kill 不留残骸。
 
-        成功 → emit ``file_uploaded`` envelope，data 含 ``rel`` (``share/xxx``)
-        / ``name`` (洗过的文件名) / ``size`` / ``original`` (用户原文件名)。
-        前端拿 ``rel`` 挂 pending pill，下一条 user_message 的 ``files`` 里带上。
+        **每次入站请求恒发一条 ``file_uploaded`` envelope**（成功 / 失败都发）——
+        前端的串行上传循环靠这条 echo 推进队列，没 echo 就永远 await 卡住。data 形态：
 
-        失败 → emit ``notice(level=error)`` 让用户看见原因 —— 与 persona 导入失败的
-        反馈口径一致。
+        - 成功：``{rel, name, size, original}``
+        - 失败：``{original, error}`` —— 无 ``rel``，前端 onServerEcho 跳过 pill 追加。
+
+        失败路径同时 emit 一条 ``notice(level=error)`` 让用户看见可读原因（与 persona
+        导入失败口径一致）。
         """
         original = filename
         try:
             safe_name = sanitize_fs_name(filename, label="filename")
         except ValueError as e:
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"文件名非法：{e}"
-            )
+            self._fail_upload(sink, original=original, text=f"文件名非法：{e}")
             return
         try:
             data = base64.b64decode(content_b64, validate=True)
         except (binascii.Error, ValueError) as e:
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"上传失败（base64 解码）：{e}"
+            self._fail_upload(
+                sink, original=original, text=f"上传失败（base64 解码）：{e}",
             )
             return
         if len(data) > _UPLOAD_MAX_BYTES:
-            self._emit_notice(
-                sink,
-                level=NOTICE_LEVEL_ERROR,
+            self._fail_upload(
+                sink, original=original,
                 text=f"文件太大（{len(data)} bytes，上限 {_UPLOAD_MAX_BYTES}）",
             )
             return
@@ -978,9 +1018,7 @@ class ChahuaServer:
             write_bytes_atomic(target, data)
         except Exception as e:
             _log.exception("upload_file: 写盘失败 name=%r", safe_name)
-            self._emit_notice(
-                sink, level=NOTICE_LEVEL_ERROR, text=f"上传失败：{e}"
-            )
+            self._fail_upload(sink, original=original, text=f"上传失败：{e}")
             return
         rel = f"{ROOM_SHARE_DIRNAME}/{safe_name}"
         _log.info("upload_file: %s (%d bytes)", rel, len(data))
@@ -1065,15 +1103,67 @@ class ChahuaServer:
         self._emit_room_info(sink)
 
     def _emit_room_snapshot(self, sink: EnvelopeSink) -> None:
-        """下发 room_info + room_history —— 前端拿来全量复位 sidebar + 消息区。
+        """下发 room_info + room_history + task_info —— 前端拿来全量复位 sidebar + 消息区
+        + 任务面板。
 
         三处调用：首次连接（``_serve_one``）、换房成功（``_switch_room``）、清空房间
         （``_clear_room``）。前端 ``renderSidebar`` 一帧 ``messagesEl.replaceChildren()``
-        清屏，再用 ``room_history`` 回放。``_switch_room`` 的失败兜底只单发 room_info
-        让 sidebar 状态复位，不走这个 helper。
+        清屏，再用 ``room_history`` 回放，最后用 ``task_info`` 装任务面板。
+        ``_switch_room`` 的失败兜底只单发 room_info 让 sidebar 状态复位，不走这个 helper。
+
+        ``task_info`` 即使房间没任务也下发（空 ``{tasks: [], active_task_id: null}``），
+        让前端用这帧确认"P5.1 任务协议生效"，避免老 sidecar 不下发的情况下前端误判。
         """
         self._emit_room_info(sink)
         self._emit_room_history(sink)
+        self._emit_task_info(sink)
+
+    def _emit_task_envelope(
+        self,
+        sink: EnvelopeSink,
+        *,
+        type: ChahuaEventType,
+        data: dict,
+    ) -> None:
+        """连接级任务 envelope（``turn_id`` / ``message_id`` / ``guest_name`` 全 None）。
+        P5.1.7 四个 hint 事件与 ``task_info`` 共用 —— 避免每个 callsite 写一遍三个 None。
+        """
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=type,
+                data=data,
+            )
+        )
+
+    def _emit_task_info(self, sink: EnvelopeSink) -> None:
+        """下发 ``task_info`` envelope —— 权威快照，前端任务状态以此为准（docs §4.2）。
+
+        每次任务状态变更（open / update / decision / artifact）后重发整份
+        ``{tasks, active_task_id}``。task entry 字段沿 :meth:`Task.to_jsonl_dict`，外加
+        ``artifacts`` / ``decisions`` 子列表，让前端一次拿全。空房间也下发（空 tasks），
+        前端用这帧确认任务协议生效。
+        """
+        store = self._session.tasks_store
+        tasks_payload = [
+            {
+                **t.to_jsonl_dict(),
+                "artifacts": store.list_artifacts(t.id),
+                "decisions": [d.to_jsonl_dict() for d in store.list_decisions(t.id)],
+            }
+            for t in store.list_tasks()
+        ]
+        self._emit_task_envelope(
+            sink,
+            type=ChahuaEventType.TASK_INFO,
+            data={
+                "tasks": tasks_payload,
+                "active_task_id": store.active_task_id,
+            },
+        )
 
     def _export_room(self, sink: EnvelopeSink) -> None:
         # read-only：不动 session、不写盘。导出物只活在用户的 Downloads/ 里（renderer
@@ -1139,7 +1229,9 @@ class ChahuaServer:
             # 不会再抛；保留 CancelledError 兜底是为 cancel→reraise 极小竞态窗口。
             pass
 
-    async def _run_turn(self, text: str, sink: EnvelopeSink) -> None:
+    async def _run_turn(
+        self, text: str, sink: EnvelopeSink, *, task_id: Optional[str],
+    ) -> None:
         """承载一条 user_message 的整个 AI 链。挂在 ``_inflight_turn_task`` 上让 cancel
         入口能 ``task.cancel()`` 它。
 
@@ -1147,9 +1239,15 @@ class ChahuaServer:
           后 reraise；这里 swallow 让 task 正常完成。
         - 其它异常：兜底 log + swallow，避免 task 异常逃逸触发 asyncio "Task exception
           was never retrieved" warning。
+
+        ``task_id`` 由 :meth:`_inbound_user_message` 在接帧同步上下文里快照后传入 —— 不能
+        在本协程里读 ``tasks_store.active_task_id`` 兜底，那样会与 inbound 队列里排在后面
+        的 ``open_task`` 帧形成 race。
         """
         try:
-            await self._session.orchestrator.submit_user_message(text, sink=sink)
+            await self._session.orchestrator.submit_user_message(
+                text, sink=sink, task_id=task_id,
+            )
         except asyncio.CancelledError:
             _log.info("turn cancelled by user")
         except Exception:
@@ -1419,19 +1517,301 @@ class ChahuaServer:
         )
 
     async def _inbound_upload_file(self, data: dict, sink: EnvelopeSink) -> None:
+        # 任意校验失败也要 emit FILE_UPLOADED(error) —— 前端串行上传循环靠 echo 推进
+        # 队列；inbound 早返不发 echo 会让循环永挂（典型 case：零字节文件 content_b64
+        # 为空，_require_str 没 allow_empty 时返 None）。
+        raw_filename = data.get("filename")
+        # 用 raw 当 echo.original：哪怕是 None / 非 str，转 str 也好让前端能匹配到 pill
+        # 占位（虽然 valid 上传里不会触发；这条路径是 wscat 直发的兜底）。
+        echo_original = (
+            raw_filename if isinstance(raw_filename, str) else ""
+        )
         filename = _require_str(data, "filename", where=INBOUND_UPLOAD_FILE)
         if filename is None:
+            self._fail_upload(sink, original=echo_original, text="文件名缺失或非法")
             return
-        content_b64 = _require_str(data, "content_b64", where=INBOUND_UPLOAD_FILE)
-        if content_b64 is None:
+        content_b64 = data.get("content_b64")
+        if not isinstance(content_b64, str):
+            self._fail_upload(
+                sink, original=echo_original, text="content_b64 缺失或非 str",
+            )
             return
         # 上传不动 session、不挡 inflight turn —— 让正在跑的 turn 自然结束；
         # 文件落房间共享目录，下一条 user_message 才把它带进上下文。
+        # 允许 content_b64 == ""（零字节文件）—— _upload_file 内 base64.b64decode("") = b""。
         self._upload_file(filename=filename, content_b64=content_b64, sink=sink)
+
+    def _fail_upload(
+        self, sink: EnvelopeSink, *, original: str, text: str,
+    ) -> None:
+        """上传请求失败的统一回吐：NOTICE 给用户看 + FILE_UPLOADED(error) 让前端推进队列。
+
+        ``_upload_file`` 内部错误路径与 ``_inbound_upload_file`` 的早返路径共用 —— 任何
+        UPLOAD_FILE 入帧都必须以一条 FILE_UPLOADED envelope 收尾（成功 / 失败）。
+        """
+        self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
+        sink(
+            ChahuaEnvelope(
+                room_id=self._session.room.name,
+                turn_id=None, guest_name=None, message_id=None,
+                type=ChahuaEventType.FILE_UPLOADED,
+                data={"original": original, "error": text},
+            )
+        )
 
     async def _inbound_export_room(self, data: dict, sink: EnvelopeSink) -> None:
         # read-only：不动 session、不挡 inflight turn。
         self._export_room(sink)
+
+    # ── P5.1.7 任务 inbound（docs/P5-任务房间.md §4.3 P5.1 段）─────────────
+    #
+    # 共通契约：
+    #   - **入站严格**：payload 顶层只接白名单字段（详见每条 ``_ALLOWED`` 常量）；多余键
+    #     直接 NOTICE error + 丢帧。等价 docs §8.1 "入站严格 / 落盘宽容"。
+    #   - **不挡 inflight turn**：与 upload / 头像 / persona import 同口径 —— 让在跑的
+    #     turn 自然完成；任务 mutator 改的是 :class:`TasksStore` 镜像，与 transcript
+    #     append 不冲突。
+    #   - **成功路径**：emit hint 事件（``task_open`` / ``task_update`` / 等）+ 重发整份
+    #     ``task_info``（权威快照）。前端任务状态以最近 ``task_info`` 为准（§4.2 事件分工）。
+
+    async def _inbound_open_task(self, data: dict, sink: EnvelopeSink) -> None:
+        if not self._reject_unknown_keys(
+            data, _OPEN_TASK_ALLOWED, where=INBOUND_OPEN_TASK, sink=sink,
+        ):
+            return
+        title = _require_str(data, "title", where=INBOUND_OPEN_TASK)
+        if title is None:
+            return
+        goal = _require_str(
+            data, "goal", where=INBOUND_OPEN_TASK, allow_empty=True,
+        )
+        if goal is None:
+            return
+        owner_raw = data.get("owner")
+        if owner_raw is not None and not isinstance(owner_raw, str):
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_OPEN_TASK}: owner 必须是 str / null",
+            )
+            return
+        try:
+            task = self._session.tasks_store.open_task(
+                title=title, goal=goal, owner=owner_raw,
+            )
+        except TaskExistsError as e:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"开任务失败：{e}",
+            )
+            # 重发让前端按 tasks.length 把 "+新任务" 按钮 disable（防前端误判）。
+            self._emit_task_info(sink)
+            return
+        except OSError as e:
+            self._notice_persist_failure(sink, INBOUND_OPEN_TASK, e)
+            return
+        _log.info("open_task: %r (id=%s)", title, task.id)
+        self._emit_task_envelope(
+            sink, type=ChahuaEventType.TASK_OPEN, data=task.to_jsonl_dict(),
+        )
+        self._emit_task_info(sink)
+
+    async def _inbound_update_task(self, data: dict, sink: EnvelopeSink) -> None:
+        if not self._reject_unknown_keys(
+            data, _UPDATE_TASK_ALLOWED, where=INBOUND_UPDATE_TASK, sink=sink,
+        ):
+            return
+        task_id = _require_str(data, "task_id", where=INBOUND_UPDATE_TASK)
+        if task_id is None:
+            return
+        patch_raw = data.get("patch")
+        if not isinstance(patch_raw, dict):
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_UPDATE_TASK}: patch 必须是对象",
+            )
+            return
+        extra = set(patch_raw) - _UPDATE_TASK_PATCH_ALLOWED
+        if extra:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=(
+                    f"{INBOUND_UPDATE_TASK}: patch 含未知字段 {sorted(extra)!r}；"
+                    "P5.1 只支持 title / goal"
+                ),
+            )
+            return
+        title = patch_raw.get("title")
+        goal = patch_raw.get("goal")
+        for key, val in (("title", title), ("goal", goal)):
+            if val is not None and not isinstance(val, str):
+                self._emit_notice(
+                    sink, level=NOTICE_LEVEL_ERROR,
+                    text=f"{INBOUND_UPDATE_TASK}: patch.{key} 必须是 str",
+                )
+                return
+        # title 与 open_task 同口径不接受空串（避免改成"无标题"任务卡）；goal 允许空。
+        if title == "":
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_UPDATE_TASK}: patch.title 不能为空",
+            )
+            return
+        try:
+            task = self._session.tasks_store.update_task(
+                task_id, title=title, goal=goal,
+            )
+        except TaskNotFoundError as e:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"更新任务失败：{e}",
+            )
+            self._emit_task_info(sink)
+            return
+        except OSError as e:
+            self._notice_persist_failure(sink, INBOUND_UPDATE_TASK, e)
+            return
+        _log.info("update_task: id=%s title=%r goal=%r", task.id, title, goal)
+        applied_patch: dict = {}
+        if title is not None:
+            applied_patch["title"] = title
+        if goal is not None:
+            applied_patch["goal"] = goal
+        self._emit_task_envelope(
+            sink,
+            type=ChahuaEventType.TASK_UPDATE,
+            data={"task_id": task.id, "patch": applied_patch},
+        )
+        self._emit_task_info(sink)
+
+    async def _inbound_attach_artifact(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        if not self._reject_unknown_keys(
+            data, _ATTACH_ARTIFACT_ALLOWED, where=INBOUND_ATTACH_ARTIFACT, sink=sink,
+        ):
+            return
+        task_id = _require_str(data, "task_id", where=INBOUND_ATTACH_ARTIFACT)
+        if task_id is None:
+            return
+        share_rel = _require_str(
+            data, "share_rel", where=INBOUND_ATTACH_ARTIFACT,
+        )
+        if share_rel is None:
+            return
+        try:
+            # 移入 try：room_dir 只读 / 磁盘满时 mkdir 抛 OSError 也不能逃出 handler。
+            share_root = ensure_room_share_dir(self._session.room_config.room_dir)
+            info = self._session.tasks_store.attach_artifact(
+                task_id, share_rel=share_rel, share_root=share_root,
+            )
+        except TaskNotFoundError as e:
+            # 任务在 UI render 与 click 之间消失 —— 重发 task_info 让前端任务列表复位。
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"挂产物失败：{e}",
+            )
+            self._emit_task_info(sink)
+            return
+        except ArtifactSourceMissingError as e:
+            # 用户给了错路径 —— 任务列表本身没变化，仅 NOTICE 提示即可。
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"挂产物失败：{e}",
+            )
+            return
+        except OSError as e:
+            self._notice_persist_failure(sink, INBOUND_ATTACH_ARTIFACT, e)
+            return
+        _log.info(
+            "attach_artifact: task=%s share_rel=%r → %s",
+            task_id, share_rel, info["rel"],
+        )
+        self._emit_task_envelope(
+            sink,
+            type=ChahuaEventType.TASK_ARTIFACT_ADDED,
+            data={
+                "task_id": task_id,
+                "name": info["name"],
+                "size": info["size"],
+                "rel": info["rel"],
+                # P5.1 仅 user 一种来源；P5.4 茶客自动归集会出现 "<guest_name>" 值。
+                "created_by": MARKED_BY_USER,
+            },
+        )
+        self._emit_task_info(sink)
+
+    async def _inbound_add_decision(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        if not self._reject_unknown_keys(
+            data, _ADD_DECISION_ALLOWED, where=INBOUND_ADD_DECISION, sink=sink,
+        ):
+            return
+        task_id = _require_str(data, "task_id", where=INBOUND_ADD_DECISION)
+        if task_id is None:
+            return
+        summary = _require_str(data, "summary", where=INBOUND_ADD_DECISION)
+        if summary is None:
+            return
+        sup_raw = data.get("supporting_message_ids", [])
+        if not isinstance(sup_raw, list):
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_ADD_DECISION}: supporting_message_ids 必须是 list",
+            )
+            return
+        supporting = [x for x in sup_raw if isinstance(x, str)]
+        # 防 wscat 绕过前端 maxlength 灌长文。
+        summary = summary[:200]
+        try:
+            decision = self._session.tasks_store.add_decision(
+                task_id, supporting_message_ids=supporting, summary=summary,
+            )
+        except TaskNotFoundError as e:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"记决策失败：{e}",
+            )
+            self._emit_task_info(sink)
+            return
+        except OSError as e:
+            self._notice_persist_failure(sink, INBOUND_ADD_DECISION, e)
+            return
+        _log.info(
+            "add_decision: task=%s decision=%s sup=%d",
+            task_id, decision.decision_id, len(supporting),
+        )
+        self._emit_task_envelope(
+            sink,
+            type=ChahuaEventType.TASK_DECISION_ADDED,
+            data=decision.to_jsonl_dict(),
+        )
+        self._emit_task_info(sink)
+
+    def _reject_unknown_keys(
+        self,
+        data: dict,
+        allowed: frozenset[str],
+        *,
+        where: str,
+        sink: EnvelopeSink,
+    ) -> bool:
+        """Return False + NOTICE error 当 payload 含 ``allowed`` 之外的顶层键。
+        """
+        err = _check_keys_whitelist(data, allowed, where=where)
+        if err is None:
+            return True
+        self._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=err)
+        return False
+
+    def _notice_persist_failure(
+        self, sink: EnvelopeSink, where: str, err: OSError,
+    ) -> None:
+        """tasks/ 落盘出错（disk full / 权限）时给前端发可读 NOTICE，而不是让异常逃逸
+        ``_handle_inbound`` 让 ws 断线。partial-write 留下的内存 vs state.json 不一致，
+        重启时靠 :meth:`TasksStore._load` 的双向修复兜底（docs §10 § "tasks/state.json
+        与 <id>/task.json 不一致"）。
+        """
+        _log.exception("%s: 落盘失败", where)
+        self._emit_notice(
+            sink, level=NOTICE_LEVEL_ERROR,
+            text=f"{where}: 落盘失败（{err}）；请检查磁盘空间 / 目录权限",
+        )
 
     async def _inbound_user_message(self, data: dict, sink: EnvelopeSink) -> None:
         text = data.get("text")
@@ -1453,9 +1833,18 @@ class ChahuaServer:
             # 老前端 / wscat 直发场景。
             _log.warning("user_message dropped: previous turn still in flight")
             return
+        snapshot_task_id = self._snapshot_active_task_id()
         self._inflight_turn_task = asyncio.create_task(
-            self._run_turn(text, sink), name="chahua-turn"
+            self._run_turn(text, sink, task_id=snapshot_task_id),
+            name="chahua-turn",
         )
+
+    def _snapshot_active_task_id(self) -> Optional[str]:
+        """接帧同步快照当前 active task —— 不能延到 _run_turn 里再读：从这次
+        ``create_task`` 到 turn 被调度之间，inbound 队列里排在后面的 ``open_task`` 会改
+        active，回追后已经在 transcript 里的用户消息会被错挂到新任务上。
+        """
+        return self._session.orchestrator.snapshot_active_task_id()
 
 
 # inbound 帧类型 → handler unbound method 的注册表。``_handle_inbound`` 拿到 type
@@ -1486,6 +1875,10 @@ _INBOUND_HANDLERS: dict[str, _InboundHandler] = {
     INBOUND_IMPORT_PERSONA_GITHUB: ChahuaServer._inbound_import_persona_github,
     INBOUND_UPLOAD_FILE: ChahuaServer._inbound_upload_file,
     INBOUND_EXPORT_ROOM: ChahuaServer._inbound_export_room,
+    INBOUND_OPEN_TASK: ChahuaServer._inbound_open_task,
+    INBOUND_UPDATE_TASK: ChahuaServer._inbound_update_task,
+    INBOUND_ATTACH_ARTIFACT: ChahuaServer._inbound_attach_artifact,
+    INBOUND_ADD_DECISION: ChahuaServer._inbound_add_decision,
     INBOUND_USER_MESSAGE: ChahuaServer._inbound_user_message,
 }
 

@@ -36,6 +36,7 @@ class _StubGuest:
         turn_id,
         sink,
         cancellation_token=None,
+        task_id=None,
     ):
         message_id = new_message_id()
         sink(
@@ -47,7 +48,9 @@ class _StubGuest:
                 type=ChahuaEventType.MESSAGE_START,
             )
         )
-        msg = self._room.append(self.name, "(stub reply)", message_id=message_id)
+        msg = self._room.append(
+            self.name, "(stub reply)", message_id=message_id, task_id=task_id,
+        )
         sink(
             ChahuaEnvelope(
                 room_id=self._room.name,

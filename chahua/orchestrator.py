@@ -28,7 +28,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
+
+# Sentinel for "task_id arg not passed" —— 区分 None（显式无任务）vs 缺省（要内部 snapshot）。
+_UNSET: Any = object()
 
 from .cursor import GuestCursor
 from .events import (
@@ -45,6 +48,7 @@ from .guest import TeaGuest
 from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
 from .summarizer import Summarizer
+from .tasks_store import TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 
 _log = logging.getLogger(__name__)
@@ -179,6 +183,7 @@ class Orchestrator:
         summarizer: Summarizer,
         cursor: GuestCursor,
         config: OrchestratorConfig = OrchestratorConfig(),
+        tasks_store: Optional[TasksStore] = None,
     ) -> None:
         self.room = room
         self.user_config = user_config
@@ -186,6 +191,10 @@ class Orchestrator:
         self.summarizer = summarizer
         self.cursor = cursor
         self.config = config
+        # ``None`` = 测试 / 程序化驱动场景；正常装配（session.py）注入房间唯一 store。
+        # orchestrator 仅在 ``submit_user_message`` 入口 snapshot 一次 ``active_task_id``，
+        # 保证整轮归属同一 task；用户在 turn 中改 active 不回追已开的发言（docs §4.4）。
+        self.tasks_store = tasks_store
 
         self._guests: dict[str, _GuestEntry] = {}
         # 茶客名 → 剩余冷却轮数（每个"AI 子轮"递减 1，到 0 解冻）。
@@ -244,32 +253,54 @@ class Orchestrator:
 
     # ── 主入口 ─────────────────────────────────────────────────────────
 
+    def snapshot_active_task_id(self) -> Optional[str]:
+        """读当前 active task id —— 给服务端在 inbound 接帧时同步快照本轮归属用。
+
+        必须在 inbound 接帧的同步上下文里调（accept 那一刻就锁定），不能延到
+        ``submit_user_message`` 里再读 —— 否则在 server 已 ``create_task`` 但 task 还没
+        被调度的窗口里，一条 ``open_task`` inbound 会偷胜把后续 chat tag 改成新任务。
+        """
+        return self.tasks_store.active_task_id if self.tasks_store is not None else None
+
     async def submit_user_message(
         self,
         text: str,
         *,
         sink: Optional[EnvelopeSink] = None,
+        task_id: Any = _UNSET,
     ) -> None:
         """处理一条用户消息，跑到本回合结束（轮上限 / 没人想接话 / 失败）。
 
         所有前端事件走 ``sink``；``None`` = :data:`NOOP_SINK`（程序化驱动 / 测试常用）。
         本入口不 emit 用户消息事件 —— 用户消息进 transcript 是同步行为，CLI / UI 不
         依赖事件回放（前端打了字就是打了字）。
+
+        ``task_id`` 为本轮的 task 归属，sentinel-distinguished：
+
+        - 未传 = 入口现读 ``snapshot_active_task_id()`` —— CLI / 测试这类无 race 的同步
+          调用走这条路。
+        - 显式传值（含 ``None``）= 用传入值，不回读 store —— server 端必须在接帧同步上下文
+          先 snapshot 再传，防止 schedule 与协程实际运行之间 ``open_task`` 偷胜改 active。
         """
         if not text:
             return
         if sink is None:
             sink = NOOP_SINK
-        self.room.append(USER_SPEAKER_ID, text)
+        active_task_id: Optional[str] = (
+            self.snapshot_active_task_id() if task_id is _UNSET else task_id
+        )
+        self.room.append(USER_SPEAKER_ID, text, task_id=active_task_id)
         self._consecutive_ai_turns = 0
         self._rounds_without_user_or_mention = 0
         self._tick_cooldown()
         self._kick_summarize()
-        await self._run_ai_chain(sink=sink)
+        await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
 
     # ── AI 链 ─────────────────────────────────────────────────────────
 
-    async def _run_ai_chain(self, *, sink: EnvelopeSink) -> None:
+    async def _run_ai_chain(
+        self, *, sink: EnvelopeSink, active_task_id: Optional[str] = None
+    ) -> None:
         # 上一轮已经 emit ``turn_end(next='ai')``、UI 仍守在"停止"按钮等下一个 turn_start
         # 的那个 turn_id；下一次 pick 成功（emit 新 turn_start / turn_end）就清零，pick 失败
         # 则用这个 id 补一帧 ``turn_end(next='user')`` 让 UI 收回按钮。None = 无未结链。
@@ -326,7 +357,10 @@ class Orchestrator:
                 for guest_name in winners:
                     if not bypass_inner_cap and self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
                         break
-                    await self._let_speak(guest_name, turn_id=turn_id, sink=sink)
+                    await self._let_speak(
+                        guest_name, turn_id=turn_id, sink=sink,
+                        task_id=active_task_id,
+                    )
                     self._consecutive_ai_turns += 1
                     self._rounds_without_user_or_mention += 1
             except asyncio.CancelledError:
@@ -515,13 +549,20 @@ class Orchestrator:
     # ── 发言 ──────────────────────────────────────────────────────────
 
     async def _let_speak(
-        self, guest_name: str, *, turn_id: str, sink: EnvelopeSink
+        self,
+        guest_name: str,
+        *,
+        turn_id: str,
+        sink: EnvelopeSink,
+        task_id: Optional[str] = None,
     ) -> None:
         entry = self._guests[guest_name]
         ctx = self._build_context_for(guest_name)
         # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
         # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
-        msg = await entry.guest.speak(ctx, turn_id=turn_id, sink=sink)
+        msg = await entry.guest.speak(
+            ctx, turn_id=turn_id, sink=sink, task_id=task_id,
+        )
         if msg is None:
             # 失败的发言不进 transcript（§3.5.2），冷却也不启动 —— 让他下一轮还有机会。
             return

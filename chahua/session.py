@@ -29,6 +29,7 @@ from .persona_assets import discover_assets, persona_relative
 from .room import Room
 from .scoring import IntentScorer
 from .summarizer import Summarizer
+from .tasks_store import TasksStore
 from .trust import is_mcp_trusted
 from .user_md import USER_SPEAKER_ID, UserConfig, load_user_md
 
@@ -173,6 +174,11 @@ class RoomSession:
     guest_specs: dict[str, LLMSpec]
     """每位茶客的 effective LLM spec（``gc.llm`` 或 fallback 到 room_default）。
     keys 与 :attr:`guests` 的 ``name`` 一一对应；envelope 渲染时按这个出"哪位茶客用什么"。"""
+
+    tasks_store: TasksStore
+    """房间级任务存储。整个 session 生命周期复用一份。server inbound handler / orchestrator
+    写 transcript 时取 ``active_task_id`` 都走这个单例 —— 别在外面再 ``TasksStore(room_dir=...)``
+    实例化（会绕过内存镜像导致双 source 不一致）。"""
 
     def close(self) -> None:
         for guest in self.guests:
@@ -364,6 +370,8 @@ def build_room_session(
         room_config.orchestrator_overrides, explicit=orchestrator_config
     )
 
+    tasks_store = TasksStore(room_dir=room_config.room_dir)
+
     orchestrator = Orchestrator(
         room=room,
         user_config=user_config,
@@ -371,6 +379,7 @@ def build_room_session(
         summarizer=Summarizer(summary_client, summary_path=summary_path),
         cursor=GuestCursor(cursor_path=cursor_path),
         config=effective_orch_config,
+        tasks_store=tasks_store,
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
@@ -385,4 +394,5 @@ def build_room_session(
         scoring_spec=scoring_spec,
         summary_spec=summary_spec,
         guest_specs=guest_specs,
+        tasks_store=tasks_store,
     )

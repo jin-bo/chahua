@@ -13,13 +13,12 @@ P0 是纯内存 transcript。P2.1 加 ``transcript.jsonl`` 落盘 / 启动加载
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
 from ._persist import append_jsonl, read_jsonl_skip_bad
-from .events import new_message_id
+from .events import new_message_id, now_ms
 
 _log = logging.getLogger(__name__)
 
@@ -38,30 +37,61 @@ class Message:
 
     message_id: str
 
+    task_id: Optional[str] = None
+    """消息所属任务的 ID；``None`` = 房间级闲聊。旧 transcript.jsonl 行无此字段（加载为
+    ``None``），与"新建任务后才开始挂 task_id"的零侵入迁移口径一致（docs §7.1 / §10）。"""
+
     def to_jsonl_dict(self) -> dict:
-        """落盘形态。字段顺序固定，方便人眼扫 jsonl。"""
-        return {
+        """落盘形态。字段顺序固定，方便人眼扫 jsonl。
+
+        ``task_id == None`` 时**不写**这个键 —— 旧 transcript 兼容、未启用任务功能的房间
+        不会因为加一列空字段把 jsonl 行宽炸开一倍。
+        """
+        out: dict = {
             "seq": self.seq,
             "speaker_id": self.speaker_id,
             "message_id": self.message_id,
             "ts_ms": self.ts_ms,
             "text": self.text,
         }
+        if self.task_id is not None:
+            out["task_id"] = self.task_id
+        return out
 
     @classmethod
     def from_jsonl(cls, obj: dict) -> Optional["Message"]:
-        """从 jsonl 行重建。字段缺失 / 类型错 → ``None`` + WARN（行被跳过）。"""
+        """从 jsonl 行重建。必需字段缺失 / 类型错 → ``None`` + WARN（行被跳过）。
+
+        ``task_id`` 可缺（旧行）或为 ``null``；非 str 类型 → WARN 后视为 ``None`` —— 不
+        因单消息的 tag 字段不合法让这条历史发言消失（沿用 P5.1 落盘宽容）。
+        """
         try:
-            return cls(
-                seq=int(obj["seq"]),
-                speaker_id=str(obj["speaker_id"]),
-                text=str(obj["text"]),
-                ts_ms=int(obj["ts_ms"]),
-                message_id=str(obj["message_id"]),
-            )
+            seq = int(obj["seq"])
+            speaker_id = str(obj["speaker_id"])
+            text = str(obj["text"])
+            ts_ms = int(obj["ts_ms"])
+            message_id = str(obj["message_id"])
         except (KeyError, TypeError, ValueError):
             _log.warning("skip malformed transcript record: %r", obj)
             return None
+        task_id_raw = obj.get("task_id")
+        task_id: Optional[str] = None
+        if task_id_raw is not None:
+            if isinstance(task_id_raw, str):
+                task_id = task_id_raw
+            else:
+                _log.warning(
+                    "message %s: task_id=%r 非 str / null，忽略",
+                    message_id, task_id_raw,
+                )
+        return cls(
+            seq=seq,
+            speaker_id=speaker_id,
+            text=text,
+            ts_ms=ts_ms,
+            message_id=message_id,
+            task_id=task_id,
+        )
 
 
 @dataclass
@@ -134,6 +164,7 @@ class Room:
         text: str,
         *,
         message_id: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> Message:
         """追加一条发言，返回带 seq / message_id 的 :class:`Message`。
 
@@ -143,6 +174,10 @@ class Room:
         ``message_id`` 可由调用方传入 —— :meth:`TeaGuest.speak` 在 envelope
         message_start 时就分配 ID，要求与最终落 transcript 的 ID 一致以便前端把
         流式 chunk 与持久化 record 串起来。``None`` 时本函数兜底分配。
+
+        ``task_id`` 把消息归到某个任务；``None`` = 房间级闲聊。orchestrator / server 在
+        append 入口按 ``TasksStore.active_task_id`` 自动取值（docs §4.4），:class:`Room`
+        本身不知道任务存在 —— 只是把传入值原样落盘。
 
         ``transcript_path`` 非空时同步追加一行 jsonl；写失败抛 OSError 让上层看见 ——
         持久化掉队会让重启后游标错位，比"假装写成功"诚实。
@@ -157,8 +192,9 @@ class Room:
             seq=len(self._messages) + 1,
             speaker_id=speaker_id,
             text=text,
-            ts_ms=int(time.time() * 1000),
+            ts_ms=now_ms(),
             message_id=message_id or new_message_id(),
+            task_id=task_id,
         )
         self._messages.append(msg)
         if self.transcript_path is not None:

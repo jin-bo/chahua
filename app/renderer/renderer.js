@@ -911,6 +911,8 @@ function connect() {
     connected = false;
     setInputEnabled(false);
     closeInFlightOnDisconnect();
+    // 拒绝所有等 echo 的上传，让 change handler 的 finally 清 isUploading + 启用附件按钮。
+    upload.dropPending(`ws closed (${ev.code})`);
     // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
     currentTurnId = null;
     updateSendButton();
@@ -1156,6 +1158,11 @@ composer.addEventListener("submit", (ev) => {
   if (currentTurnId !== null) {
     ws.send(JSON.stringify({ type: Inbound.CANCEL, turn_id: currentTurnId }));
     setStatus("", "已请求停止…");
+    return;
+  }
+  if (upload.isUploading()) {
+    // 还有文件在上传中 —— snapshotRels 此刻只含已收到 echo 的；强发会丢已选的 attach。
+    setStatus("", "文件还在上传，等所有 pill 出现后再发。");
     return;
   }
   const text = textInput.value.trim();

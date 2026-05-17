@@ -75,6 +75,15 @@ class ChahuaEventType(str, Enum):
     # 文件名）+ `markdown`（utf-8 字符串）。前端走 Blob + a.download 触发浏览器下载，
     # **不写服务器盘**（导出物只活在用户机器上）。
     ROOM_EXPORT = "room_export"
+    # P5.1 任务房间。事件分工（docs/P5-任务房间.md §4.2）：``TASK_INFO`` 是**权威快照**
+    # （ws 连上 / 切房 / active 变化 / 任意 task 状态变更后重发整份），其它四个是 **hint**
+    # —— 给前端做 toast / 动画 / 高亮增量项，前端任务状态以最近一次 ``TASK_INFO`` 为准。
+    # 全部不挂房间 turn，turn_id / message_id / guest_name 都为 None。
+    TASK_INFO = "task_info"
+    TASK_OPEN = "task_open"
+    TASK_UPDATE = "task_update"
+    TASK_DECISION_ADDED = "task_decision_added"
+    TASK_ARTIFACT_ADDED = "task_artifact_added"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。
@@ -87,22 +96,29 @@ NOTICE_LEVEL_INFO = "info"
 NOTICE_LEVEL_ERROR = "error"
 
 
-def _new_id(prefix: str, n_bytes: int = 10) -> str:
+def new_id(prefix: str, n_bytes: int = 10) -> str:
+    """``<prefix>_<n_bytes*2 hex>``。茶话室所有 ID（turn / msg / task / dec）共用一个 mint
+    口径 —— 改前缀长度只动一处。"""
     return f"{prefix}_{secrets.token_hex(n_bytes)}"
 
 
 def new_turn_id() -> str:
     """``turn_<10字节 hex>`` —— 与 :func:`new_message_id` 同长度，方便扫读。"""
-    return _new_id("turn")
+    return new_id("turn")
 
 
 def new_message_id() -> str:
     """``msg_<10字节 hex>``。前端 envelope 与 transcript.jsonl 共用同一 ID。"""
-    return _new_id("msg")
+    return new_id("msg")
 
 
-def _now_ms() -> int:
+def now_ms() -> int:
+    """毫秒级 Unix 时间戳。所有持久化记录 / envelope 的 ``ts_ms`` 共用此口径。"""
     return int(time.time() * 1000)
+
+
+# 兼容旧调用方（envelope 字段 default_factory）。新代码用 :func:`now_ms`。
+_now_ms = now_ms
 
 
 @dataclass(frozen=True, slots=True)

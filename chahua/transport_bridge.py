@@ -54,6 +54,9 @@ class ChahuaTransport(SdkTransport):
         self._guest_name = guest_name
         self._turn_id: Optional[str] = None
         self._message_id: Optional[str] = None
+        # 每次 :meth:`bind` 时从 :class:`TeaGuest.speak` 接管的 active task；用 envelope
+        # ``data.task_id`` 透出去，让前端把流式 chunk 与任务面板挂钩。
+        self._task_id: Optional[str] = None
         self._partial: list[str] = []
 
     # ── per-speak 生命周期 ─────────────────────────────────────────────────
@@ -65,16 +68,21 @@ class ChahuaTransport(SdkTransport):
         sink: EnvelopeSink,
         turn_id: str,
         message_id: str,
+        task_id: Optional[str] = None,
     ) -> Iterator["ChahuaTransport"]:
-        """绑定一次 speak() 的 (sink, turn_id, message_id)；退出时复位。
+        """绑定一次 speak() 的 (sink, turn_id, message_id [, task_id])；退出时复位。
 
         ``with self._transport.bind(...): self._transport.emit_chahua(...)`` ——
         把"开 envelope / 任何路径都得复位"用 Python 语法收紧，避免 set/clear 配对
         在 speak() 的多 except 分支里手抖漏掉。partial_text 缓冲在进入 with 时清。
+
+        ``task_id``：本轮 message_* envelope 的 ``data.task_id``。``None`` = 房间级闲聊，
+        data 里不写这个键（envelope schema 不变，老前端无感）。
         """
         self._sink = sink
         self._turn_id = turn_id
         self._message_id = message_id
+        self._task_id = task_id
         self._partial.clear()
         try:
             yield self
@@ -84,6 +92,7 @@ class ChahuaTransport(SdkTransport):
             self._sink = NOOP_SINK
             self._turn_id = None
             self._message_id = None
+            self._task_id = None
 
     @property
     def partial_text(self) -> str:
@@ -102,6 +111,10 @@ class ChahuaTransport(SdkTransport):
     ) -> None:
         """合成 envelope 走 sink。turn_id / message_id 取当前 :meth:`bind` 的值；
         没绑就丢 + WARN（防 agentao 在 speak() 外异步 emit 误流入）。
+
+        bind 时若传了 ``task_id``，自动塞到 ``data.task_id`` —— envelope schema_version
+        不变，前端 reducer 按 ``data.task_id`` 把流式 chunk 挂到任务面板。``None`` 时不写键，
+        老前端不感知。
         """
         if self._turn_id is None:
             _log.warning(
@@ -109,6 +122,11 @@ class ChahuaTransport(SdkTransport):
                 type.value,
             )
             return
+        # 无任务时跳过 dict 拷贝 —— message_delta 每个 chunk 都过这里，常见场景是房间级闲聊。
+        if self._task_id is None:
+            merged: Mapping[str, Any] = data or {}
+        else:
+            merged = {**(data or {}), "task_id": self._task_id}
         emit_to_sink(
             self._sink,
             ChahuaEnvelope(
@@ -119,7 +137,7 @@ class ChahuaTransport(SdkTransport):
                 type=type,
                 status=status,
                 seq=seq,
-                data=data or {},
+                data=merged,
             ),
         )
 

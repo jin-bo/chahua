@@ -73,6 +73,10 @@ class _SpyServer(ChahuaServer):
     async def _cancel_and_drain_inflight(self) -> None:  # type: ignore[override]
         self.cancel_drain_count += 1
 
+    def _snapshot_active_task_id(self):  # type: ignore[override]
+        # 路由测不挂真 session；user_message 路径需要它返回 None 才不去访问 self._session。
+        return None
+
     def _cancel_inflight(self) -> None:  # type: ignore[override]
         self.calls.append(("_cancel_inflight", {}))
 
@@ -84,6 +88,10 @@ class _SpyServer(ChahuaServer):
 
     def _emit_notice(self, sink, *, level: str, text: str) -> None:  # type: ignore[override]
         self.notices.append((level, text))
+
+    def _fail_upload(self, sink, *, original: str, text: str) -> None:  # type: ignore[override]
+        # 路由测不挂真 session；记 NOTICE 即可，envelope 构造跳过避免访问 self._session。
+        self.notices.append(("error", text))
 
     # 每个 mutator 同款：拍下 kwargs。
     def _switch_room(self, room_id, sink):  # type: ignore[override]
@@ -173,7 +181,7 @@ class _SpyServer(ChahuaServer):
         # 把 op 留下来，让测试断言它是 partial / lambda 即可，不真跑导入。
         self.calls.append(("_run_import", {"label": label}))
 
-    async def _run_turn(self, text, sink):  # type: ignore[override]
+    async def _run_turn(self, text, sink, *, task_id=None):  # type: ignore[override]
         self.run_turn_args.append(text)
 
 
@@ -576,11 +584,24 @@ async def test_upload_file_ok(srv: _SpyServer):
     {"type": INBOUND_UPLOAD_FILE, "content_b64": "x"},          # 没 filename
     {"type": INBOUND_UPLOAD_FILE, "filename": "a.txt"},          # 没 content_b64
     {"type": INBOUND_UPLOAD_FILE, "filename": "", "content_b64": "x"},
-    {"type": INBOUND_UPLOAD_FILE, "filename": "a", "content_b64": ""},
+    # 注：``filename="a", content_b64=""``（零字节文件）现在是合法上传 ——
+    # _inbound_upload_file 会把它喂给 _upload_file，base64.b64decode("") = b""。
 ])
 async def test_upload_file_bad_payload(srv: _SpyServer, payload):
     await srv._handle_inbound(payload, _sink)
     assert srv.calls == []
+
+
+async def test_upload_file_zero_byte_passes_through(srv: _SpyServer):
+    """零字节文件 content_b64="" 是合法上传 —— 透传到 _upload_file，前端串行循环靠
+    FILE_UPLOADED echo 推进队列；inbound 早返不发 echo 会让前端永挂（codex round 10）。"""
+    await srv._handle_inbound(
+        {"type": INBOUND_UPLOAD_FILE, "filename": "empty.txt", "content_b64": ""},
+        _sink,
+    )
+    assert srv.calls == [
+        ("_upload_file", {"filename": "empty.txt", "content_b64": ""}),
+    ]
 
 
 async def test_export_room_dispatches(srv: _SpyServer):
