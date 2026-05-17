@@ -1133,8 +1133,9 @@ const taskPanel = createTaskPanel({
   getGuestNames: () => guests.map((g) => g.name),
 });
 
-// 茶客 propose 卡片渲染 + 去重。renderSidebar 进新房时调 reset() 清跨房间 dedup。
-const proposalCard = createProposalCard({ messagesEl });
+// 茶客 propose 卡片渲染 + 去重 + 采纳/忽略闭环。renderSidebar 进新房时调 reset() 清
+// 跨房间 dedup；采纳按钮按 kind 拼 ADD_DECISION / OPEN_TASK inbound 走既有 server handler。
+const proposalCard = createProposalCard({ messagesEl, sendInbound: send });
 
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json

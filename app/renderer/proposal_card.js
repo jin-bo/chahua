@@ -3,7 +3,7 @@
 // 茶客 propose 卡片渲染 + 去重（docs/P5-任务房间.md §6.3）。
 // hint 事件不持久化：刷新页面 + reset() （切房 / clear_room 回环时调）会清空去重指纹。
 
-import { EventType, TaskProposalKind } from "./events.js";
+import { EventType, Inbound, TaskProposalKind } from "./events.js";
 
 // (proposer, kind, payload-hash) 指纹集合 —— 反复刷同一 propose 时只渲染一张。
 // 模块级；renderer.js 在 renderSidebar 入口调 reset() 清，避免跨房间残留。
@@ -87,16 +87,45 @@ function findHostBubble(messagesEl, messageId) {
   return messagesEl.querySelector(`li[data-message-id="${cssEscape(messageId)}"]`);
 }
 
+function buildAcceptInbound(data, taskId) {
+  // 把 propose envelope 转译成既有 inbound（CLAUDE.md "写权限永远在用户"）：
+  //   kind=decision → ADD_DECISION（task_id 必填）
+  //   kind=open     → OPEN_TASK（不依赖当前 active）
+  // 返回 null 表示 payload 不合法 / 缺前置条件，调用方禁用按钮并提示。
+  const payload = data.payload || {};
+  if (data.kind === TaskProposalKind.DECISION) {
+    if (!taskId) return null;  // decision 必须挂某个 task，没就拒绝采纳
+    const summary = typeof payload.summary === "string" ? payload.summary : "";
+    if (!summary) return null;
+    const supRaw = Array.isArray(payload.supporting_message_ids)
+      ? payload.supporting_message_ids
+      : [];
+    const supporting = supRaw.filter((x) => typeof x === "string");
+    return {
+      type: Inbound.ADD_DECISION,
+      task_id: taskId,
+      summary,
+      supporting_message_ids: supporting,
+    };
+  }
+  if (data.kind === TaskProposalKind.OPEN) {
+    const title = typeof payload.title === "string" ? payload.title : "";
+    const goal = typeof payload.goal === "string" ? payload.goal : "";
+    if (!title || !goal) return null;
+    return { type: Inbound.OPEN_TASK, title, goal };
+  }
+  return null;
+}
+
 // 创建一只 proposal card 渲染器实例。
 //
 //   messagesEl   消息流容器（按 messageId 找宿主气泡）。
+//   sendInbound  ws 帧发送闭包（payload obj → JSON ws.send）；renderer.js 持。
 //
 // 返回 { onEnvelope(env), reset() }：
 //   onEnvelope —— renderer.js 在 EventType.TASK_PROPOSAL 路径上调一次。
-//   reset      —— 切房 / clear_room 回环时调，清掉跨房间累积的去重指纹。
-//
-// 采纳按钮的 inbound 帧组装目前是占位（按钮禁用 + 状态文案）。
-export function createProposalCard({ messagesEl }) {
+//   reset      —— 切房 / clear_room 回环时调，清跨房间累积的去重指纹。
+export function createProposalCard({ messagesEl, sendInbound }) {
   function onEnvelope(env) {
     if (env.type !== EventType.TASK_PROPOSAL) return;
     const data = env.data || {};
@@ -104,8 +133,8 @@ export function createProposalCard({ messagesEl }) {
 
     const host = findHostBubble(messagesEl, env.message_id);
     if (!host) {
-      // hint 找不到挂点（已切场景 / 已 clear_room）：丢弃且不留指纹 —— 否则下次同 propose
-      // 真有挂点时也会被错误 dedup 掉。
+      // hint 找不到挂点（已切场景 / 已 clear_room）：丢弃且不留指纹 —— 否则下次同
+      // propose 真有挂点时也会被错误 dedup 掉。
       return;
     }
 
@@ -128,18 +157,33 @@ export function createProposalCard({ messagesEl }) {
     const actions = document.createElement("div");
     actions.className = "proposal-card-actions";
 
+    // 解析采纳 inbound：拼好后留闭包用；null 表示 payload 不合法（缺 task / 缺字段），
+    // 采纳按钮渲成 disabled + 文案提示。
+    const taskId = typeof data.task_id === "string" ? data.task_id : null;
+    const inbound = buildAcceptInbound(data, taskId);
+
     const acceptBtn = document.createElement("button");
     acceptBtn.type = "button";
     acceptBtn.className = "proposal-card-accept";
     acceptBtn.textContent = "采纳";
-    acceptBtn.addEventListener("click", () => {
-      // 占位实现 —— 把 inbound 帧组装放在后续 wiring 提交完成。
-      actions.querySelectorAll("button").forEach((b) => (b.disabled = true));
-      const status = document.createElement("span");
-      status.className = "proposal-card-status";
-      status.textContent = "（采纳后端 wiring 待接入）";
-      actions.appendChild(status);
-    });
+    if (inbound === null) {
+      acceptBtn.disabled = true;
+      acceptBtn.title =
+        data.kind === TaskProposalKind.DECISION
+          ? "需要附在某个任务上才能采纳"
+          : "字段不齐，无法采纳";
+    } else {
+      acceptBtn.addEventListener("click", () => {
+        sendInbound(inbound);
+        // 采纳后双按钮锁住 + 卡片留在原位作为历史痕迹；server 回环 TASK_INFO + 对应 hint
+        // 会让任务面板更新。
+        actions.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        const status = document.createElement("span");
+        status.className = "proposal-card-status";
+        status.textContent = "已采纳";
+        actions.appendChild(status);
+      });
+    }
 
     const ignoreBtn = document.createElement("button");
     ignoreBtn.type = "button";
