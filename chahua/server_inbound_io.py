@@ -34,11 +34,25 @@ INBOUND_IMPORT_PERSONA_FOLDER = "import_persona_folder"
 INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
 INBOUND_EXPORT_ROOM = "export_room"
+INBOUND_DOWNLOAD_FILE = "download_file"
 
 
 # 单文件上限。WS 入站帧 max=300MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
 # 文件极限 ~225MB。设 200MB 让 JSON quoting + 字段开销有头。改大要同步抬 ws max_size。
 _UPLOAD_MAX_BYTES = 200 * 1024 * 1024
+
+# 下载同上限：encode 后帧大小经 ws 出口（无单独 outbound 上限，只有底层 WebSocket
+# max_size 制约对端 inbound）—— 与上传同口径让用户心智一致："能传上来的也能拉回去"。
+_DOWNLOAD_MAX_BYTES = _UPLOAD_MAX_BYTES
+
+# 允许下载的 rel 前缀白名单。``share/`` = 房间公共桌面；``tasks/<id>/artifacts/`` = 任务
+# 产物。其它路径（room.toml / transcript.jsonl / .agentao/... / tasks/state.json /
+# tasks/<id>/task.json / decisions.jsonl / events.jsonl）一律拒，防穿越读盘。
+#
+# 注意：``tasks/`` 前缀**单独不够**——`startswith("tasks/")` 会放进 ``tasks/state.json``
+# / ``tasks/<id>/task.json`` 等内部元数据。所以 ``_download_file`` 额外强制 ``tasks/``
+# 路径必须是 ``tasks/<id>/artifacts/<name>`` 形 4 段且段[2] == "artifacts"。
+_DOWNLOAD_ALLOWED_PREFIXES = ("share/", "tasks/")
 
 
 def _import_success_text(result: "persona_import.ImportedPersona") -> str:
@@ -250,3 +264,113 @@ class IOHandlers:
     async def _inbound_export_room(self, data: dict, sink: EnvelopeSink) -> None:
         # read-only：不动 session、不挡 inflight turn。
         self._export_room(sink)
+
+    def _download_file(self, *, rel: str, sink: EnvelopeSink) -> None:
+        """按 ``rel`` 把房间内文件读出 + base64 后回吐 ``FILE_DOWNLOAD``。
+
+        - 仅接受 :data:`_DOWNLOAD_ALLOWED_PREFIXES` 前缀的 rel。绝对路径 / 包含 ``..``
+          / 反斜杠都直接拒；解析后路径必须落在 ``room_dir`` 子树内（symlink 解析后再校
+          验，防 share/ 内放符号链接指出房间）。
+        - 超 :data:`_DOWNLOAD_MAX_BYTES` 拒（base64 后帧太大触发对端 ws 断线噩梦）。
+        - **每次入站请求恒发一条** ``FILE_DOWNLOAD`` envelope（成功 / 失败），失败路径
+          同时 emit NOTICE error 给用户看，与 upload 对仗。
+        """
+        original_rel = rel
+        if not isinstance(rel, str) or not rel:
+            self._fail_download(sink, rel=original_rel, text="rel 缺失或非字符串")
+            return
+        # 反斜杠 / 绝对路径 / 空段 / .. 全部拒。Windows 上 PurePosix 拆出来的段不会含 \\，
+        # 显式过滤避免误把 "share\\evil" 当成 share/ 子文件。
+        if "\\" in rel or rel.startswith("/"):
+            self._fail_download(sink, rel=original_rel, text="rel 含非法字符或绝对路径")
+            return
+        if not rel.startswith(_DOWNLOAD_ALLOWED_PREFIXES):
+            self._fail_download(
+                sink, rel=original_rel,
+                text=f"rel 不在白名单前缀内（仅允许 {'/'.join(_DOWNLOAD_ALLOWED_PREFIXES)}）",
+            )
+            return
+        # 拆段做 traversal 检查 —— 任何空段 / "." / ".." 都拒。
+        segments = rel.split("/")
+        if any(seg in ("", ".", "..") for seg in segments):
+            self._fail_download(sink, rel=original_rel, text="rel 含非法路径段")
+            return
+        # tasks/ 前缀必须严格落在 tasks/<id>/artifacts/<name>+ 形（≥4 段，segments[2] ==
+        # "artifacts"）—— 防 tasks/state.json / tasks/<id>/task.json / decisions.jsonl /
+        # events.jsonl 等内部元数据被 download_file 套出去。share/ 不做段数限制（多层子
+        # 目录是合法用法，且无敏感元数据混在 share/ 下）。
+        if segments[0] == "tasks" and (len(segments) < 4 or segments[2] != "artifacts"):
+            self._fail_download(
+                sink, rel=original_rel,
+                text="rel 必须形如 tasks/<id>/artifacts/<name>",
+            )
+            return
+        try:
+            room_dir = self.server._session.room_config.room_dir
+            target = (room_dir / rel).resolve()
+            # resolve 后必须仍落在**具体白名单子目录**下，而不只是 room_dir 子树 ——
+            # 否则 ``share/x -> ../tasks/state.json`` 形的 symlink 会绕过段形检查
+            # （rel 看起来是 share/x，resolve 后是 tasks/state.json，仍在 room_dir 内）。
+            # share/ → ``room_dir/share``；tasks/<id>/artifacts/<...> → ``room_dir/tasks/<id>/artifacts``。
+            if segments[0] == "share":
+                allowed_root = (room_dir / "share").resolve()
+            else:
+                allowed_root = (
+                    room_dir / "tasks" / segments[1] / "artifacts"
+                ).resolve()
+            target.relative_to(allowed_root)
+        except (OSError, ValueError) as e:
+            self._fail_download(sink, rel=original_rel, text=f"路径解析失败：{e}")
+            return
+        if not target.is_file():
+            self._fail_download(sink, rel=original_rel, text="文件不存在或不是普通文件")
+            return
+        try:
+            size = target.stat().st_size
+        except OSError as e:
+            self._fail_download(sink, rel=original_rel, text=f"读盘失败：{e}")
+            return
+        if size > _DOWNLOAD_MAX_BYTES:
+            self._fail_download(
+                sink, rel=original_rel,
+                text=f"文件太大（{size} bytes，上限 {_DOWNLOAD_MAX_BYTES}）",
+            )
+            return
+        try:
+            data = target.read_bytes()
+        except OSError as e:
+            self._fail_download(sink, rel=original_rel, text=f"读盘失败：{e}")
+            return
+        content_b64 = base64.b64encode(data).decode("ascii")
+        _log.info("download_file: %s (%d bytes)", rel, size)
+        sink(
+            ChahuaEnvelope(
+                room_id=self.server._session.room.name,
+                turn_id=None, guest_name=None, message_id=None,
+                type=ChahuaEventType.FILE_DOWNLOAD,
+                data={
+                    "rel": rel,
+                    "name": target.name,
+                    "size": size,
+                    "content_b64": content_b64,
+                },
+            )
+        )
+
+    def _fail_download(self, sink: EnvelopeSink, *, rel: str, text: str) -> None:
+        """NOTICE error + FILE_DOWNLOAD(error) —— 与 _fail_upload 同口径。"""
+        self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
+        sink(
+            ChahuaEnvelope(
+                room_id=self.server._session.room.name,
+                turn_id=None, guest_name=None, message_id=None,
+                type=ChahuaEventType.FILE_DOWNLOAD,
+                data={"rel": rel if isinstance(rel, str) else "", "error": text},
+            )
+        )
+
+    async def _inbound_download_file(self, data: dict, sink: EnvelopeSink) -> None:
+        # 不动 session、不挡 inflight turn —— 纯读盘。
+        raw_rel = data.get("rel")
+        rel = raw_rel if isinstance(raw_rel, str) else ""
+        self._download_file(rel=rel, sink=sink)

@@ -859,6 +859,38 @@ function handleEnvelope(env) {
       setStatus("ok", `已导出 ${filename}`);
       return;
     }
+    case EventType.FILE_DOWNLOAD: {
+      // 失败路径：NOTICE 已弹过 alert，envelope 仅含 {rel, error}，跳过 Blob 流程。
+      const d = env.data || {};
+      if (d.error) return;
+      const b64 = d.content_b64;
+      const name = d.name || "download";
+      if (typeof b64 !== "string") return;
+      // base64 → Uint8Array → Blob。atob 一次性解码 ~200MB 在 Chromium 还稳；超大 base64
+      // 字符串在 ws 入站早就被 _DOWNLOAD_MAX_BYTES 拦了。
+      let bin;
+      try {
+        bin = atob(b64);
+      } catch (e) {
+        setStatus("error", `下载「${name}」失败：base64 解码出错`);
+        return;
+      }
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      // 走 application/octet-stream 让浏览器把它当下载而非 inline preview。具体 mime 类型
+      // 由扩展名决定，留给操作系统打开时自己识别。
+      const blob = new Blob([bytes], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus("ok", `已下载「${name}」`);
+      return;
+    }
     // guest_thinking / tool_* 暂时静默。
   }
 }
@@ -1131,6 +1163,13 @@ const taskPanel = createTaskPanel({
   // 每次重渲都 fresh 拉 —— 茶客加 / 删后 owner 下拉同步刷新（room_info 回环会触发
   // taskState 重渲，guests 已先一步在 renderSidebar 里更新）。
   getGuestNames: () => guests.map((g) => g.name),
+  // 产物 li 点击：发 download_file inbound，等 FILE_DOWNLOAD envelope 回吐后 Blob 触发
+  // 浏览器原生下载。断网时早返避免 send 抛。
+  onDownloadArtifact: (rel) => {
+    if (!connected) return;
+    send({ type: Inbound.DOWNLOAD_FILE, rel });
+    setStatus("", `下载「${rel}」…`);
+  },
 });
 
 // 茶客 propose 卡片渲染 + 去重 + 采纳/忽略闭环。renderSidebar 进新房时调 reset() 清

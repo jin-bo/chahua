@@ -106,6 +106,9 @@ export function createTaskPanel({
   // () => string[] —— 当前房间茶客名列表，给 owner 下拉用。每次重渲都 fresh 拉，避免
   // sidebar 加 / 删茶客后 owner 下拉里漏掉 / 残留人名。
   getGuestNames = null,
+  // (rel) → 发 download_file inbound 的回调。无 callback 时 artifact 不可点击（保留
+  // 纯只读概览语义，便于将来嵌只读视图）。
+  onDownloadArtifact = null,
 }) {
   let collapsed = collapsedPref.read();
   // othersOpen 提到工厂闭包：render 是 task_info 热路径（artifact / decision /
@@ -424,6 +427,21 @@ export function createTaskPanel({
         if (a.created_by && a.created_by !== "user") parts.push(`by ${a.created_by}`);
         detail.textContent = parts.join("，");
         li.appendChild(detail);
+        // 点条目 = 下载。rel 缺时不挂监听（保护性早返：server 端也会拒空 rel）。
+        // Enter/Space 键盘可达，与"其它任务"卡片同口径。
+        if (onDownloadArtifact && a.rel) {
+          li.classList.add("task-artifact-clickable");
+          li.tabIndex = 0;
+          li.title = `下载 ${a.name || a.rel}`;
+          const trigger = () => onDownloadArtifact(a.rel);
+          li.addEventListener("click", trigger);
+          li.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              trigger();
+            }
+          });
+        }
         return li;
       },
     });

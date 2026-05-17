@@ -68,6 +68,7 @@ from .server_inbound_admin import (
     INBOUND_UPDATE_ROOM_ORCHESTRATOR,
 )
 from .server_inbound_io import (
+    INBOUND_DOWNLOAD_FILE,
     INBOUND_EXPORT_ROOM,
     INBOUND_IMPORT_PERSONA_FOLDER,
     INBOUND_IMPORT_PERSONA_GITHUB,
@@ -804,6 +805,7 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_IMPORT_PERSONA_GITHUB: "io._inbound_import_persona_github",
     INBOUND_UPLOAD_FILE: "io._inbound_upload_file",
     INBOUND_EXPORT_ROOM: "io._inbound_export_room",
+    INBOUND_DOWNLOAD_FILE: "io._inbound_download_file",
     # task slot：任务房间六个 inbound（P5.2.5 起多 set_active_task / close_task）。
     INBOUND_OPEN_TASK: "task._inbound_open_task",
     INBOUND_UPDATE_TASK: "task._inbound_update_task",

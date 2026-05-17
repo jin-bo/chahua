@@ -521,6 +521,13 @@ body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; 
 .task-artifact { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
 .task-artifact-name { color: #333; word-break: break-all; flex: 1; }
 .task-artifact-detail { color: #999; font-size: 11px; flex-shrink: 0; }
+.task-artifact-clickable { cursor: pointer; }
+.task-artifact-clickable:hover { background: #f6efd9; border-color: #e0c068; }
+.task-artifact-clickable:hover .task-artifact-name { color: #6f4f1a; }
+.task-artifact-clickable:focus-visible {
+  outline: 2px solid #c89a3e;
+  outline-offset: 1px;
+}
 .task-decision-text { font-size: 13px; color: #333; line-height: 1.5; }
 .task-decision-meta { font-size: 11px; color: #999; margin-top: 2px; }
 

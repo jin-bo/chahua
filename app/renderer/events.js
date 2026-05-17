@@ -24,6 +24,9 @@ export const EventType = Object.freeze({
   // 服务端把整个房间 transcript 拼成 markdown 回吐：data.filename / data.markdown。
   // 前端走 Blob + a.download 触发浏览器下载，不写服务器盘。
   ROOM_EXPORT: "room_export",
+  // 服务端按前端 download_file inbound 请求把文件读出后回吐：
+  // 成功 {rel, name, size, content_b64} / 失败 {rel, error}。前端走 Blob + a.download。
+  FILE_DOWNLOAD: "file_download",
   // P5.1 任务房间（docs/P5-任务房间.md §4.2）。TASK_INFO 是权威快照：每次任务状态
   // 变更（open / update / decision / artifact）后服务端重发整份 {tasks, active_task_id}，
   // 前端任务状态以最近一次 TASK_INFO 为准。另外四个是 hint —— 给前端做 toast / 动画 /
@@ -95,6 +98,9 @@ export const Inbound = Object.freeze({
   UPLOAD_FILE: "upload_file",
   // 导出当前房间为 markdown。无 payload，服务端读 transcript 全量后回 ROOM_EXPORT。
   EXPORT_ROOM: "export_room",
+  // 下载房间内文件。payload: {rel: "share/<name>" | "tasks/<id>/artifacts/<name>"}。
+  // 服务端校验前缀 + 路径不穿越后回 file_download envelope。
+  DOWNLOAD_FILE: "download_file",
   // P5.1 / P5.2 任务房间 inbound（docs/P5-任务房间.md §4.3）。服务端成功后会重发整份
   // task_info（权威快照）+ emit 对应 hint envelope；前端不做乐观更新，等回环。
   OPEN_TASK: "open_task",

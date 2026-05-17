@@ -75,6 +75,11 @@ class ChahuaEventType(str, Enum):
     # 文件名）+ `markdown`（utf-8 字符串）。前端走 Blob + a.download 触发浏览器下载，
     # **不写服务器盘**（导出物只活在用户机器上）。
     ROOM_EXPORT = "room_export"
+    # 服务端按前端 ``download_file`` inbound 请求把文件读出后回吐。data 形态：
+    # 成功 ``{rel, name, size, content_b64}`` / 失败 ``{rel, error}``。前端走
+    # Blob + a.download 触发浏览器下载，不写本地盘。仅接受房间内 ``share/`` 或
+    # ``tasks/<id>/artifacts/`` 前缀的 rel —— 其它路径直接拒，防止穿越读盘。
+    FILE_DOWNLOAD = "file_download"
     # P5.1 任务房间。事件分工（docs/P5-任务房间.md §4.2）：``TASK_INFO`` 是**权威快照**
     # （ws 连上 / 切房 / active 变化 / 任意 task 状态变更后重发整份），其它四个是 **hint**
     # —— 给前端做 toast / 动画 / 高亮增量项，前端任务状态以最近一次 ``TASK_INFO`` 为准。
