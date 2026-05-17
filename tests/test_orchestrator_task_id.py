@@ -24,9 +24,10 @@ from chahua.events import (
 from chahua.orchestrator import Orchestrator, OrchestratorConfig
 from chahua.room import Room
 from chahua.scoring import IntentScorer, ScoreKind, ScoreResult
-from chahua.summarizer import Summarizer
 from chahua.tasks_store import TasksStore
 from chahua.user_md import USER_SPEAKER_ID, UserConfig
+
+from conftest import NoopSummarizer
 
 
 class _StubGuest:
@@ -80,27 +81,12 @@ class _ScripedScorer(IntentScorer):
         )
 
 
-class _NoopSummarizer(Summarizer):
-    def __init__(self) -> None:
-        pass
-
-    async def maybe_summarize(self, *args, **kwargs):
-        return None
-
-    def clear(self) -> None:
-        pass
-
-    @property
-    def summaries(self):
-        return ()
-
-
 def _build_orch(tmp_path: Path, room: Room, tasks_store):
     user_config = UserConfig(display_name="测试者", full_md=None, source=None)
     orch = Orchestrator(
         room=room, user_config=user_config,
         scorer=_ScripedScorer(),
-        summarizer=_NoopSummarizer(),
+        summarizer=NoopSummarizer(),
         cursor=GuestCursor(),
         config=OrchestratorConfig(
             max_consecutive_ai_turns=1,

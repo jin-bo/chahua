@@ -622,13 +622,9 @@ class Orchestrator:
     def _build_context_for(
         self, guest_name: str, *, task_id: Optional[str] = None
     ) -> str:
-        """组 prompt 上下文。``task_id`` 是 ``_let_speak`` 入口的 snapshot 值（P5.1.8
-        立下的语义：每轮归属固定，不读当前 store.active），P5.3.2 起注入到 task block。
-
-        路径分两叉：``last_seen==0`` 或增量超阈值走 onboarding 完整块；否则走 incremental
-        compact 块。task block 取数 + 渲染走 :meth:`_maybe_render_task_block`，对两路径
-        同源（仅 compact 与否不同），closed / 不存在 / 缺 store 都返 ``None`` 不注入。
-        """
+        """组 prompt 上下文。``task_id`` 是 ``_let_speak`` 入口的 snapshot 值（不读当前
+        store.active），P5.3.2 起注入到 task block；不存在 / 终结态由 :meth:`_maybe_render_task_block`
+        过滤后返 ``None``。"""
         last_seen = self.cursor.get(guest_name)
         increment = self.room.messages_since(last_seen)
         use_onboarding = (
@@ -650,12 +646,18 @@ class Orchestrator:
         ④ 任务终结态（done / abandoned）。前 4 个走 1 次 ``get_task`` 就出，不触碰其余
         三个 read API —— 闲聊回合 / closed task 时省掉 list_decisions / list_artifacts /
         task_summaries.get 三次 IO。
+
+        compact 路径再短路一次：renderer 在 compact=True 时只读 task.title / task.goal，
+        丢弃 decisions / artifacts / summary —— 提前不取这三个数据，省掉 incremental 主
+        路径每位发言茶客一次 artifacts/ 目录磁盘扫。
         """
         if task_id is None or self.tasks_store is None:
             return None
         task = self.tasks_store.get_task(task_id)
         if task is None or task.status in CLOSED_STATUSES:
             return None
+        if compact:
+            return _render_task_block(task, [], [], [], compact=True)
         decisions = self.tasks_store.list_decisions(task_id)
         artifacts = self.tasks_store.list_artifacts(task_id)
         summary_tail: list[SummarySpan] = []
@@ -664,7 +666,7 @@ class Orchestrator:
             if handle is not None:
                 summary_tail = list(handle.summaries)
         return _render_task_block(
-            task, decisions, artifacts, summary_tail, compact=compact
+            task, decisions, artifacts, summary_tail, compact=False
         )
 
     def _render_onboarding(
@@ -723,7 +725,6 @@ class Orchestrator:
             if increment
             else "（无新消息）"
         )
-        # task block 落在 body 之后、speak instruction 之前（docs §6.1）。
         task_section = f"{task_block}\n\n" if task_block else ""
         return (
             f"（房间·{self.room.name}·继续）\n"

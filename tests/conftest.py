@@ -66,10 +66,13 @@ class NoopScorer(IntentScorer):
 
 
 class NoopSummarizer(Summarizer):
-    """``maybe_summarize`` 不调 LLM；``summaries`` 返回空。"""
+    """``maybe_summarize`` 不调 LLM；``summaries`` 默认返回空。
 
-    def __init__(self) -> None:
-        pass
+    ``summaries=`` 可注入静态 SummarySpan 列表给"测 onboarding 含近期梗概"类用例。
+    """
+
+    def __init__(self, summaries=None) -> None:
+        self._fixed = tuple(summaries or ())
 
     async def maybe_summarize(self, *args, **kwargs):
         return None
@@ -79,7 +82,7 @@ class NoopSummarizer(Summarizer):
 
     @property
     def summaries(self):
-        return ()
+        return self._fixed
 
 
 def build_orch(*names: str, scorer: IntentScorer | None = None) -> Orchestrator:
