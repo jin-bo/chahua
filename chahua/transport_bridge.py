@@ -99,6 +99,20 @@ class ChahuaTransport(SdkTransport):
         """已收到的 chunk 拼接结果。speak() 在 error/cancel 路径上用。"""
         return "".join(self._partial)
 
+    @property
+    def guest_name(self) -> str:
+        """终身绑定的茶客名（构造时设、不可变）。"""
+        return self._guest_name
+
+    @property
+    def current_task_id(self) -> Optional[str]:
+        """当前 :meth:`bind` 上下文的 task_id 快照；未 bind 时 ``None``。
+
+        P5.3.4 task_tools 在 ``tool.execute()`` 内读：这时正跑在 LLM 的
+        ``agent.arun()`` 里、``TeaGuest.speak()`` 已 bind 上下文 → 这里读到的是
+        进 speak 时被 snapshot 的归属，与 message_* envelope 同源。"""
+        return self._task_id
+
     # ── 给上层 emit 用（message_start / message_end 走这里） ───────────────
 
     def emit_chahua(
