@@ -14,7 +14,7 @@
 // 渲染管线（XSS 由 dompurify 兜底）。
 
 import { renderMarkdown } from "./chat_view.js";
-import { EventType, taskStatusLabel } from "./events.js";
+import { EventType, isTaskClosed, taskStatusLabel } from "./events.js";
 import * as taskState from "./task_state.js";
 
 const LS_COLLAPSED_KEY = "chahua.taskPanel.collapsed";
@@ -26,40 +26,30 @@ const FLASH_MS = 600;
 // 第一帧后才挂回 transition 类，避免冷启动从 280px → 32px 的折叠态首屏抖动。
 const ANIMATED_CLASS = "task-panel-animated";
 
-function readCollapsed() {
-  try {
-    return window.localStorage.getItem(LS_COLLAPSED_KEY) === "1";
-  } catch {
-    // 隐私模式 / sandbox 偶尔抛 SecurityError —— 当未折叠处理。
-    return false;
-  }
+// 隐私模式 / sandbox 偶尔抛 SecurityError —— 写失败就让它失败，读失败回 defaultValue；
+// 把两套 try/catch 收敛到这里，避免 readCollapsed / readOthersOpen 各自手抄一份。
+function makeBoolPref(key, defaultValue) {
+  return {
+    read() {
+      try {
+        const v = window.localStorage.getItem(key);
+        return v === null ? defaultValue : v === "1";
+      } catch {
+        return defaultValue;
+      }
+    },
+    write(value) {
+      try {
+        window.localStorage.setItem(key, value ? "1" : "0");
+      } catch {
+        // intentional drop
+      }
+    },
+  };
 }
 
-function writeCollapsed(collapsed) {
-  try {
-    window.localStorage.setItem(LS_COLLAPSED_KEY, collapsed ? "1" : "0");
-  } catch {
-    // 写失败就让它失败 —— 下次还是默认展开。
-  }
-}
-
-function readOthersOpen() {
-  try {
-    const v = window.localStorage.getItem(LS_OTHERS_OPEN_KEY);
-    // 首次访问（null）→ 默认展开；之前显式写过 "0" → 折叠。
-    return v !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function writeOthersOpen(open) {
-  try {
-    window.localStorage.setItem(LS_OTHERS_OPEN_KEY, open ? "1" : "0");
-  } catch {
-    // 同 writeCollapsed —— 失败就失败，下次默认展开。
-  }
-}
+const collapsedPref = makeBoolPref(LS_COLLAPSED_KEY, false);
+const othersOpenPref = makeBoolPref(LS_OTHERS_OPEN_KEY, true);
 
 function formatSize(bytes) {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "";
@@ -104,7 +94,11 @@ export function createTaskPanel({
   // 卡片调；无 callback 时该区卡片仍渲染但不响应点击（用作纯只读概览）。
   onSetActive = null,
 }) {
-  let collapsed = readCollapsed();
+  let collapsed = collapsedPref.read();
+  // othersOpen 提到工厂闭包：render 是 task_info 热路径（artifact / decision /
+  // update 各触发一次），每帧 localStorage.getItem 同步 IO 没必要 —— 启动读一次，
+  // <details> toggle 时写一次 + 同步本地值。
+  let othersOpen = othersOpenPref.read();
   applyCollapsed();
   // 装好折叠态后再下一帧打开 transition —— 冷启动若 localStorage = 1，不要让用户看到
   // 280px → 32px 的滑动；之后用户主动点折叠按钮再有动画。
@@ -112,7 +106,7 @@ export function createTaskPanel({
 
   toggleBtnEl.addEventListener("click", () => {
     collapsed = !collapsed;
-    writeCollapsed(collapsed);
+    collapsedPref.write(collapsed);
     applyCollapsed();
   });
 
@@ -326,14 +320,16 @@ export function createTaskPanel({
   }
 
   // "其它任务"折叠区（P5.2.7）。走原生 <details>/<summary> —— 浏览器兜底键盘 / 屏阅读
-  // 器语义，比手搓 chevron 省心。toggle 写 localStorage（默认展开），用 details.open 单源。
-  // 单卡片是"compact"形态：图标 + 标题（截断）+ 状态 / 负责人小字 —— active 卡才显完整
-  // goal / artifacts / decisions（信息密度区分让 active vs others 一眼分清）。
+  // 器语义，比手搓 chevron 省心。active 卡才显完整 goal / artifacts / decisions，这里只
+  // 留 compact 视图，信息密度区分让 active vs others 一眼分清。
   function renderOthers(tasks) {
     const details = document.createElement("details");
     details.className = "task-others";
-    details.open = readOthersOpen();
-    details.addEventListener("toggle", () => writeOthersOpen(details.open));
+    details.open = othersOpen;
+    details.addEventListener("toggle", () => {
+      othersOpen = details.open;
+      othersOpenPref.write(othersOpen);
+    });
 
     const summary = document.createElement("summary");
     summary.className = "task-others-summary";
@@ -353,9 +349,8 @@ export function createTaskPanel({
     const li = document.createElement("li");
     li.className = "task-other";
     li.dataset.taskId = task.id;
-    // closed (done / abandoned) 给个额外 modifier class，让 CSS 把卡片"翻灰"得更彻底
-    // —— 仍是非 active 的，但语义上"已结束"应该比"还在跑但不是当前"更暗。
-    if (task.status === "done" || task.status === "abandoned") {
+    // 终结态比"非 active"再暗一档：语义上"已结束 ≠ 仅"非 active""。
+    if (isTaskClosed(task.status)) {
       li.classList.add("task-other-closed");
     }
 

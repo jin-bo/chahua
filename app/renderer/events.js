@@ -135,3 +135,12 @@ const _TASK_STATUS_LABELS = new Map(TASK_STATUS_OPTIONS.map((o) => [o.value, o.l
 export function taskStatusLabel(status) {
   return _TASK_STATUS_LABELS.get(status) ?? (status || TASK_STATUS_OPTIONS[0].label);
 }
+
+// 镜像 chahua/tasks_store.py::CLOSED_STATUSES —— 终结态白名单。
+// 渲染层 / inbound 校验都共享这份单一真理源，避免 JS 与 Python 各自手抄 "done" / "abandoned"
+// 字面值，将来加 / 改终结态时漏改一边。
+export const TASK_CLOSED_STATUSES = Object.freeze(new Set(["done", "abandoned"]));
+
+export function isTaskClosed(status) {
+  return TASK_CLOSED_STATUSES.has(status);
+}
