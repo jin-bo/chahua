@@ -19,37 +19,41 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from agentao.tools import Tool
 
-from .events import ChahuaEventType
+from .events import (
+    TASK_PROPOSAL_KIND_DECISION,
+    TASK_PROPOSAL_KIND_OPEN,
+    ChahuaEventType,
+)
+from .task import format_artifact_mtime, format_artifact_size
 from .tasks_store import TasksStore
 from .transport_bridge import ChahuaTransport
 
-
-def _format_size(size: int) -> str:
-    """字节数 → 人眼可读。与 ``orchestrator._format_artifact_size`` 同口径（也与
-    ``app/renderer/task_panel.js::formatSize`` 同口径）—— 改一处记得改三处。"""
-    if size < 1024:
-        return f"{size} B"
-    if size < 1024 * 1024:
-        return f"{size / 1024:.1f} KB"
-    return f"{size / (1024 * 1024):.1f} MB"
+# artifact 清单 / propose ack 上限。与 orchestrator._render_task_block 完整块的 cap
+# 同步（docs §6.1 "list_artifacts 返 markdown 清单同 §6.1 注入格式"）—— 改一处记得
+# 改两处。LLM 通过工具拿清单时若任务产物 >10 个，截尾部分让 LLM 知道"还有 N 个"。
+_LIST_ARTIFACTS_CAP = 10
+_PROPOSE_ACK_TRUNC = 60
 
 
 def _format_artifacts_md(artifacts: list[dict]) -> str:
+    """与 :func:`chahua.orchestrator._render_task_block` 的 artifact 段同格式：
+    ``- {name} ({size}, {mtime})``。空清单 / 超 cap 时分别 fallback。"""
     if not artifacts:
         return "（当前任务暂无产物）"
+    head = artifacts[:_LIST_ARTIFACTS_CAP]
     lines = ["当前任务产物清单（不嵌内容，按需 ls / cat 走 ``./task/`` 读取）："]
-    for a in artifacts:
-        lines.append(f"- {a['name']} ({_format_size(a['size'])})")
+    for a in head:
+        lines.append(
+            f"- {a['name']} "
+            f"({format_artifact_size(a['size'])}, {format_artifact_mtime(a['mtime_ms'])})"
+        )
+    if len(artifacts) > _LIST_ARTIFACTS_CAP:
+        lines.append(f"…（另有 {len(artifacts) - _LIST_ARTIFACTS_CAP} 个未列）")
     return "\n".join(lines)
-
-
-_PROPOSE_ACK_TRUNC = 60
-"""propose 工具返回 LLM 的 ack 字符串里 title / summary 截断长度。让 LLM 看到提议
-落地（避免反复刷工具），但不喂回大段它自己的 payload。"""
 
 
 class TaskListArtifactsTool(Tool):
@@ -97,11 +101,11 @@ class TaskListArtifactsTool(Tool):
 class _TaskProposeBase(Tool):
     """两个 propose 工具的共同基类 —— 共享 envelope emit 路径。
 
-    子类必须设 ``_kind`` 字面值（``"decision"`` / ``"open"``）—— wire 上下游按这个
+    子类必须设 ``_kind`` 字面值（``TASK_PROPOSAL_KIND_*``）—— wire 上下游按这个
     分发，前端"采纳"按钮按 kind 拼对应 inbound（``ADD_DECISION`` / ``OPEN_TASK``）。
     """
 
-    _kind: str
+    _kind: ClassVar[str]
 
     def __init__(self, *, transport: ChahuaTransport) -> None:
         super().__init__()
@@ -130,7 +134,7 @@ class _TaskProposeBase(Tool):
 
 
 class TaskProposeDecisionTool(_TaskProposeBase):
-    _kind = "decision"
+    _kind = TASK_PROPOSAL_KIND_DECISION
 
     @property
     def name(self) -> str:
@@ -178,7 +182,7 @@ class TaskProposeDecisionTool(_TaskProposeBase):
 
 
 class TaskProposeOpenTool(_TaskProposeBase):
-    _kind = "open"
+    _kind = TASK_PROPOSAL_KIND_OPEN
 
     @property
     def name(self) -> str:

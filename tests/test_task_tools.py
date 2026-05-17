@@ -117,6 +117,43 @@ def test_list_artifacts_returns_markdown(tmp_path: Path):
     assert "./task/" in out
 
 
+def test_list_artifacts_includes_mtime_and_size(tmp_path: Path):
+    """list_artifacts 渲染与 _render_task_block 同口径：每行 `name (size, mtime)`。"""
+    store = TasksStore(room_dir=tmp_path)
+    task = store.open_task(title="t", goal="g")
+    adir = store.artifacts_dir(task.id)
+    adir.mkdir(parents=True, exist_ok=True)
+    (adir / "a.md").write_text("x", encoding="utf-8")
+    tool = TaskListArtifactsTool(
+        tasks_store=store,
+        transport=_FakeTransport(task_id=task.id),
+    )
+    out = tool.execute()
+    # 行内三段：name / size / mtime（YYYY-MM-DD HH:MM 形如 2026-）
+    assert "a.md" in out
+    assert "1 B" in out
+    assert "20" in out  # 年份开头，避免 timezone 差异锁死
+
+
+def test_list_artifacts_caps_at_ten(tmp_path: Path):
+    """工具列 cap 10 + 多余条数显式回报 —— LLM 知道还有更多在 ./task/。"""
+    store = TasksStore(room_dir=tmp_path)
+    task = store.open_task(title="t", goal="g")
+    adir = store.artifacts_dir(task.id)
+    adir.mkdir(parents=True, exist_ok=True)
+    for i in range(15):
+        (adir / f"file{i:02d}.md").write_text("x", encoding="utf-8")
+    tool = TaskListArtifactsTool(
+        tasks_store=store,
+        transport=_FakeTransport(task_id=task.id),
+    )
+    out = tool.execute()
+    assert "file00.md" in out
+    assert "file09.md" in out
+    assert "file10.md" not in out  # 越过 cap
+    assert "另有 5 个未列" in out
+
+
 def test_list_artifacts_empty_task(tmp_path: Path):
     store = TasksStore(room_dir=tmp_path)
     task = store.open_task(title="t", goal="g")

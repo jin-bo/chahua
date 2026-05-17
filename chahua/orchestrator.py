@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Iterator, Optional
 
 # Sentinel for "task_id arg not passed" —— 区分 None（显式无任务）vs 缺省（要内部 snapshot）。
@@ -49,7 +48,14 @@ from .guest import TeaGuest
 from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
 from .summarizer import SummarySpan, Summarizer, TaskSummaries
-from .task import TASK_STATUS_DISPLAY, TASK_UNTITLED, Decision, Task
+from .task import (
+    TASK_STATUS_DISPLAY,
+    TASK_UNTITLED,
+    Decision,
+    Task,
+    format_artifact_mtime,
+    format_artifact_size,
+)
 from .tasks_store import CLOSED_STATUSES, TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 
@@ -809,27 +815,6 @@ _FULL_SUMMARY_TAIL_CAP = 3
 """完整块"任务近期进展"取 task summary 末几段。"""
 
 
-def _format_artifact_size(size: int) -> str:
-    """字节数 → 人眼可读（B / KB / MB），artifact 清单展示用。
-
-    阈值口径与 ``app/renderer/task_panel.js::formatSize`` 同源 —— 改一边记得改另一边。
-    Python 测试断言基于这套阈值（``test_render_task_block.py``）。
-    """
-    if size < 1024:
-        return f"{size} B"
-    if size < 1024 * 1024:
-        return f"{size / 1024:.1f} KB"
-    return f"{size / (1024 * 1024):.1f} MB"
-
-
-def _format_artifact_mtime(mtime_ms: int) -> str:
-    """``YYYY-MM-DD HH:MM`` 本地时区；artifact 清单展示用。
-
-    与 ``app/renderer/task_panel.js::formatTs`` 同口径 —— 改一边记得改另一边。
-    """
-    return datetime.fromtimestamp(mtime_ms / 1000).strftime("%Y-%m-%d %H:%M")
-
-
 def _render_task_block(
     task: Task,
     decisions: list[Decision],
@@ -865,8 +850,8 @@ def _render_task_block(
     if artifacts:
         head = artifacts[:_FULL_ARTIFACTS_CAP]
         bullets = "\n".join(
-            f"- {a['name']} ({_format_artifact_size(a['size'])}, "
-            f"{_format_artifact_mtime(a['mtime_ms'])})"
+            f"- {a['name']} ({format_artifact_size(a['size'])}, "
+            f"{format_artifact_mtime(a['mtime_ms'])})"
             for a in head
         )
         parts.append(f"当前产物清单（不嵌内容，按需走 ./task/ 读取）：\n{bullets}")

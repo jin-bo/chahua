@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import typing
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable, Literal, Optional
 
 from .events import new_id, now_ms
@@ -53,6 +54,27 @@ TASK_STATUS_DISPLAY: dict[TaskStatus, str] = {
 
 新增 status 时：① 改本 dict；② 改 ``TaskStatus`` Literal；③ 改 JS 的 ``TASK_STATUS_OPTIONS``。
 缺哪一项不会启动失败，但 LLM prompt / UI 任一面会暴露原始 enum 字面值。"""
+
+
+# ── artifact 字段格式化 ──────────────────────────────────────────────────────
+#
+# 与 ``app/renderer/task_panel.js`` 的 ``formatSize`` / ``formatTs`` 同口径 —— 改一处
+# 记得改两处（JS 那份在另一进程，Python 这两份是单源）。
+# orchestrator 的 task block 与 task_tools 的 task_list_artifacts 工具都走这俩。
+
+
+def format_artifact_size(size: int) -> str:
+    """字节数 → 人眼可读（B / KB / MB）。"""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def format_artifact_mtime(mtime_ms: int) -> str:
+    """``YYYY-MM-DD HH:MM`` 本地时区。"""
+    return datetime.fromtimestamp(mtime_ms / 1000).strftime("%Y-%m-%d %H:%M")
 
 
 def new_task_id() -> str:

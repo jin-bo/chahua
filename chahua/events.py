@@ -105,6 +105,12 @@ STATUS_CANCELLED = "cancelled"
 NOTICE_LEVEL_INFO = "info"
 NOTICE_LEVEL_ERROR = "error"
 
+# TASK_PROPOSAL envelope 的 ``data.kind`` 取值（docs §6.3）。前端按 kind 分发"采纳"
+# 按钮：decision → ADD_DECISION inbound；open → OPEN_TASK inbound。Python 端
+# 工具子类 ``_kind`` 字面值、events.py 文档、前端 (P5.3.6) 都从这里取，单点散落。
+TASK_PROPOSAL_KIND_DECISION = "decision"
+TASK_PROPOSAL_KIND_OPEN = "open"
+
 
 def new_id(prefix: str, n_bytes: int = 10) -> str:
     """``<prefix>_<n_bytes*2 hex>``。茶话室所有 ID（turn / msg / task / dec）共用一个 mint
