@@ -180,7 +180,7 @@ function setInputEnabled(enabled) {
   document.body.classList.toggle("disconnected", !enabled);
 }
 
-// "+ 新任务" 只受 connected 制约（P5.2 起允许多任务，去掉"已有任务时禁用"门）。
+// "+ 新任务" 只受 connected 制约（多任务允许任意时刻新建）。
 function updateNewTaskBtn() {
   taskPanelNewBtn.disabled = !connected;
   taskPanelNewBtn.title = "新建任务";
