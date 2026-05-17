@@ -560,6 +560,8 @@ function renderSidebar(roomInfo) {
   exitMessageFilter();
   messagesEl.replaceChildren();
   upload.clear();
+  // propose 卡片去重指纹也按房间边界清 —— 否则跨房间同 proposer/kind/payload 会被错误折叠。
+  proposalCard.reset();
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
@@ -1131,10 +1133,8 @@ const taskPanel = createTaskPanel({
   getGuestNames: () => guests.map((g) => g.name),
 });
 
-// P5.3.6 茶客 propose 卡片渲染 + 去重。挂到 TASK_PROPOSAL envelope 分发上。
-// sendInbound 给 P5.3.7 采纳按钮拼 ADD_DECISION / OPEN_TASK 帧用 —— 本阶段卡片渲染
-// + 忽略按钮已可用，采纳按钮接入 P5.3.7 完成。
-const proposalCard = createProposalCard({ messagesEl, sendInbound: send });
+// 茶客 propose 卡片渲染 + 去重。renderSidebar 进新房时调 reset() 清跨房间 dedup。
+const proposalCard = createProposalCard({ messagesEl });
 
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json

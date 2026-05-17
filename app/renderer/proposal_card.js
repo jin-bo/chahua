@@ -1,28 +1,25 @@
 "use strict";
 
-// P5.3.6 茶客 propose 卡片渲染 + 去重（docs/P5-任务房间.md §6.3）。
-//
-// 茶客通过 task_propose_decision / task_propose_open 工具发起的"提议"经服务端转发成
-// TASK_PROPOSAL envelope（chahua/task_tools.py），前端在对应茶客气泡下渲染一张
-// "采纳 / 忽略"卡片让用户决定是否真正入库。
-//
-// **写权限永远在用户**（CLAUDE.md "artifact / decision / task 的写权限只在用户"）——
-// 卡片渲染不写库；采纳 = 拼回既有 ADD_DECISION / OPEN_TASK inbound，服务端走原 handler。
-// 忽略 = 本地丢卡片，session-local（刷新即清，不持久化）。
-//
-// 去重折叠：按 (proposer, kind, payload-hash) —— 偏执 LLM 反复刷同一 propose 时只
-// 渲染一张卡片，避免聊天流被 propose 灌爆。模块级 seen 集合在 ws 重连 / 切房间时不
-// 清，刷新页面（reload renderer）才清；这是有意为之 —— 同一 session 内重发同一 propose
-// 始终视为同一次。
+// 茶客 propose 卡片渲染 + 去重（docs/P5-任务房间.md §6.3）。
+// hint 事件不持久化：刷新页面 + reset() （切房 / clear_room 回环时调）会清空去重指纹。
 
-import { EventType, Inbound, TaskProposalKind } from "./events.js";
+import { EventType, TaskProposalKind } from "./events.js";
 
-// 同一 session 内已渲染过的 propose 指纹集合。模块级 → 页面刷新才清。
+// (proposer, kind, payload-hash) 指纹集合 —— 反复刷同一 propose 时只渲染一张。
+// 模块级；renderer.js 在 renderSidebar 入口调 reset() 清，避免跨房间残留。
 const _seen = new Set();
 
+// 同 task_panel.js::cssEscape —— 防御 older Electron / 测试环境没 CSS.escape；message_id
+// 是 `msg_<hex>` 不含特殊字符，fallback 仅转义 " 与 \ 已足够。
+function cssEscape(s) {
+  if (typeof window !== "undefined" && window.CSS && typeof window.CSS.escape === "function") {
+    return window.CSS.escape(String(s ?? ""));
+  }
+  return String(s ?? "").replace(/["\\]/g, "\\$&");
+}
+
 function stableStringify(obj) {
-  // JSON.stringify 的字段顺序对 dedup 关键 —— 同一 payload 对象不同 key 顺序应该
-  // 产同一指纹。简单做法：按 sort 后的 key 序列化。
+  // 同 payload 不同 key 顺序应产同一指纹 —— 用 sorted-key 递归序列化。
   if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
   if (Array.isArray(obj)) {
     return "[" + obj.map(stableStringify).join(",") + "]";
@@ -33,10 +30,7 @@ function stableStringify(obj) {
 }
 
 function dedupKey(data) {
-  const proposer = String(data.proposer || "");
-  const kind = String(data.kind || "");
-  const payloadStr = stableStringify(data.payload ?? null);
-  return `${proposer}|${kind}|${payloadStr}`;
+  return `${data.proposer || ""}|${data.kind || ""}|${stableStringify(data.payload ?? null)}`;
 }
 
 function truncate(s, n) {
@@ -48,18 +42,17 @@ function renderPayloadPreview(kind, payload) {
   const box = document.createElement("div");
   box.className = "proposal-card-preview";
   if (kind === TaskProposalKind.DECISION) {
-    const summary = truncate(payload.summary ?? "", 200);
-    const sup = Array.isArray(payload.supporting_message_ids)
-      ? payload.supporting_message_ids
-      : [];
     const head = document.createElement("div");
     head.className = "proposal-card-kind";
     head.textContent = "提议决策";
     const body = document.createElement("div");
     body.className = "proposal-card-summary";
-    body.textContent = summary;
+    body.textContent = truncate(payload.summary ?? "", 200);
     box.appendChild(head);
     box.appendChild(body);
+    const sup = Array.isArray(payload.supporting_message_ids)
+      ? payload.supporting_message_ids
+      : [];
     if (sup.length) {
       const refs = document.createElement("div");
       refs.className = "proposal-card-refs";
@@ -67,22 +60,20 @@ function renderPayloadPreview(kind, payload) {
       box.appendChild(refs);
     }
   } else if (kind === TaskProposalKind.OPEN) {
-    const title = truncate(payload.title ?? "", 60);
-    const goal = truncate(payload.goal ?? "", 200);
     const head = document.createElement("div");
     head.className = "proposal-card-kind";
     head.textContent = "提议开新任务";
     const titleEl = document.createElement("div");
     titleEl.className = "proposal-card-title";
-    titleEl.textContent = title;
+    titleEl.textContent = truncate(payload.title ?? "", 60);
     const goalEl = document.createElement("div");
     goalEl.className = "proposal-card-goal";
-    goalEl.textContent = goal;
+    goalEl.textContent = truncate(payload.goal ?? "", 200);
     box.appendChild(head);
     box.appendChild(titleEl);
     box.appendChild(goalEl);
   } else {
-    // 未知 kind —— 兜底展示原始 JSON 让用户至少能看到，开发期捕错
+    // 未知 kind —— dev 期捕错，不静默兜底成空卡。
     const head = document.createElement("div");
     head.className = "proposal-card-kind";
     head.textContent = `未知提议类型：${kind}`;
@@ -92,37 +83,35 @@ function renderPayloadPreview(kind, payload) {
 }
 
 function findHostBubble(messagesEl, messageId) {
-  // 优先挂在 propose 工具被调那帧的茶客气泡下；server 端 transport bind 期内
-  // emit_chahua 会带上 envelope.message_id，与茶客本轮消息同源。
   if (!messageId) return null;
-  return messagesEl.querySelector(`li[data-message-id="${CSS.escape(messageId)}"]`);
+  return messagesEl.querySelector(`li[data-message-id="${cssEscape(messageId)}"]`);
 }
 
-// ── 工厂入口 ────────────────────────────────────────────────────────────────
-//
 // 创建一只 proposal card 渲染器实例。
 //
-//   messagesEl   消息流容器（用于按 messageId 找宿主气泡）。
-//   sendInbound  传入 inbound 帧的发送闭包（renderer.js 持 ws，注入进来即可）；
-//                P5.3.6 阶段卡片采纳按钮已具备但 inbound 帧组装在 P5.3.7 完成。
+//   messagesEl   消息流容器（按 messageId 找宿主气泡）。
 //
-// 返回 ``{ onEnvelope(env) }``：renderer.js 在 EventType.TASK_PROPOSAL 路径上调一次。
-export function createProposalCard({ messagesEl, sendInbound }) {
+// 返回 { onEnvelope(env), reset() }：
+//   onEnvelope —— renderer.js 在 EventType.TASK_PROPOSAL 路径上调一次。
+//   reset      —— 切房 / clear_room 回环时调，清掉跨房间累积的去重指纹。
+//
+// 采纳按钮的 inbound 帧组装目前是占位（按钮禁用 + 状态文案）。
+export function createProposalCard({ messagesEl }) {
   function onEnvelope(env) {
     if (env.type !== EventType.TASK_PROPOSAL) return;
     const data = env.data || {};
     if (!data.kind || !data.payload || !data.proposer) return;
 
+    const host = findHostBubble(messagesEl, env.message_id);
+    if (!host) {
+      // hint 找不到挂点（已切场景 / 已 clear_room）：丢弃且不留指纹 —— 否则下次同 propose
+      // 真有挂点时也会被错误 dedup 掉。
+      return;
+    }
+
     const key = dedupKey(data);
     if (_seen.has(key)) return;
     _seen.add(key);
-
-    const host = findHostBubble(messagesEl, env.message_id);
-    if (!host) {
-      // 茶客气泡不在视野（已被 clear_room 抹掉 / scroll 远？）：丢弃。
-      // 提议是 hint，不持久化；找不到挂点不补 toast，避免在用户已切场景时干扰。
-      return;
-    }
 
     const card = document.createElement("div");
     card.className = "proposal-card";
@@ -144,7 +133,12 @@ export function createProposalCard({ messagesEl, sendInbound }) {
     acceptBtn.className = "proposal-card-accept";
     acceptBtn.textContent = "采纳";
     acceptBtn.addEventListener("click", () => {
-      onAccept(card, data, env);
+      // 占位实现 —— 把 inbound 帧组装放在后续 wiring 提交完成。
+      actions.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      const status = document.createElement("span");
+      status.className = "proposal-card-status";
+      status.textContent = "（采纳后端 wiring 待接入）";
+      actions.appendChild(status);
     });
 
     const ignoreBtn = document.createElement("button");
@@ -162,24 +156,9 @@ export function createProposalCard({ messagesEl, sendInbound }) {
     host.appendChild(card);
   }
 
-  function onAccept(card, data, env) {
-    // P5.3.7 把这块拼成 ADD_DECISION / OPEN_TASK inbound；P5.3.6 仅卡片渲染 + dedup。
-    // 占位实现：禁用按钮 + 文案"已采纳"，让 UI 不悬空（dev 测肉眼可见）。
-    const btns = card.querySelectorAll("button");
-    btns.forEach((b) => (b.disabled = true));
-    const status = document.createElement("span");
-    status.className = "proposal-card-status";
-    status.textContent = "（采纳逻辑 P5.3.7 接入）";
-    card.querySelector(".proposal-card-actions").appendChild(status);
-    // P5.3.7 实际会 sendInbound(...) 这里
-    void sendInbound;
-    void env;
+  function reset() {
+    _seen.clear();
   }
 
-  return { onEnvelope };
-}
-
-// 测试钩子 —— 仅给 unit test 用，清空模块级 dedup 集合。
-export function _resetSeenForTest() {
-  _seen.clear();
+  return { onEnvelope, reset };
 }
