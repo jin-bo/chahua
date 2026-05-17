@@ -25,6 +25,7 @@ from .session import ensure_room_share_dir
 from .task import MARKED_BY_USER
 from .tasks_store import (
     ArtifactSourceMissingError,
+    TaskAlreadyClosedError,
     TaskExistsError,
     TaskNotFoundError,
 )
@@ -38,6 +39,9 @@ INBOUND_OPEN_TASK = "open_task"
 INBOUND_UPDATE_TASK = "update_task"
 INBOUND_ATTACH_ARTIFACT = "attach_artifact"
 INBOUND_ADD_DECISION = "add_decision"
+# P5.2.5：多任务管理新增两个 inbound。
+INBOUND_SET_ACTIVE_TASK = "set_active_task"
+INBOUND_CLOSE_TASK = "close_task"
 
 
 # 任务 inbound payload 白名单。加字段就动这里 —— 任何不在集合里的顶层键 → NOTICE error。
@@ -45,11 +49,23 @@ INBOUND_ADD_DECISION = "add_decision"
 # （嵌套不在顶层白名单里）。
 _OPEN_TASK_ALLOWED: frozenset[str] = frozenset({"title", "goal", "owner"})
 _UPDATE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id", "patch"})
-_UPDATE_TASK_PATCH_ALLOWED: frozenset[str] = frozenset({"title", "goal"})
+# P5.2.5：patch 扩 owner / status；与 tasks_store.update_task 形式参数一一对应。
+_UPDATE_TASK_PATCH_ALLOWED: frozenset[str] = frozenset(
+    {"title", "goal", "owner", "status"}
+)
+# update_task 仅接受非终结态；终结态走 close_task。两表必须与 tasks_store 内
+# _NON_TERMINAL_STATUSES / _CLOSED_STATUSES 同口径 —— 上下两层校验同一集合，避免
+# server 接住的 patch 落到 tasks_store 又再被 ValueError 拒。
+_UPDATE_TASK_PATCH_STATUSES: frozenset[str] = frozenset(
+    {"open", "in_progress", "blocked"}
+)
+_CLOSE_TASK_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
 _ATTACH_ARTIFACT_ALLOWED: frozenset[str] = frozenset({"task_id", "share_rel"})
 _ADD_DECISION_ALLOWED: frozenset[str] = frozenset(
     {"task_id", "summary", "supporting_message_ids"}
 )
+_SET_ACTIVE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id"})
+_CLOSE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id", "status"})
 
 
 class TaskHandlers:
@@ -171,7 +187,7 @@ class TaskHandlers:
                 sink, level=NOTICE_LEVEL_ERROR,
                 text=(
                     f"{INBOUND_UPDATE_TASK}: patch 含未知字段 {sorted(extra)!r}；"
-                    "P5.1 只支持 title / goal"
+                    f"白名单 {sorted(_UPDATE_TASK_PATCH_ALLOWED)!r}"
                 ),
             )
             return
@@ -191,9 +207,48 @@ class TaskHandlers:
                 text=f"{INBOUND_UPDATE_TASK}: patch.title 不能为空",
             )
             return
+        # owner：sentinel 区分"不传"与"传 None"。inbound 传 None 表示清归属；str 表示
+        # 设值；任何其它类型 → NOTICE。``"owner" in patch_raw`` 与 ``get`` 不同 —— 前者
+        # 能区分缺省与显式 None。
+        owner_kw: dict = {}
+        if "owner" in patch_raw:
+            owner_val = patch_raw["owner"]
+            if owner_val is not None and not isinstance(owner_val, str):
+                self.server._emit_notice(
+                    sink, level=NOTICE_LEVEL_ERROR,
+                    text=f"{INBOUND_UPDATE_TASK}: patch.owner 必须是 str / null",
+                )
+                return
+            owner_kw["owner"] = owner_val
+        status = patch_raw.get("status")
+        if status is not None:
+            if not isinstance(status, str):
+                self.server._emit_notice(
+                    sink, level=NOTICE_LEVEL_ERROR,
+                    text=f"{INBOUND_UPDATE_TASK}: patch.status 必须是 str",
+                )
+                return
+            if status in _CLOSE_TASK_STATUSES:
+                self.server._emit_notice(
+                    sink, level=NOTICE_LEVEL_ERROR,
+                    text=(
+                        f"{INBOUND_UPDATE_TASK}: patch.status={status!r} 是终结态，"
+                        f"请走 {INBOUND_CLOSE_TASK}"
+                    ),
+                )
+                return
+            if status not in _UPDATE_TASK_PATCH_STATUSES:
+                self.server._emit_notice(
+                    sink, level=NOTICE_LEVEL_ERROR,
+                    text=(
+                        f"{INBOUND_UPDATE_TASK}: patch.status={status!r} 非法；"
+                        f"非终结态白名单 {sorted(_UPDATE_TASK_PATCH_STATUSES)!r}"
+                    ),
+                )
+                return
         try:
             task = self.server._session.tasks_store.update_task(
-                task_id, title=title, goal=goal,
+                task_id, title=title, goal=goal, status=status, **owner_kw,
             )
         except TaskNotFoundError as e:
             self.server._emit_notice(
@@ -204,16 +259,124 @@ class TaskHandlers:
         except OSError as e:
             self.server._notice_persist_failure(sink, INBOUND_UPDATE_TASK, e)
             return
-        _log.info("update_task: id=%s title=%r goal=%r", task.id, title, goal)
+        _log.info(
+            "update_task: id=%s patch_keys=%r", task.id, sorted(patch_raw.keys()),
+        )
+        # 实际生效的 patch —— inbound 可能传 title=None（不改），不发空字段污染前端 diff。
         applied_patch: dict = {}
         if title is not None:
             applied_patch["title"] = title
         if goal is not None:
             applied_patch["goal"] = goal
+        if "owner" in patch_raw:
+            applied_patch["owner"] = patch_raw["owner"]
+        if status is not None:
+            applied_patch["status"] = status
         self._emit_task_envelope(
             sink,
             type=ChahuaEventType.TASK_UPDATE,
             data={"task_id": task.id, "patch": applied_patch},
+        )
+        self._emit_task_info(sink)
+
+    async def _inbound_set_active_task(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        """切换 active task。``task_id`` 可以是 str 或 null（清回房间级）。
+
+        走前 ``_cancel_and_drain_inflight`` —— 与 add/remove guest 同口径，避免 inflight
+        turn 末尾的 message 被错挂到新 active。成功后**不发**独立 hint event（沿
+        §4.2 P5.2 设计：切 active 只重发 ``task_info`` 权威快照）。
+        """
+        if not self.server._reject_unknown_keys(
+            data, _SET_ACTIVE_TASK_ALLOWED, where=INBOUND_SET_ACTIVE_TASK, sink=sink,
+        ):
+            return
+        if "task_id" not in data:
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_SET_ACTIVE_TASK}: task_id 必传（可为 null）",
+            )
+            return
+        task_id_raw = data["task_id"]
+        if task_id_raw is not None and not isinstance(task_id_raw, str):
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_SET_ACTIVE_TASK}: task_id 必须是 str / null",
+            )
+            return
+        await self.server._cancel_and_drain_inflight()
+        try:
+            self.server._session.tasks_store.set_active(task_id_raw)
+        except TaskNotFoundError as e:
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"切换任务失败：{e}",
+            )
+            self._emit_task_info(sink)
+            return
+        except OSError as e:
+            self.server._notice_persist_failure(sink, INBOUND_SET_ACTIVE_TASK, e)
+            return
+        _log.info("set_active_task: %r", task_id_raw)
+        self._emit_task_info(sink)
+
+    async def _inbound_close_task(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        """把任务推到终结态（``done`` / ``abandoned``）。
+
+        走前 ``_cancel_and_drain_inflight`` —— 若被关的就是当前 active，inflight turn
+        的余生 message 没必要再挂到这个任务。成功后发 ``task_close`` hint event + 重发
+        ``task_info`` 权威快照。
+        """
+        if not self.server._reject_unknown_keys(
+            data, _CLOSE_TASK_ALLOWED, where=INBOUND_CLOSE_TASK, sink=sink,
+        ):
+            return
+        task_id = require_str(data, "task_id", where=INBOUND_CLOSE_TASK)
+        if task_id is None:
+            return
+        status = require_str(data, "status", where=INBOUND_CLOSE_TASK)
+        if status is None:
+            return
+        if status not in _CLOSE_TASK_STATUSES:
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=(
+                    f"{INBOUND_CLOSE_TASK}: status={status!r} 非法，"
+                    f"必须是 {sorted(_CLOSE_TASK_STATUSES)!r} 之一"
+                ),
+            )
+            return
+        await self.server._cancel_and_drain_inflight()
+        try:
+            task = self.server._session.tasks_store.close_task(
+                task_id, status=status,  # type: ignore[arg-type]
+            )
+        except TaskNotFoundError as e:
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"关闭任务失败：{e}",
+            )
+            self._emit_task_info(sink)
+            return
+        except TaskAlreadyClosedError as e:
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"关闭任务失败：{e}",
+            )
+            self._emit_task_info(sink)
+            return
+        except OSError as e:
+            self.server._notice_persist_failure(sink, INBOUND_CLOSE_TASK, e)
+            return
+        _log.info("close_task: id=%s status=%s", task.id, status)
+        self._emit_task_envelope(
+            sink,
+            type=ChahuaEventType.TASK_CLOSE,
+            data={
+                "task_id": task.id,
+                "status": status,
+                "closed_at_ms": task.closed_at_ms,
+            },
         )
         self._emit_task_info(sink)
 

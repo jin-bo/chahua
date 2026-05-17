@@ -191,6 +191,7 @@ async def test_update_task_ok(session_and_srv):
 
 
 async def test_update_task_patch_unknown_field(session_and_srv):
+    """P5.2 起 patch 白名单为 {title, goal, owner, status}；其它键 → NOTICE。"""
     session, srv = session_and_srv
     t = session.tasks_store.open_task(title="t", goal="g")
     captured: list[dict] = []
@@ -198,16 +199,17 @@ async def test_update_task_patch_unknown_field(session_and_srv):
         {
             "type": INBOUND_UPDATE_TASK,
             "task_id": t.id,
-            "patch": {"status": "done"},  # P5.1 不接 status
+            "patch": {"hacker": "x"},
         },
         lambda env: captured.append(env.to_dict()),
     )
     notices = _by_type(captured, ChahuaEventType.NOTICE.value)
-    assert notices and "status" in notices[0]["data"]["text"]
+    assert notices and "hacker" in notices[0]["data"]["text"]
     assert session.tasks_store.get_task(t.id).title == "t"  # 不动
 
 
-async def test_update_task_patch_owner_rejected(session_and_srv):
+async def test_update_task_patch_terminal_status_rejected(session_and_srv):
+    """update_task patch.status 仅接受非终结态；done / abandoned 必须走 close_task。"""
     session, srv = session_and_srv
     t = session.tasks_store.open_task(title="t", goal="g")
     captured: list[dict] = []
@@ -215,12 +217,79 @@ async def test_update_task_patch_owner_rejected(session_and_srv):
         {
             "type": INBOUND_UPDATE_TASK,
             "task_id": t.id,
-            "patch": {"owner": "user"},  # P5.1 锁定 owner 不能改
+            "patch": {"status": "done"},
+        },
+        lambda env: captured.append(env.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    assert notices and "close_task" in notices[0]["data"]["text"]
+    assert session.tasks_store.get_task(t.id).status == "open"
+
+
+async def test_update_task_patch_owner_accepted(session_and_srv):
+    """P5.2.5 起 owner 进 patch 白名单 —— 合法 str 直接落盘。"""
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g", owner=None)
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_TASK,
+            "task_id": t.id,
+            "patch": {"owner": "宝总"},
+        },
+        lambda env: captured.append(env.to_dict()),
+    )
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    assert session.tasks_store.get_task(t.id).owner == "宝总"
+
+
+async def test_update_task_patch_owner_null_clears(session_and_srv):
+    """owner=null 显式清归属（sentinel 区分"不传"与"清"）。"""
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g", owner="宝总")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_TASK,
+            "task_id": t.id,
+            "patch": {"owner": None},
+        },
+        lambda env: captured.append(env.to_dict()),
+    )
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    assert session.tasks_store.get_task(t.id).owner is None
+
+
+async def test_update_task_patch_owner_non_str_rejected(session_and_srv):
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_TASK,
+            "task_id": t.id,
+            "patch": {"owner": 42},
         },
         lambda env: captured.append(env.to_dict()),
     )
     notices = _by_type(captured, ChahuaEventType.NOTICE.value)
     assert notices and "owner" in notices[0]["data"]["text"]
+
+
+async def test_update_task_patch_status_non_terminal_ok(session_and_srv):
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_TASK,
+            "task_id": t.id,
+            "patch": {"status": "in_progress"},
+        },
+        lambda env: captured.append(env.to_dict()),
+    )
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    assert session.tasks_store.get_task(t.id).status == "in_progress"
 
 
 async def test_update_task_empty_title_rejected(session_and_srv):
@@ -405,3 +474,136 @@ async def test_add_decision_unknown_field(session_and_srv):
     )
     notices = _by_type(captured, ChahuaEventType.NOTICE.value)
     assert notices and "marked_by" in notices[0]["data"]["text"]
+
+
+# ── P5.2.5: set_active_task / close_task ───────────────────────────────────
+
+
+async def test_set_active_task_switches(session_and_srv):
+    """两个 task，set_active_task 切到第一个 —— state.active 跟着变 + 重发 task_info。"""
+    from chahua.server import INBOUND_SET_ACTIVE_TASK
+
+    session, srv = session_and_srv
+    t1 = session.tasks_store.open_task(title="A", goal="g")
+    t2 = session.tasks_store.open_task(title="B", goal="g")
+    assert session.tasks_store.active_task_id == t2.id
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_SET_ACTIVE_TASK, "task_id": t1.id},
+        lambda env: captured.append(env.to_dict()),
+    )
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    # 只发 task_info（沿 §4.2：切 active 不发独立 hint event）
+    types = _types(captured)
+    assert types[-1] == ChahuaEventType.TASK_INFO.value
+    assert ChahuaEventType.TASK_OPEN.value not in types
+    assert ChahuaEventType.TASK_CLOSE.value not in types
+    assert session.tasks_store.active_task_id == t1.id
+
+
+async def test_set_active_task_to_null(session_and_srv):
+    """task_id=null → 清回房间级。"""
+    from chahua.server import INBOUND_SET_ACTIVE_TASK
+
+    session, srv = session_and_srv
+    session.tasks_store.open_task(title="t", goal="g")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_SET_ACTIVE_TASK, "task_id": None},
+        lambda env: captured.append(env.to_dict()),
+    )
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    assert session.tasks_store.active_task_id is None
+
+
+async def test_set_active_task_missing_id_field_rejected(session_and_srv):
+    """task_id 必传（可为 null）—— 整段缺失 → NOTICE。"""
+    from chahua.server import INBOUND_SET_ACTIVE_TASK
+
+    session, srv = session_and_srv
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_SET_ACTIVE_TASK},
+        lambda env: captured.append(env.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    assert notices and "task_id" in notices[0]["data"]["text"]
+
+
+async def test_set_active_task_unknown_id_notice(session_and_srv):
+    """task_id 不在 store 中 → NOTICE + 重发 task_info 让前端复位 dropdown。"""
+    from chahua.server import INBOUND_SET_ACTIVE_TASK
+
+    session, srv = session_and_srv
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_SET_ACTIVE_TASK, "task_id": "task_ghost"},
+        lambda env: captured.append(env.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    assert notices and notices[0]["data"]["level"] == "error"
+    assert ChahuaEventType.TASK_INFO.value in _types(captured)
+
+
+async def test_close_task_done_emits_close_and_clears_active(session_and_srv):
+    from chahua.server import INBOUND_CLOSE_TASK
+
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_CLOSE_TASK, "task_id": t.id, "status": "done"},
+        lambda env: captured.append(env.to_dict()),
+    )
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    # 发 TASK_CLOSE + TASK_INFO
+    types = _types(captured)
+    assert ChahuaEventType.TASK_CLOSE.value in types
+    assert types[-1] == ChahuaEventType.TASK_INFO.value
+    # 关闭当前 active → state.active = None
+    assert session.tasks_store.active_task_id is None
+    assert session.tasks_store.get_task(t.id).status == "done"
+
+
+async def test_close_task_invalid_status_rejected(session_and_srv):
+    from chahua.server import INBOUND_CLOSE_TASK
+
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_CLOSE_TASK, "task_id": t.id, "status": "in_progress"},
+        lambda env: captured.append(env.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    assert notices and "status" in notices[0]["data"]["text"]
+    assert session.tasks_store.get_task(t.id).status == "open"
+
+
+async def test_close_task_already_closed(session_and_srv):
+    """已 closed task 再 close → NOTICE error + 重发 task_info。"""
+    from chahua.server import INBOUND_CLOSE_TASK
+
+    session, srv = session_and_srv
+    t = session.tasks_store.open_task(title="t", goal="g")
+    session.tasks_store.close_task(t.id, status="done")
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_CLOSE_TASK, "task_id": t.id, "status": "abandoned"},
+        lambda env: captured.append(env.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    assert notices and "已经" in notices[0]["data"]["text"]
+
+
+async def test_close_task_unknown_id(session_and_srv):
+    from chahua.server import INBOUND_CLOSE_TASK
+
+    session, srv = session_and_srv
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_CLOSE_TASK, "task_id": "task_ghost", "status": "done"},
+        lambda env: captured.append(env.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    assert notices and notices[0]["data"]["level"] == "error"

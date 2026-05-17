@@ -82,7 +82,9 @@ from .server_inbound_settings import (
 from .server_inbound_task import (
     INBOUND_ADD_DECISION,
     INBOUND_ATTACH_ARTIFACT,
+    INBOUND_CLOSE_TASK,
     INBOUND_OPEN_TASK,
+    INBOUND_SET_ACTIVE_TASK,
     INBOUND_UPDATE_TASK,
     TaskHandlers,
 )
@@ -796,11 +798,13 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_IMPORT_PERSONA_GITHUB: "io._inbound_import_persona_github",
     INBOUND_UPLOAD_FILE: "io._inbound_upload_file",
     INBOUND_EXPORT_ROOM: "io._inbound_export_room",
-    # task slot：任务房间四个 inbound。
+    # task slot：任务房间六个 inbound（P5.2.5 起多 set_active_task / close_task）。
     INBOUND_OPEN_TASK: "task._inbound_open_task",
     INBOUND_UPDATE_TASK: "task._inbound_update_task",
     INBOUND_ATTACH_ARTIFACT: "task._inbound_attach_artifact",
     INBOUND_ADD_DECISION: "task._inbound_add_decision",
+    INBOUND_SET_ACTIVE_TASK: "task._inbound_set_active_task",
+    INBOUND_CLOSE_TASK: "task._inbound_close_task",
 }
 
 
