@@ -1,9 +1,11 @@
-"""P5.1.4: tasks_store.TasksStore 单测。
+"""tasks_store.TasksStore 单测。
 
-覆盖 §7.1 / §10 三类核心场景：
+P5.1 覆盖 §7.1 / §10 三类核心场景：
 - ① 双向修复：state.json 缺 + 单 task.json → 自动恢复 active 并回写
-- ② open_task 第二次被拒（房间已有任意任务 → TaskExistsError）
-- ③ attach_artifact 是 copy 不是 move（share/ 原文件 stat 不变）
+- ② attach_artifact 是 copy 不是 move（share/ 原文件 stat 不变）
+
+P5.2.1 改动（§7.2）：解除"一房间最多 1 任务"限制 —— ``open_task`` 不再抛
+``TaskExistsError``，新建自动成为 active、旧 active 进历史列表。
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ import pytest
 
 from chahua.tasks_store import (
     ArtifactSourceMissingError,
-    TaskExistsError,
     TaskNotFoundError,
     TasksStore,
 )
@@ -40,15 +41,27 @@ def test_open_task_sets_active_and_creates_dirs(tmp_path: Path):
     assert state["active_task_id"] == t.id
 
 
-def test_open_task_rejected_when_room_has_any_task(tmp_path: Path):
+def test_open_task_allows_multiple_and_promotes_active(tmp_path: Path):
+    """P5.2.1：连开 3 个任务全部成功，state.active 指向最新；旧 active 留 status="open"。"""
     store = TasksStore(room_dir=tmp_path)
-    store.open_task(title="第一个", goal="...")
-    with pytest.raises(TaskExistsError):
-        store.open_task(title="第二个", goal="...")
+    t1 = store.open_task(title="一", goal="...")
+    assert store.active_task_id == t1.id
+    t2 = store.open_task(title="二", goal="...")
+    assert store.active_task_id == t2.id
+    t3 = store.open_task(title="三", goal="...")
+    assert store.active_task_id == t3.id
+    # 旧任务都仍以 status="open" 存在（close 在 P5.2.2 才接）
+    ids = {t.id for t in store.list_tasks()}
+    assert ids == {t1.id, t2.id, t3.id}
+    for tid in (t1.id, t2.id):
+        assert store.get_task(tid).status == "open"
+    # state.json 落盘指向最新
+    state = json.loads((tmp_path / "tasks" / "state.json").read_text(encoding="utf-8"))
+    assert state["active_task_id"] == t3.id
 
 
-def test_open_task_rejected_even_if_state_lost(tmp_path: Path):
-    """state.json 被删 / 损坏后，task.json 仍是"已有任务" 的真凭据 —— §7.1 不变量。"""
+def test_open_task_state_lost_still_resets_active(tmp_path: Path):
+    """state.json 被删后重装：单 task 仍被自动恢复为 active（§7.1 修复 ②，P5.2 沿用）。"""
     store = TasksStore(room_dir=tmp_path)
     t = store.open_task(title="一", goal="...")
     # 模拟 state.json 损坏：删掉它
@@ -57,9 +70,9 @@ def test_open_task_rejected_even_if_state_lost(tmp_path: Path):
     store2 = TasksStore(room_dir=tmp_path)
     # 双向修复 ②：单 task → 自动设 active
     assert store2.active_task_id == t.id
-    # open_task 仍拒绝
-    with pytest.raises(TaskExistsError):
-        store2.open_task(title="第二个", goal="...")
+    # P5.2 起第二次 open 不再被拒
+    t2 = store2.open_task(title="第二个", goal="...")
+    assert store2.active_task_id == t2.id
 
 
 def test_bidirectional_repair_state_points_to_missing_task(tmp_path: Path, caplog):

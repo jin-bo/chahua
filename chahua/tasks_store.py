@@ -16,17 +16,19 @@ state.json↔task.json" 集中实现（§7.1 / §10）。
 
 不写 `events.jsonl` / `<id>/summary.jsonl` —— 留待 P5.2 接 status / 摘要时再加。
 
-P5.1 关键约束（docs §7.1）：
+关键约束（docs §7.1 / §7.2）：
 
-- **一房间最多 1 个有效任务**：``open_task`` 在 ``tasks/*/task.json`` 已存在任意有效
-  任务时 raise :class:`TaskExistsError`。判定按 task.json 存在性扫，**不依赖 state.json**
-  —— state.json 可能丢失 / 被清空，但旧 task.json 是"已有任务"的真凭据。
+- **同一时刻至多 1 个 active**：``open_task`` 创建后自动设为 active，旧 active 留作
+  ``status="open"`` 进历史列表。P5.2 起允许多任务共存；P5.1 的 :class:`TaskExistsError`
+  保留为类型给老调用方 ``except`` 用，但 ``open_task`` **永不再抛**。
 - **加载时双向修复**：
     ① state.json 指向不存在 task → 清回 None；
     ② state.json 缺 / 为空且**有且仅有一个**有效 task.json → 自动设为 active 并回写
-  state.json。"多于一个" 在 P5.1 不会发生（open 拒绝条款），P5.2 起再细化。
+       state.json；
+    ③ state.json 缺 + 有效 task.json **多于一个** → 不自动选（保持 None），等 UI 让
+       用户指定 active（P5.2.6）。
 - **入站严格**：调用方（server）保证 payload 合法白名单；本模块只对"业务约束"做最后一道
-  guard（如 ``open_task`` 的"已有任务"、``attach_artifact`` 的"share/ 源文件存在"）。
+  guard（如 ``attach_artifact`` 的"share/ 源文件存在"）。
 """
 
 from __future__ import annotations
@@ -63,7 +65,9 @@ class TasksStoreError(Exception):
 
 
 class TaskExistsError(TasksStoreError):
-    """``open_task`` 在房间已有任意有效任务时 raise。P5.1 单任务限制（§7.1）。"""
+    """**保留类型**给老调用方 ``except`` 用；P5.2 起 ``open_task`` 不再抛此错（多任务
+    解禁，docs §7.2）。短期内 :mod:`chahua.server_inbound_task` 仍 ``except`` 这个类型
+    作为 dead branch，待 P5.2.13 文档收尾时再清。"""
 
 
 class TaskNotFoundError(TasksStoreError):
@@ -268,15 +272,9 @@ class TasksStore:
     ) -> Task:
         """创建新任务并设为 active。
 
-        P5.1 业务约束：房间已有任意有效任务时 raise :class:`TaskExistsError`。判定按
-        ``self._tasks`` 内存镜像，与启动期加载结果一致（§7.1 "判定按 tasks/*/task.json
-        存在性扫"）。
+        P5.2 起允许多任务共存：新建任务自动成为 active，旧 active 留作 ``status="open"``
+        进历史列表（docs §7.2）。P5.1 的 :class:`TaskExistsError` 不再抛。
         """
-        if self._tasks:
-            existing = next(iter(self._tasks))
-            raise TaskExistsError(
-                f"房间已有任务 {existing!r}；P5.1 单任务限制，请等 P5.2 支持多任务"
-            )
         task = Task.new(title=title, goal=goal, owner=owner, task_id=task_id)
         # 顺序：先建目录 + 写 task.json，再改内存 + 推 active + 写 state.json。
         # 任何一步抛 OSError 都要把已落的盘 / 内存回滚到 "open 没发生" 的状态 —— 服务端

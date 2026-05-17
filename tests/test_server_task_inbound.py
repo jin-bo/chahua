@@ -127,20 +127,23 @@ async def test_open_task_unknown_field_notice(session_and_srv):
     assert session.tasks_store.active_task_id is None
 
 
-async def test_open_task_already_has_task_rejected(session_and_srv):
+async def test_open_task_second_promotes_active(session_and_srv):
+    """P5.2.1：第二次 open_task 不再被拒，新任务成为 active，旧任务保留。"""
     session, srv = session_and_srv
-    session.tasks_store.open_task(title="一", goal="...")
+    t1 = session.tasks_store.open_task(title="一", goal="...")
     captured: list[dict] = []
     await srv._handle_inbound(
         {"type": INBOUND_OPEN_TASK, "title": "二", "goal": "..."},
         lambda env: captured.append(env.to_dict()),
     )
-    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
-    assert notices and notices[0]["data"]["level"] == "error"
-    # 重发 task_info 让前端复位 disabled 按钮
+    # 没有 NOTICE error；TASK_OPEN + TASK_INFO 都发
+    assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
+    assert ChahuaEventType.TASK_OPEN.value in _types(captured)
     assert ChahuaEventType.TASK_INFO.value in _types(captured)
-    # store 仍是一个 task
-    assert len(session.tasks_store.list_tasks()) == 1
+    # store 现在有 2 个 task，active 是新建那个
+    tasks = session.tasks_store.list_tasks()
+    assert {t.id for t in tasks} == {t1.id, session.tasks_store.active_task_id}
+    assert session.tasks_store.active_task_id != t1.id
 
 
 async def test_open_task_missing_title(session_and_srv):
