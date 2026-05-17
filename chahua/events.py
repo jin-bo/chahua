@@ -87,6 +87,13 @@ class ChahuaEventType(str, Enum):
     # P5.2.4：任务关闭（done / abandoned）—— hint 事件，前端用做局部反馈
     # （toast / 卡片样式翻灰），权威状态仍以紧跟其后的 TASK_INFO 为准。
     TASK_CLOSE = "task_close"
+    # P5.3.3：茶客通过 task_propose_* 工具发出的"提议"（开任务 / 记决策）。data 形状：
+    # ``{task_id?, proposer, kind: "decision"|"open", payload: {...}}``。**纯 hint** ——
+    # 写权限永远在用户（docs §8 不变量 #3）：前端渲染成"采纳 / 忽略"卡片，采纳后薄包装
+    # 转译回既有 ADD_DECISION / OPEN_TASK inbound，server handler 零改动。
+    # 工具自己经 ``transport.emit_chahua`` 推（speak() bind 期内 sink 有效）；不走 SDK
+    # AgentEvent 回调链，不动 transport_bridge._handle。
+    TASK_PROPOSAL = "task_proposal"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。
