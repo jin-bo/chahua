@@ -123,6 +123,8 @@ def _build_guests(
     guest_clients: dict[str, LLMClient],
     room: Room,
     paths: Paths,
+    *,
+    tasks_store: TasksStore,
 ) -> list[tuple[TeaGuest, str]]:
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
@@ -167,6 +169,7 @@ def _build_guests(
                 paths=paths, room_dir=room_config.room_dir,
             ),
             room=room,
+            tasks_store=tasks_store,
             permission=gc.permission,
             assets=assets,
             room_level_mcp=gc.extra_mcp_servers,
@@ -406,15 +409,17 @@ def build_room_session(
     )
     room.add_participant(USER_SPEAKER_ID)
 
-    guest_entries = _build_guests(room_config, guest_clients, room, paths)
+    tasks_store = TasksStore(room_dir=room_config.room_dir)
+    task_summaries = TaskSummaries(summary_client, tasks_store=tasks_store)
+
+    guest_entries = _build_guests(
+        room_config, guest_clients, room, paths, tasks_store=tasks_store,
+    )
     guests = [g for g, _ in guest_entries]
 
     effective_orch_config = _make_orchestrator_config(
         room_config.orchestrator_overrides, explicit=orchestrator_config
     )
-
-    tasks_store = TasksStore(room_dir=room_config.room_dir)
-    task_summaries = TaskSummaries(summary_client, tasks_store=tasks_store)
 
     orchestrator = Orchestrator(
         room=room,

@@ -40,6 +40,8 @@ from .mcp_thread import ThreadedMcpClientManager
 from .permissions import apply_permission_mode
 from .persona_assets import PersonaAssets
 from .room import Message, Room
+from .task_tools import register_task_tools
+from .tasks_store import TasksStore
 from .transport_bridge import ChahuaTransport
 
 _log = logging.getLogger(__name__)
@@ -97,6 +99,7 @@ class TeaGuest:
         llm_client: LLMClient,
         working_directory: Path,
         room: Room,
+        tasks_store: TasksStore,
         permission: str = "read-only",
         assets: Optional[PersonaAssets] = None,
         room_level_mcp: Optional[dict[str, dict]] = None,
@@ -150,6 +153,11 @@ class TeaGuest:
 
         # tool_runner 是 Agentao.__init__ 里装的，read-only 拦截必须在那之后才能套上。
         apply_permission_mode(self.agent, permission)
+
+        # P5.3.5：装载 task-aware 工具 (task_list_artifacts / task_propose_*)。
+        # 工厂内做 `agent.tools.register(...)` × 3；TeaGuest 本类不直接持工具逻辑，
+        # 工具读 transport.current_task_id snapshot（与 message_* envelope 同源）。
+        register_task_tools(self.agent, tasks_store=tasks_store, transport=self._transport)
 
     @property
     def permission(self) -> str:
