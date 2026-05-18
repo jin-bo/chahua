@@ -73,6 +73,39 @@ def test_prompt_includes_hint_when_count_positive():
     assert "0.6" in prompt
 
 
+# ── P5.6：task_block 注入 ────────────────────────────────────────────────
+
+
+def test_prompt_omits_current_task_when_task_block_empty():
+    """无 active task（task_block=""）→ prompt 不含 <current_task>。"""
+    prompt = _render_prompt(
+        guest_name="Elon Musk",
+        persona="founder",
+        transcript_text="老金 说：泡饭真好吃",
+        user_config=UserConfig(display_name="老金", full_md=None, source=None),
+    )
+    assert "<current_task" not in prompt
+
+
+def test_prompt_includes_current_task_when_task_block_present():
+    """task_block 非空 → prompt 含完整 <current_task> 块，title / goal first line 可见。"""
+    task_block = (
+        '\n<current_task status="进行中">\n标题：写 README\n目标：把茶话室文档补齐\n</current_task>\n'
+    )
+    prompt = _render_prompt(
+        guest_name="Elon Musk",
+        persona="founder",
+        transcript_text="老金 说：泡饭真好吃",
+        user_config=UserConfig(display_name="老金", full_md=None, source=None),
+        task_block=task_block,
+    )
+    assert "<current_task" in prompt
+    assert "标题：写 README" in prompt
+    assert "把茶话室文档补齐" in prompt
+    # 紧跟 user_block 之后（顺序：persona → user_block → task_block → transcript）
+    assert prompt.index("<current_task") < prompt.index("<transcript>")
+
+
 # ── L2：_count_self_mentions ───────────────────────────────────────────────
 
 
@@ -141,6 +174,7 @@ async def test_orchestrator_passes_mention_count_to_scorer():
             transcript_text,
             user_config,
             subject_mention_count=0,
+            task_block="",
         ):
             captured[guest_name] = subject_mention_count
             return ScoreResult(

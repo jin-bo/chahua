@@ -343,7 +343,8 @@ class Orchestrator:
             # （last_open_turn_id=None）UI 还在「发送」状态，无须补。
             try:
                 pick = await self._pick_next_speaker(
-                    respect_at_mention=self._consecutive_ai_turns == 0
+                    respect_at_mention=self._consecutive_ai_turns == 0,
+                    active_task_id=active_task_id,
                 )
             except asyncio.CancelledError:
                 if last_open_turn_id is not None:
@@ -422,7 +423,10 @@ class Orchestrator:
             self._kick_detect_new_artifacts(sink, active_task_id)
 
     async def _pick_next_speaker(
-        self, *, respect_at_mention: bool
+        self,
+        *,
+        respect_at_mention: bool,
+        active_task_id: Optional[str] = None,
     ) -> Optional[tuple[list[str], list[ScoreResult]]]:
         """选下一回合发言者；返回 ``(winners, all_scores)``，选不出 → ``None``。
 
@@ -464,11 +468,18 @@ class Orchestrator:
         if not scorables:
             return None
 
+        # P5.6：每 pick 周期渲染一次 task_block，N 个 scorer 共享同一字符串。
+        # 不进 _score_one —— 那样 N 茶客就要 N 次 get_task。closed / missing → "".
+        rendered = self._maybe_render_scoring_task_block(active_task_id)
+        task_block = (
+            "\n" + _wrap_current_task(rendered) + "\n" if rendered else ""
+        )
+
         transcript_text, recent = self._scoring_transcript()
         results: list[ScoreResult] = list(
             await asyncio.gather(
                 *(
-                    self._score_one(name, transcript_text, recent)
+                    self._score_one(name, transcript_text, recent, task_block)
                     for name in scorables
                 )
             )
@@ -501,6 +512,7 @@ class Orchestrator:
         guest_name: str,
         transcript_text: str,
         recent: list[Message],
+        task_block: str = "",
     ) -> ScoreResult:
         entry = self._guests[guest_name]
         mention_count = self._count_self_mentions(guest_name, recent)
@@ -510,6 +522,7 @@ class Orchestrator:
             transcript_text=transcript_text,
             user_config=self.user_config,
             subject_mention_count=mention_count,
+            task_block=task_block,
         )
 
     def _count_self_mentions(
@@ -665,6 +678,23 @@ class Orchestrator:
             return self._render_onboarding(guest_name, increment, task_block=task_block)
         return self._render_incremental(guest_name, increment, task_block=task_block)
 
+    def _resolve_renderable_task(
+        self, task_id: Optional[str]
+    ) -> Optional[Task]:
+        """``task_id`` → ``Task``，``None`` 表示本轮不该注入任何 task 视野。
+
+        四个 None 路径：① 缺 task_id；② 缺 store；③ store 无该任务；④ 任务终结态
+        （done / abandoned）。onboarding / incremental / scoring 三条 render 路径共用
+        这个 gate —— 一次 ``get_task`` 就出，不触碰 list_decisions / list_artifacts /
+        task_summaries.get 三个 read API（闲聊回合 / closed task 时省掉三次 IO）。
+        """
+        if task_id is None or self.tasks_store is None:
+            return None
+        task = self.tasks_store.get_task(task_id)
+        if task is None or task.status in CLOSED_STATUSES:
+            return None
+        return task
+
     def _maybe_render_task_block(
         self, task_id: Optional[str], *, compact: bool
     ) -> Optional[tuple[str, str]]:
@@ -673,19 +703,12 @@ class Orchestrator:
         返回 ``(body, status_display)`` 元组（调用方拼到 ``<current_task status="...">``
         XML 属性里）或 ``None``。
 
-        过滤路径（任一命中即不注入）：① 缺 task_id；② 缺 store；③ store 无该任务；
-        ④ 任务终结态（done / abandoned）。前 4 个走 1 次 ``get_task`` 就出，不触碰其余
-        三个 read API —— 闲聊回合 / closed task 时省掉 list_decisions / list_artifacts /
-        task_summaries.get 三次 IO。
-
-        compact 路径再短路一次：renderer 在 compact=True 时只读 task.title / task.goal，
+        compact 路径短路：renderer 在 compact=True 时只读 task.title / task.goal，
         丢弃 decisions / artifacts / summary —— 提前不取这三个数据，省掉 incremental 主
         路径每位发言茶客一次 artifacts/ 目录磁盘扫。
         """
-        if task_id is None or self.tasks_store is None:
-            return None
-        task = self.tasks_store.get_task(task_id)
-        if task is None or task.status in CLOSED_STATUSES:
+        task = self._resolve_renderable_task(task_id)
+        if task is None:
             return None
         if compact:
             return _render_task_block(task, [], [], [], compact=True)
@@ -699,6 +722,25 @@ class Orchestrator:
         return _render_task_block(
             task, decisions, artifacts, summary_tail, compact=False
         )
+
+    def _maybe_render_scoring_task_block(
+        self, task_id: Optional[str]
+    ) -> Optional[tuple[str, str]]:
+        """P5.6：scoring 专用极简 task body —— title + goal first line + status。
+
+        与 :meth:`_maybe_render_task_block(compact=True)` 区别：**不含** ``./task/`` 写入
+        指引（那是发言阶段执行语义，混进打分会污染"想接话吗"的相关性信号）。每 pick 周期
+        调一次，N 个 scorer 共享结果。``None`` 路径同 :meth:`_resolve_renderable_task`。
+
+        共享 :func:`_render_task_header`：与 speak compact body 在 title / goal first line
+        / status 这层纯数据格式化上同源（CLAUDE.md P5.6 invariant 明示允许共享的层）；
+        差异在调用方 —— speak compact 会追加 ``./task/`` 指引行，scoring 不追加。
+        """
+        task = self._resolve_renderable_task(task_id)
+        if task is None:
+            return None
+        lines, status_display = _render_task_header(task)
+        return "\n".join(lines), status_display
 
     def _render_onboarding(
         self,
@@ -940,6 +982,25 @@ def _wrap_current_task(task_block: tuple[str, str]) -> str:
     return f"<current_task status={quoteattr(status_display)}>\n{body}\n</current_task>"
 
 
+def _render_task_header(task: Task) -> tuple[list[str], str]:
+    """compact body 的头两行 + status_display —— scoring 与 speak compact 共享（P5.6）。
+
+    输出 ``["标题：...", "目标：<first line>"]``（goal 为空时只输出标题行）+ status
+    枚举显示名。**不含** ``./task/`` 写入指引 —— 那是发言阶段执行语义，speak compact
+    自己在调用方追加，scoring 不追加。
+
+    full 模式（``_render_task_block(compact=False)``）独立路径，含 owner / full goal /
+    decisions / artifacts / summary —— 与 compact header 重叠仅一两行，不强行共享。
+    """
+    title = task.title or TASK_UNTITLED
+    status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
+    lines = [f"标题：{title}"]
+    first_line = task.goal.split("\n", 1)[0].strip() if task.goal else ""
+    if first_line:
+        lines.append(f"目标：{first_line}")
+    return lines, status_display
+
+
 def _render_task_block(
     task: Task,
     decisions: list[Decision],
@@ -953,21 +1014,19 @@ def _render_task_block(
     返回 ``(body, status_display)`` 元组——``status_display`` 由调用方拼到
     ``<current_task status="...">`` XML 属性里，body 不再含状态行。
     """
-    title = task.title or TASK_UNTITLED
-    status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
     if compact:
-        first_line = task.goal.split("\n", 1)[0].strip() if task.goal else ""
-        lines = [f"标题：{title}"]
-        if first_line:
-            lines.append(f"目标：{first_line}")
+        lines, status_display = _render_task_header(task)
         # P5.4：./task/ 是任务工作目录，可读写。茶客新产物**必须**写到 ./task/<name>。
-        # 写到 cwd / ./share/ 等别处不会自动归集进任务产物清单。
+        # 写到 cwd / ./share/ 等别处不会自动归集进任务产物清单。scoring 路径不追加此行
+        # （走 _render_task_header 后直接 join）。
         lines.append(
             "./task/ 是本任务工作目录（可读写）。任务产物务必写到 ./task/<name>，"
             "自动入任务；写到 cwd / ./share/ 等别处不算入任务产物。"
         )
         return "\n".join(lines), status_display
 
+    title = task.title or TASK_UNTITLED
+    status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
     parts: list[str] = [f"标题：{title}"]
     if task.owner:
         parts.append(f"负责人：{task.owner}")

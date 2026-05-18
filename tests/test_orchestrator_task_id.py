@@ -71,7 +71,7 @@ class _ScripedScorer(IntentScorer):
     def __init__(self) -> None:
         self._n = 0
 
-    async def score(self, *, guest_name, persona, transcript_text, user_config, subject_mention_count=0):
+    async def score(self, *, guest_name, persona, transcript_text, user_config, subject_mention_count=0, task_block=""):
         self._n += 1
         # A always wins round 1, then max_consecutive_ai_turns=1 stops chain
         return ScoreResult(
@@ -152,6 +152,79 @@ async def test_speak_receives_snapshot_active_task_id(tmp_path: Path):
     await orch.submit_user_message("hi", sink=lambda _: None)
     guest_a = orch._guests["A"].guest  # type: ignore[attr-defined]
     assert guest_a.last_task_id_seen == t1.id
+
+
+class _CapturingScorer(IntentScorer):
+    """P5.6 capturing scorer：截留 task_block，本身打 0 分让链路终止于 pick 失败。"""
+
+    def __init__(self) -> None:
+        self.captured: dict[str, str] = {}
+
+    async def score(
+        self, *, guest_name, persona, transcript_text, user_config,
+        subject_mention_count=0, task_block="",
+    ):
+        self.captured[guest_name] = task_block
+        return ScoreResult(
+            guest_name=guest_name, score=0.0, kind=ScoreKind.SCORED,
+        )
+
+
+def _build_capturing_orch(
+    room: Room, store: TasksStore, *guest_names: str
+) -> tuple[Orchestrator, _CapturingScorer]:
+    scorer = _CapturingScorer()
+    orch = Orchestrator(
+        room=room,
+        user_config=UserConfig(display_name="老金", full_md=None, source=None),
+        scorer=scorer,
+        summarizer=NoopSummarizer(),
+        cursor=GuestCursor(),
+        config=OrchestratorConfig(
+            max_consecutive_ai_turns=1, max_speakers_per_pick=1, summary_block_size=999,
+        ),
+        tasks_store=store,
+    )
+    for name in guest_names:
+        orch.register(_StubGuest(name, room), persona_md=f"{name} persona")
+    return orch, scorer
+
+
+async def test_scoring_receives_task_block_from_snapshot(tmp_path: Path):
+    """P5.6：入口 snapshot 的 active_task_id 透传到 scoring 的 task_block。
+
+    与 line 143 既有 speak snapshot 测同口径——断言 IntentScorer 拿到的 task_block 含
+    active task 的 title / goal first line，且 N 个 scorer 拿到**同一字符串**（每 pick
+    周期 1 次 get_task 共享）。
+    """
+    room = Room(name="t")
+    room.add_participant(USER_SPEAKER_ID)
+    store = TasksStore(room_dir=tmp_path)
+    store.open_task(title="写文档", goal="把茶话室 README 补齐")
+    orch, scorer = _build_capturing_orch(room, store, "A", "B")
+
+    await orch.submit_user_message("hi", sink=lambda _: None)
+
+    assert set(scorer.captured) == {"A", "B"}
+    a_block = scorer.captured["A"]
+    assert "<current_task" in a_block
+    assert "写文档" in a_block
+    assert "把茶话室 README 补齐" in a_block
+    # P5.6 关键：scoring 极简块不含 ./task/ 指引
+    assert "./task/" not in a_block
+    # N 个 scorer 拿到同一字符串（每 pick 周期 1 次 get_task 共享）
+    assert scorer.captured["A"] == scorer.captured["B"]
+
+
+async def test_scoring_no_task_block_when_no_active(tmp_path: Path):
+    """无 active task → scoring 收到空 task_block（不含 <current_task>）。"""
+    room = Room(name="t")
+    room.add_participant(USER_SPEAKER_ID)
+    store = TasksStore(room_dir=tmp_path)  # 不开任何 task
+    orch, scorer = _build_capturing_orch(room, store, "A")
+
+    await orch.submit_user_message("hi", sink=lambda _: None)
+    assert scorer.captured["A"] == ""
 
 
 async def test_caller_supplied_task_id_overrides_store_snapshot(tmp_path: Path):

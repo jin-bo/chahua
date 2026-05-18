@@ -97,6 +97,48 @@ def test_bidirectional_repair_multi_tasks_no_active(tmp_path: Path):
     assert ids == {a.id, b.id}
 
 
+def test_explicit_null_active_multi_tasks_silent(tmp_path: Path):
+    """state.json 显式 ``{"active_task_id": null}`` 是用户关掉所有 active 后的稳态：
+    再次加载时**不应该** warn / emit NOTICE —— 之前用 ``dict.get(..., None)`` 拿到 None
+    把这种情况和"state.json 真丢"一锅炖，每次开房间都弹同样的 warning。"""
+    # 先开 3 个 task，然后用 set_active(None) 把 state.json 显式置 null（模拟用户
+    # 关掉了最后一个 active task）—— close_task 的最后一步走的就是这条路径
+    store = TasksStore(room_dir=tmp_path)
+    store.open_task(title="A", goal="g")
+    store.open_task(title="B", goal="g")
+    store.open_task(title="C", goal="g")
+    store.set_active(None)
+    state = json.loads((tmp_path / "tasks" / "state.json").read_text(encoding="utf-8"))
+    assert state == {"active_task_id": None}
+
+    # 再次加载：active 应保持 None，无 warning（不像 unlink 那样）
+    store2 = TasksStore(room_dir=tmp_path)
+    assert store2.active_task_id is None
+    assert store2.consume_load_warnings() == []
+    # 第三次加载仍稳定 —— state.json 内容不变
+    store3 = TasksStore(room_dir=tmp_path)
+    assert store3.consume_load_warnings() == []
+    state_after = json.loads((tmp_path / "tasks" / "state.json").read_text(encoding="utf-8"))
+    assert state_after == {"active_task_id": None}
+
+
+def test_explicit_null_active_single_task_does_not_promote(tmp_path: Path):
+    """state.json 显式 null + 唯一 task → **不**自动 promote。
+    用户在仅剩一个任务时 close 掉它（active 显式置 null）后，重启不应该悄悄把它复活
+    —— 与"state.json 真丢"的 auto-recover ② 区分。"""
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="独苗", goal="g")
+    store.set_active(None)
+    state = json.loads((tmp_path / "tasks" / "state.json").read_text(encoding="utf-8"))
+    assert state == {"active_task_id": None}
+
+    store2 = TasksStore(room_dir=tmp_path)
+    assert store2.active_task_id is None
+    assert store2.consume_load_warnings() == []
+    # task 仍在（list 可见、UI 可手动 set_active 重启）
+    assert {x.id for x in store2.list_tasks()} == {t.id}
+
+
 def test_bidirectional_repair_multi_tasks_invalid_active(tmp_path: Path):
     """state.json 指向不存在 task + 仍有 >1 个有效 task → 同样保持 None + warning。"""
     store = TasksStore(room_dir=tmp_path)
@@ -534,6 +576,26 @@ def test_list_artifacts_after_attach(tmp_path: Path):
     # rel 必须与 attach_artifact 返回值同口径 —— task_info 是权威快照，前端从这里取路径。
     assert arts[0]["rel"] == f"tasks/{t.id}/artifacts/a.md"
     assert arts[1]["rel"] == f"tasks/{t.id}/artifacts/b.md"
+
+
+def test_list_artifacts_ignores_os_metadata_files(tmp_path: Path):
+    """macOS Finder / Windows 资源管理器在 artifacts/ 留下的 ``.DS_Store`` /
+    ``._<name>`` / ``Thumbs.db`` 等不应当出现在产物清单里 —— 否则
+    ``_kick_detect_new_artifacts`` 会把它们当成茶客新写入的产物 emit。"""
+    share = tmp_path / "share"
+    share.mkdir()
+    (share / "real.md").write_text("real", encoding="utf-8")
+    store = TasksStore(room_dir=tmp_path)
+    t = store.open_task(title="t", goal="g")
+    store.attach_artifact(t.id, share_rel="real.md", share_root=share)
+    # 模拟 Finder / 资源管理器写入元数据
+    adir = store.artifacts_dir(t.id)
+    (adir / ".DS_Store").write_bytes(b"\x00\x00\x00\x00")
+    (adir / "._real.md").write_bytes(b"AppleDouble")
+    (adir / "Thumbs.db").write_bytes(b"thumbs")
+    (adir / "desktop.ini").write_text("[.ShellClassInfo]\n", encoding="utf-8")
+    arts = store.list_artifacts(t.id)
+    assert [a["name"] for a in arts] == ["real.md"]
 
 
 def test_open_task_rolls_back_when_state_write_fails(tmp_path: Path, monkeypatch):

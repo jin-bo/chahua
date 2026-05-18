@@ -87,6 +87,25 @@ _DECISIONS_FILENAME = "decisions.jsonl"
 _EVENTS_FILENAME = "events.jsonl"  # P5.2.2 起
 _ARTIFACTS_DIRNAME = "artifacts"
 
+# OS 自动生成的元数据文件 —— 不入产物清单（避免 macOS Finder / Windows 资源管理器在
+# ``tasks/<id>/artifacts/`` 留下的 ``.DS_Store`` / ``._foo.md`` / ``Thumbs.db`` 等被
+# ``_kick_detect_new_artifacts`` 当成茶客新产物 emit。AppleDouble companion 文件用前缀
+# ``._`` 匹配（copy 到非 HFS 文件系统时 macOS 自动生成 ``._<原名>``）。
+_OS_METADATA_FILENAMES = frozenset({
+    ".DS_Store", "Thumbs.db", "desktop.ini", "ehthumbs.db",
+})
+
+
+def _is_os_metadata_file(name: str) -> bool:
+    """``True`` = OS 自动生成的元数据文件（macOS / Windows），产物扫描时跳过。"""
+    if name in _OS_METADATA_FILENAMES:
+        return True
+    # AppleDouble companion files：``._<filename>``。注意单字符 ``"."`` 不算 —— 极少见
+    # 但若 user 真创建个名为 "." 的文件让它通过也无害（``Path.is_file`` 已挡）。
+    if name.startswith("._") and len(name) > 2:
+        return True
+    return False
+
 
 class TasksStoreError(Exception):
     """业务约束违例的基类。各种具体错落到下面的子类。"""
@@ -216,25 +235,48 @@ class TasksStore:
     def _resolve_and_repair_active(self) -> None:
         """双向修复 state.json ↔ task.json（§7.1 / §7.2，docs §10）：
 
-        ① state.json 指向不存在 task → 清回 None + 回写
-        ② state.json 缺 + 唯一 task → 自动设 active + 回写
-        ③ state.json 缺 + 多 task（P5.2 起会发生）→ 保持 None + 记 NOTICE info 让
-           用户在 UI 指定 active；不自动选第一个，避免"用户以为在 A 但消息写到 B"
+        ① state.json 指向不存在 task → 清回 None + 回写（+ 多 task 时 warn 让用户选）
+        ② state.json **真缺**（文件不存在 / 非 dict / 缺 key）+ 唯一 task → 自动设
+           active + 回写
+        ③ state.json **真缺** + 多 task（P5.2 起会发生）→ 保持 None + 回写显式 null +
+           记 NOTICE info 让用户在 UI 指定 active；不自动选第一个
+
+        **state.json 显式 ``{"active_task_id": null}`` 是合法稳态**（用户关掉最后一个
+        active 后的常见落地状态），不进 auto-recover、不 warn —— 区分"用户已表达
+        意图"和"系统状态丢失"。``dict.get("active_task_id")`` 拿到 None 时这两种情况
+        长得一样，必须用 ``"active_task_id" in state`` 单独判 key 存在性。
         """
         state = read_json_or_none(self.state_path)
-        active_raw = (
-            state.get("active_task_id")
-            if isinstance(state, dict) else None
-        )
+        key_present = isinstance(state, dict) and "active_task_id" in state
+        active_raw = state["active_task_id"] if key_present else None
+
         if isinstance(active_raw, str) and active_raw in self._tasks:
             self._active_task_id = active_raw
             return
+
         self._active_task_id = None
-        if active_raw is not None:
+
+        if isinstance(active_raw, str):
+            # 修复 ①：state.json 写了 ghost id（不在已加载任务中）→ 清回 None + 回写
             _log.warning(
                 "state.json.active_task_id=%r 不在已加载任务中，清回 None",
                 active_raw,
             )
+            self._write_state()
+            if len(self._tasks) > 1:
+                # ghost + multi-task：用户原本指向某个 active，我们清了 —— 提示重选
+                self._warn_multi_task_no_active(
+                    notice_lead=f"state.json 中的 active 已失效（清回 None）；现有 {len(self._tasks)} 个任务，",
+                    log_reason="ghost active 已清",
+                )
+            return
+
+        if key_present:
+            # state.json 显式 ``active_task_id: null`` —— 用户意图就是"无 active"，
+            # 不 auto-recover、不 warn。用户关 active task 后的稳态走这条。
+            return
+
+        # state.json 真缺（文件不存在 / 非 dict / 缺 key）→ 走 auto-recover
         if len(self._tasks) == 1:
             # 修复 ②
             (only_id,) = self._tasks.keys()
@@ -246,22 +288,31 @@ class TasksStore:
             self._write_state()
             return
         if len(self._tasks) > 1:
-            # 修复 ③：不自动选，让用户在 UI 二次确认。state.json 仍把 None 落盘
-            # （若刚才 active_raw 是非法 str 还得清回，没多写）。
-            if isinstance(active_raw, str):
-                self._write_state()
-            self._load_warnings.append(
-                f"加载发现 {len(self._tasks)} 个任务但 state.json 未指定 active；"
-                "请在任务面板选一个继续，新消息暂归房间级。"
-            )
-            _log.warning(
-                "tasks/state.json 缺 active 且有 %d 个 task.json，保持 active=None 等用户选",
-                len(self._tasks),
+            # 修复 ③：不自动选，让用户在 UI 二次确认。回写显式 null —— 下次启动看到
+            # 显式 null 就走"用户已表达意图"分支，不再重复 warn。
+            self._write_state()
+            self._warn_multi_task_no_active(
+                notice_lead=f"加载发现 {len(self._tasks)} 个任务但 state.json 未指定 active；",
+                log_reason="tasks/state.json 缺 active",
             )
             return
-        # len == 0
-        if isinstance(active_raw, str):
-            self._write_state()  # 修复 ①
+        # len == 0：state.json 真缺 + 无 task —— 写一份显式 null 让下次启动稳定
+        self._write_state()
+
+    def _warn_multi_task_no_active(self, *, notice_lead: str, log_reason: str) -> None:
+        """多任务 + 无 active 时的 NOTICE info + WARN 日志（修复 ① / ③ 共用）。
+
+        ``notice_lead`` 是给用户的开场（含任务数），与下面"请在任务面板选一个继续，新
+        消息暂归房间级。"统一收尾。``log_reason`` 是日志前缀（``ghost active 已清``
+        / ``tasks/state.json 缺 active``），区分两条触发路径。
+        """
+        self._load_warnings.append(
+            f"{notice_lead}请在任务面板选一个继续，新消息暂归房间级。"
+        )
+        _log.warning(
+            "%s + 有 %d 个 task.json，保持 active=None 等用户选",
+            log_reason, len(self._tasks),
+        )
 
     def _write_state(self) -> None:
         """落 state.json。``active_task_id == None`` 时写 ``{"active_task_id": null}`` —— 显式
@@ -343,6 +394,8 @@ class TasksStore:
             return out
         for p in sorted(adir.iterdir()):
             if not p.is_file():
+                continue
+            if _is_os_metadata_file(p.name):
                 continue
             try:
                 st = p.stat()

@@ -82,6 +82,7 @@ class _ScriptedScorer(IntentScorer):
         transcript_text,
         user_config,
         subject_mention_count=0,
+        task_block="",
     ):
         self._calls += 1
         if self._calls <= 2:
@@ -182,6 +183,7 @@ async def test_cancel_during_first_round_scoring_no_fixup():
             transcript_text,
             user_config,
             subject_mention_count=0,
+            task_block="",
         ):
             first_round_started.set()
             await self._gate.wait()

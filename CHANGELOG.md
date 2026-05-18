@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### Added
+- **P5.6 打分结合任务要求**（2026-05-17，详见 [`docs/P5.6-打分结合任务要求.md`](docs/P5.6-打分结合任务要求.md)）：scoring prompt 加极简 `<current_task>` XML 块，让"想接话"看见当前任务。每 pick 周期 1 次 `get_task`，N 个 scorer 共享同一字符串。
+
 ### Changed
 - **`chahua/server.py` 按 inbound feature 拆 handler 类**（2026-05-17，P5.2 重构起步，详见 [`docs/P5-任务房间.md`](docs/P5-任务房间.md) §7.2）：`server.py` 2116 → 1022 行（-52%）。30+ 个 `_inbound_*` handler 切到 4 个文件 `server_inbound_{admin,task,io,settings}.py`；模块顶共享小工具集中到 `_server_helpers.py`。**先用多继承 mixin 装配，同日再换成组合**：`ChahuaServer.__init__` 实例化 `self.admin` / `self.io` / `self.settings` / `self.task` 四个 slot，handler 持 `self.server` 反向引用。原 `_INBOUND_HANDLERS` 表先改成 `(slot, method_name)` 元组字典，随后再简化为模块级 `_INBOUND_ROUTES: dict[str, str]`（属性路径字符串如 `"admin._inbound_add_guest"`），`__init__` 时 `_bind_inbound_handlers(self)` 走 `operator.attrgetter` 一次性解析成 `self._inbound_handlers` bound-method 字典；dispatch 退化为单次 dict 查（之前是双 getattr）。属性路径无 `.` 表示 method 在 `ChahuaServer` 自身（cancel / switch_room / clear_room / user_message）。外部 API（`from chahua.server import ChahuaServer` / 主入口）零变化，383 测试全过；模块级 `_INBOUND_HANDLERS` 已重命名为 `_INBOUND_ROUTES`（私有符号，无外部依赖）。`_UPLOAD_MAX_BYTES` 与 `ensure_room_share_dir` 等模块级符号位置改变，monkeypatch 测试需要点到 `chahua.server_inbound_io` / `chahua.server_inbound_task` 而不是 `chahua.server`；`object.__new__(ChahuaServer)` 跳 `__init__` 的测试夹具需要手工 `srv.task = TaskHandlers(srv)` 等装回 slot。
 
