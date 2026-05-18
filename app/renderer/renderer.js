@@ -25,14 +25,10 @@ import {
   buildOwnerOptionData,
   formatTaskLabel,
   isTaskClosed,
-  taskStatusLabel,
 } from "./events.js";
 import {
-  attachPopoverDismissHandlers,
   closeActionPopover,
-  makePopoverOption,
   openActionPopover,
-  positionPopoverAboveAnchor,
 } from "./ui_popover.js";
 import {
   renderMarkdown,
@@ -57,6 +53,7 @@ import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import { createTaskPanel } from "./task_panel.js";
 import { createProposalCard } from "./proposal_card.js";
+import { createComposerTaskChip } from "./composer_task_chip.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -1138,6 +1135,21 @@ function attachArtifact(rel) {
   setStatus("", `拷贝「${rel}」到任务「${active.title || TASK_UNTITLED}」…`);
 }
 
+// composer 底栏的任务 chip + 切换任务 dropdown（P5.2.10 / P5.2.8）。在 taskPanel 之前
+// 构造 —— onSetActive 复用本模块的 sendSetActiveTask 让"任务卡里切 active"和"chip
+// dropdown 里切 active"走完全同一行 wire 帧。
+const composerTaskChip = createComposerTaskChip({
+  chipEl: composerTaskChipEl,
+  isConnected: () => connected,
+  send,
+  setStatus,
+  taskState,
+  closeOtherPopovers: () => {
+    closeActionPopover();
+    closePermissionPopover();
+  },
+});
+
 // 任务面板（订阅 task_state；TASK_INFO 到达 → 全量重渲）。模块级单例 —— 重连不重建，
 // 重连后服务端 _emit_room_snapshot 会重发 task_info 让面板状态前进。
 const taskPanel = createTaskPanel({
@@ -1159,7 +1171,7 @@ const taskPanel = createTaskPanel({
   // 点"其它任务"折叠区的卡片 / composer chip dropdown 都走同一入口。server 端
   // _inbound_set_active_task 走前 cancel inflight turn，前端不必再判 connected 之外
   // 的状态。
-  onSetActive: sendSetActiveTask,
+  onSetActive: composerTaskChip.sendSetActiveTask,
   // 每次重渲都 fresh 拉 —— 茶客加 / 删后 owner 下拉同步刷新（room_info 回环会触发
   // taskState 重渲，guests 已先一步在 renderSidebar 里更新）。
   getGuestNames: () => guests.map((g) => g.name),
@@ -1194,99 +1206,11 @@ taskState.subscribe((state) => {
   // 0 任务 → 整个 chip 隐起来（与 P5.1 同口径，避免点开"房间级"下拉发现啥可切的都没）
   composerTaskChipEl.hidden = !hasAny;
   if (hasAny) {
-    renderComposerTaskChip(active);
+    composerTaskChip.render(active);
   }
   // body class 给 CSS 用 —— 控制 share/ pill 上 "拷贝到当前任务" 按钮是否可见。
   document.body.classList.toggle("has-active-task", !!active);
   updateNewTaskBtn();
-});
-
-function renderComposerTaskChip(active) {
-  const titleText = active ? active.title || TASK_UNTITLED : null;
-  composerTaskChipEl.replaceChildren();
-  const label = document.createElement("span");
-  label.className = "composer-task-chip-label";
-  label.textContent = active ? formatTaskLabel(active) : "🗨 房间级";
-  const chev = document.createElement("span");
-  chev.className = "composer-task-chip-chevron";
-  chev.textContent = "▾";
-  composerTaskChipEl.appendChild(label);
-  composerTaskChipEl.appendChild(chev);
-  composerTaskChipEl.title = active
-    ? `当前任务：${titleText} —— 点击切换`
-    : "当前未挂任务（房间级闲聊）—— 点击切到任务";
-  composerTaskChipEl.classList.toggle("composer-task-chip-empty", !active);
-}
-
-// composer chip dropdown（P5.2.8）—— 列所有 status != closed 的任务 + "🗨 房间级"
-// 选项，当前 active 标 .selected。chip 在 composer 底栏，popover 走 anchor 上方位置
-// （anchor 下方一定溢出屏幕）。dismiss 沿用 ui_popover.attachPopoverDismissHandlers：
-// outside mousedown / ESC → close；同 anchor 再点 chip 也 toggle 关闭。
-let _chipDropdownEl = null;
-let _detachChipDismiss = null;
-
-function closeTaskChipDropdown() {
-  if (_chipDropdownEl) {
-    _chipDropdownEl.remove();
-    _chipDropdownEl = null;
-  }
-  if (_detachChipDismiss) {
-    _detachChipDismiss();
-    _detachChipDismiss = null;
-  }
-}
-
-function openTaskChipDropdown() {
-  if (!connected) return;
-  if (_chipDropdownEl) {
-    closeTaskChipDropdown();
-    return;
-  }
-  // 跨 popover 互斥：开 chip 前关 action / permission（反向靠 outside-mousedown 兜底）。
-  closeActionPopover();
-  closePermissionPopover();
-  const state = taskState.getState();
-  const active = taskState.getActiveTask();
-  // 列：所有非终结态任务 + 当前 active（即使是 closed，也保留让用户看到自己挂在哪）。
-  const items = state.tasks.filter(
-    (t) => !isTaskClosed(t.status) || (active && t.id === active.id),
-  );
-  const pop = document.createElement("div");
-  pop.className = "popover task-chip-dropdown";
-  pop.appendChild(makePopoverOption({
-    label: "🗨 房间级",
-    desc: active ? "不归任何任务（聊天回到房间级闲聊）" : "当前选中",
-    current: !active,
-    extraClass: "task-chip-option",
-    onClose: closeTaskChipDropdown,
-    onClick: () => active && sendSetActiveTask(null),
-  }));
-  for (const t of items) {
-    const isCurrent = !!(active && t.id === active.id);
-    pop.appendChild(makePopoverOption({
-      label: formatTaskLabel(t),
-      desc: isCurrent ? "当前选中" : `状态：${taskStatusLabel(t.status)}`,
-      current: isCurrent,
-      extraClass: "task-chip-option",
-      onClose: closeTaskChipDropdown,
-      onClick: () => !isCurrent && sendSetActiveTask(t.id),
-    }));
-  }
-  document.body.appendChild(pop);
-  positionPopoverAboveAnchor(pop, composerTaskChipEl);
-  _chipDropdownEl = pop;
-  _detachChipDismiss = attachPopoverDismissHandlers(pop, closeTaskChipDropdown);
-}
-
-function sendSetActiveTask(taskId) {
-  if (!connected) return;
-  send({ type: Inbound.SET_ACTIVE_TASK, task_id: taskId });
-  setStatus("", taskId == null ? "切回房间级…" : "切换任务…");
-}
-
-composerTaskChipEl.addEventListener("click", (ev) => {
-  ev.stopPropagation();
-  openTaskChipDropdown();
 });
 
 taskPanelNewBtn.addEventListener("click", () => {
