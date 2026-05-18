@@ -23,6 +23,12 @@ from .events import (
 )
 from .session import ensure_room_share_dir, relink_task_dirs
 from .task import MARKED_BY_USER
+from .task_event_text import (
+    add_decision_text,
+    attach_artifact_text,
+    close_task_text,
+    open_task_text,
+)
 from .tasks_store import (
     ArtifactSourceMissingError,
     CLOSED_STATUSES,
@@ -145,6 +151,9 @@ class TaskHandlers:
             sink, type=ChahuaEventType.TASK_OPEN, data=task.to_jsonl_dict(),
         )
         self._emit_task_info(sink)
+        await self.server._kick_synthesized_user_message(
+            open_task_text(task), sink, task_id=task.id,
+        )
 
     async def _inbound_update_task(self, data: dict, sink: EnvelopeSink) -> None:
         if not self.server._reject_unknown_keys(
@@ -360,6 +369,12 @@ class TaskHandlers:
             },
         )
         self._emit_task_info(sink)
+        # task_id=task.id（不读 store.active_task_id）：close_task 后 active 可能已被
+        # store 清空，但合成消息按"关闭那个任务"的语义归到被关的 task 上。
+        await self.server._kick_synthesized_user_message(
+            close_task_text(task, status),  # type: ignore[arg-type]
+            sink, task_id=task.id,
+        )
 
     async def _inbound_attach_artifact(
         self, data: dict, sink: EnvelopeSink
@@ -415,6 +430,11 @@ class TaskHandlers:
             },
         )
         self._emit_task_info(sink)
+        # task_id 用 inbound 指定值（可能不是当前 active —— 用户在"老任务"卡片上
+        # 挂产物的场景）。
+        await self.server._kick_synthesized_user_message(
+            attach_artifact_text(info["name"]), sink, task_id=task_id,
+        )
 
     async def _inbound_add_decision(
         self, data: dict, sink: EnvelopeSink
@@ -462,6 +482,9 @@ class TaskHandlers:
             data=decision.to_jsonl_dict(),
         )
         self._emit_task_info(sink)
+        await self.server._kick_synthesized_user_message(
+            add_decision_text(decision), sink, task_id=task_id,
+        )
 
     def _snapshot_active_task_id(self) -> Optional[str]:
         """接帧同步快照当前 active task —— 不能延到 _run_turn 里再读：从这次

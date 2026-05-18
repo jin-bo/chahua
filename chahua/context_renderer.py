@@ -19,12 +19,28 @@ from .room import Message, Room, format_messages
 from .summarizer import SummarySpan, Summarizer, TaskSummaries
 from .task import Task
 from .task_rendering import (
+    render_scoring_header,
     render_task_block,
     render_task_header,
     wrap_current_task,
 )
 from .tasks_store import CLOSED_STATUSES, TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
+
+# speak 阶段的"goal 指定发言顺序"硬约束（scoring.py 的 ``_ORDER_HINT_BLOCK`` 对应物）。
+# 措辞与 scoring 不同：scoring 给数字锚点（≤ 0.3 / ≥ 0.7），speak 给行为指令（让位句 vs 完整发言）。
+# 仅在 ``task_block`` 非空时注入，无 task 时引用 ``<current_task>`` 反而迷惑 LLM。
+# 与 scoring 的 hint 同口径，但**不能合并为同一字符串**：scoring 看到这条会把"输出让位句"
+# 当作发言指令污染分数计算，speak 看到 scoring 的"调整想接话的程度"等同空指令。
+_SPEAK_ORDER_HINT_BLOCK = (
+    "<order_hint>\n"
+    "如果 <current_task> 中的目标指定了发言顺序（如\"先 X 再 Y 后 Z\"、\"Z 最后总结\"），"
+    "请先判断现在是否轮到你发言：\n"
+    "- 没轮到你时**不要按本职角色完整发言**——只输出一句简短的让位句"
+    "（如\"等评审专家先依次评完，我再来总结\"），把麦让给该轮到的角色。\n"
+    "- 轮到你时按本职完整发言。\n"
+    "</order_hint>"
+)
 
 
 class ContextRenderer:
@@ -129,16 +145,18 @@ class ContextRenderer:
     def maybe_render_scoring_task_block(
         self, task_id: Optional[str]
     ) -> Optional[tuple[str, str]]:
-        """P5.6：scoring 专用极简 task body —— title + goal first line + status。
+        """P5.6：scoring 专用极简 task body —— title + **完整 goal** + status。
 
         与 :meth:`maybe_render_task_block(compact=True)` 区别：**不含** ``./task/`` 写入
-        指引（那是发言阶段执行语义，混进打分会污染"想接话吗"的相关性信号）。每 pick 周期
-        调一次，N 个 scorer 共享结果。``None`` 路径同 :meth:`resolve_renderable_task`。
+        指引（那是发言阶段执行语义，混进打分会污染"想接话吗"的相关性信号）；并且 goal 走
+        **完整内容**而非首行 —— goal 里常写"先 X 再 Y 后 Z"这类角色顺序，砍到首行会让
+        打分模型把"应该最后说话"的角色误判成"现在就该说话"。每 pick 周期调一次，N 个
+        scorer 共享结果，goal 膨胀不放大成本。``None`` 路径同 :meth:`resolve_renderable_task`。
         """
         task = self.resolve_renderable_task(task_id)
         if task is None:
             return None
-        lines, status_display = render_task_header(task)
+        lines, status_display = render_scoring_header(task)
         return "\n".join(lines), status_display
 
     # ── 打分用 transcript ──────────────────────────────────────────────
@@ -183,8 +201,9 @@ class ContextRenderer:
 
         XML 标签包外层 + Markdown 渲内层是茶话室喂茶客 LLM 的固定形态（见
         CLAUDE.md 关键不变量）。块顺序：``<room>`` → ``<user_persona>`` →
-        ``<room_summary>`` → ``<current_task>`` → ``<recent_messages>`` →
-        ``<speak_instruction>``。可选块按"无内容则整块省略"裁剪。
+        ``<room_summary>`` → ``<current_task>`` → ``<order_hint>`` →
+        ``<recent_messages>`` → ``<speak_instruction>``。可选块按"无内容则整块省略"
+        裁剪；``<order_hint>`` 与 ``<current_task>`` 同生共灭。
         """
         display_for = self.display_map()
 
@@ -208,12 +227,19 @@ class ContextRenderer:
 
         # USER.md 自带的 H2（"## 身份" 等）被 <user_persona> 包住后自然降级为段内标题，
         # 不再与外层 XML 结构同视觉级 —— 这是 XML 化包外层的核心收益。
+        #
+        # 介绍语用 display_name 显式称呼（替代旧"该参与者"绕过指代）：XML 属性已经把
+        # display_name 给了 LLM，body 里再用"该参与者"会让模型多做一步指代消解；直接
+        # 用名字也更自然。display_name 在 body 文本（非属性）位置出现已有先例（``<room>``
+        # 块的"在场"行也是裸 display_name），不引入新的注入面 —— 含 ``<`` / ``&`` 时影响
+        # 的是 LLM 阅读体验而非 XML 边界（边界承重的是 ``quoteattr`` 包过的属性值）。
         if self.user_config.has_persona and self.user_config.full_md:
             body = strip_top_h1(self.user_config.full_md).strip()
             if body:
+                display_name = self.user_config.display_name
                 blocks.append(
-                    f"<user_persona display_name={quoteattr(self.user_config.display_name)}>\n"
-                    "以下是该参与者关于自己的说明：\n\n"
+                    f"<user_persona display_name={quoteattr(display_name)}>\n"
+                    f"以下是 {display_name} 关于自己的说明：\n\n"
                     f"{body}\n"
                     "</user_persona>"
                 )
@@ -228,6 +254,7 @@ class ContextRenderer:
 
         if task_block:
             blocks.append(wrap_current_task(task_block))
+            blocks.append(_SPEAK_ORDER_HINT_BLOCK)
 
         tail = increment[-self.config.onboarding_recent_messages :]
         if tail:
@@ -248,10 +275,11 @@ class ContextRenderer:
         *,
         task_block: Optional[tuple[str, str]] = None,
     ) -> str:
-        """短间隔回归路径：仅 ``<room_update>`` + 可选 ``<current_task>`` + ``<speak_instruction>``。
+        """短间隔回归路径：``<room_update>`` + 可选 ``<current_task>`` + ``<order_hint>`` + ``<speak_instruction>``。
 
         与 onboarding 同样走 XML 包外层 + markdown 渲内层。``<room_update>`` 标签
-        + name 属性已表达"房间继续"语义，不再额外加口语 header。
+        + name 属性已表达"房间继续"语义，不再额外加口语 header。``<order_hint>``
+        与 ``<current_task>`` 同生共灭（仅在 task_block 非空时注入）。
         """
         # 增量空（理论不会发生 —— 编排器只在 transcript 有新消息时调）：兜底成只指令。
         body = (
@@ -264,6 +292,7 @@ class ContextRenderer:
         ]
         if task_block:
             blocks.append(wrap_current_task(task_block))
+            blocks.append(_SPEAK_ORDER_HINT_BLOCK)
         blocks.append(self._speak_instruction_block(guest_name))
         return "\n\n".join(blocks) + "\n"
 

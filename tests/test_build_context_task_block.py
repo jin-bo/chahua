@@ -70,9 +70,9 @@ def test_onboarding_with_task_id_includes_full_block(tmp_path: Path):
     assert "标题：写 README" in ctx
     assert "目标：" in ctx and "把 README 写完" in ctx
     assert "负责人：A" in ctx
-    # P5.4：full 模式无 artifact 时仍告诉茶客 ./task/ 可读写 + 怎么贡献产物
+    # full 模式无 artifact 时告诉茶客 ./task/ + 用 task_write_artifact 工具落盘
     assert "./task/" in ctx
-    assert "可读写" in ctx
+    assert "task_write_artifact" in ctx
     assert "当前为空" in ctx
     assert "自动入任务" in ctx
 
@@ -93,9 +93,9 @@ def test_incremental_with_task_id_includes_compact_block(tmp_path: Path):
     assert '<current_task status="未开始">' in ctx
     assert "标题：写 README" in ctx
     assert "目标：把 README 写完" in ctx
-    # P5.4：compact 模式告诉茶客 ./task/ 可读写 + 自动入任务
+    # compact 模式告诉茶客 ./task/ + 用 task_write_artifact 工具 + 自动入任务
     assert "./task/" in ctx
-    assert "可读写" in ctx
+    assert "task_write_artifact" in ctx
     assert "自动入任务" in ctx
     # compact 不带 full 块小标题
     assert "近期决策" not in ctx

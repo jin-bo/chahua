@@ -18,15 +18,24 @@ from __future__ import annotations
 from typing import Optional
 
 from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink, emit_to_sink
+from .room import Room
 from .task import ARTIFACT_CREATED_BY_GUEST
+from .task_event_text import detect_artifacts_text
 from .tasks_store import CLOSED_STATUSES, TasksStore, build_task_info_payload
+from .user_md import USER_SPEAKER_ID
 
 
 class ArtifactDetector:
     """track 每 task 上次扫到的 artifact 名集合，并 emit 新增 hint。"""
 
-    def __init__(self, *, room_id: str, tasks_store: Optional[TasksStore]) -> None:
-        self.room_id = room_id
+    def __init__(
+        self,
+        *,
+        room: Room,
+        tasks_store: Optional[TasksStore],
+    ) -> None:
+        self.room = room
+        self.room_id = room.name
         self.tasks_store = tasks_store
         # task_id → 上次扫到的文件名 set。boot 时按非 closed 任务的现存 artifact seed。
         self.seen: dict[str, set[str]] = {}
@@ -78,4 +87,11 @@ class ArtifactDetector:
             emit(
                 ChahuaEventType.TASK_INFO,
                 build_task_info_payload(self.tasks_store),
+            )
+            # 直接 ``room.append`` 而非 ``submit_user_message``：本函数在 in-flight
+            # turn 的 pick 周期末尾被调用，再 kick 一条新 turn 会自冲突（P5.5 §4.3）。
+            self.room.append(
+                USER_SPEAKER_ID,
+                detect_artifacts_text(sorted(new_names)),
+                task_id=active_task_id,
             )

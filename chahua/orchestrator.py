@@ -133,7 +133,7 @@ class Orchestrator:
         # diff "上次扫到的文件名 set" emit hint + ``task_info``。逻辑搬到
         # :class:`ArtifactDetector`；本类经 ``_seen_artifacts`` 属性向测试暴露内部 dict。
         self._artifact_detector = ArtifactDetector(
-            room_id=self.room.name, tasks_store=tasks_store,
+            room=self.room, tasks_store=tasks_store,
         )
 
     # ── 注册 / 信息 ────────────────────────────────────────────────────

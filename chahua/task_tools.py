@@ -1,20 +1,29 @@
 """P5.3.4：茶客可调的 task-aware 工具集（docs/P5-任务房间.md §6.3 / §13 P5.3.4）。
 
-注册三个 in-process Python 工具给 agentao：
+注册四个 in-process Python 工具给 agentao：
 
 - ``task_list_artifacts()`` —— 列当前 active task 的产物清单
 - ``task_propose_decision(summary, supporting_message_ids?)`` —— 提议一条决策
 - ``task_propose_open(title, goal)`` —— 提议开新任务
+- ``task_write_artifact(name, content)`` —— **写**任务产物（绕开 agentao PathPolicy）
 
-三工具均 ``is_read_only = True``，但**这是为权限层放行而非声明"无副作用"**：
+三个 read-only 工具（list / propose_*）均 ``is_read_only = True``，但**这是为权限层
+放行而非声明"无副作用"**：
 
 - ``list_artifacts`` 是真无副作用 read-only；
 - ``propose_*`` 不直接写 task store / 不落盘，但**会 emit TASK_PROPOSAL envelope**。
   ``is_read_only=True`` 是为了避免 agentao 的权限层把"提议事件"当成写操作拦截，
   不是声称无副作用。
+- 真正的"决策/开任务写入"由用户在 UI"采纳"卡片后走既有 ``ADD_DECISION`` / ``OPEN_TASK``
+  inbound（沿用 docs §8 不变量 #3："写权限永远在用户"）。
 
-真正的"写入"由用户在 UI"采纳"卡片后走既有 ``ADD_DECISION`` / ``OPEN_TASK`` inbound
-（沿用 docs §8 不变量 #3："写权限永远在用户"）。
+**``task_write_artifact`` 是例外**：``is_read_only = False``，茶客直接写到
+``tasks/<active>/artifacts/<name>``。设计动机：agentao 的 ``PathPolicy.contain_file``
+会跟随 parent chain 上的 symlink 解析后做 ``is_relative_to(working_directory)`` 检查；
+``./task/`` 软链解析到 ``<room>/tasks/<id>/artifacts/`` 后**不在**茶客 working_directory
+（``<room>/guests/<name>/``）之下，所以通过 agentao 原生 ``write_file('./task/<name>')``
+会被拒。本工具委托 :meth:`TasksStore.write_artifact` 直接落盘绕开 ``PathPolicy``——
+name 校验与 ``attach_artifact`` 共享 :func:`tasks_store._validate_artifact_name`。
 """
 
 from __future__ import annotations
@@ -29,7 +38,7 @@ from .events import (
     ChahuaEventType,
 )
 from .task import format_artifact_mtime, format_artifact_size
-from .tasks_store import TasksStore
+from .tasks_store import CLOSED_STATUSES, TaskNotFoundError, TasksStore
 from .transport_bridge import ChahuaTransport
 
 # artifact 清单 / propose ack 上限。与 orchestrator._render_task_block 完整块的 cap
@@ -211,18 +220,105 @@ class TaskProposeOpenTool(_TaskProposeBase):
         return self._emit_proposal({"title": title, "goal": goal}, ack_label=title)
 
 
+# ── 写产物工具（绕开 agentao PathPolicy）────────────────────────────────────
+
+
+class TaskWriteArtifactTool(Tool):
+    """把内容写入当前 active task 的 ``artifacts/<name>``，绕开 agentao PathPolicy。
+
+    **为什么需要本工具**：agentao 的 ``security/path_policy.py::PathPolicy.contain_file``
+    会跟随 parent chain 上的 symlink 解析后做 ``is_relative_to(working_directory)`` 检查；
+    茶客 working_directory = ``<room>/guests/<name>/``、``./task/`` 软链解析到
+    ``<room>/tasks/<id>/artifacts/`` 后**不在**前者之下，所以茶客调原生 ``write_file
+    ('./task/<x>')`` 会返 ``"Error: PathPolicy: refused ..."``。本工具走
+    :meth:`TasksStore.write_artifact` 直接落盘，不经过 agentao 工具栈的 path_policy。
+
+    **不 emit envelope**：让 ``Orchestrator._kick_detect_new_artifacts`` 在下个 pick
+    周期末尾扫到自然 emit ``task_artifact_added`` + ``task_info``——复用既有自动归集
+    路径，与"用户 UI 上传 + 茶客扫描"同口径。
+
+    **is_read_only = False**：写操作。read-only 权限模式应当拦住此工具。
+    """
+
+    def __init__(self, *, tasks_store: TasksStore, transport: ChahuaTransport) -> None:
+        super().__init__()
+        self._tasks_store = tasks_store
+        self._transport = transport
+
+    @property
+    def name(self) -> str:
+        return "task_write_artifact"
+
+    @property
+    def description(self) -> str:
+        return (
+            "把内容写入当前任务的产物 ./task/<name>，自动入任务产物清单。"
+            "用于落盘评审意见 / 设计方案 / 决策清单 / 代码片段 / 报告草稿等结构化产物。"
+            "name 必须是单一文件名（不含 / 或 .. 或前缀 .）；同名文件会被覆盖。"
+            "当前无活跃任务 / 任务已关闭 / name 不合法时返 ``Error: ...`` 字符串。"
+            "**用本工具写**——普通 write_file('./task/<x>') 会被权限边界拒绝（PathPolicy）。"
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "产物文件名（单一文件名，不含 / 或 .. 或前缀 .）。"
+                        "建议带角色身份与版本，如 ``水文献-评审.md`` / ``决策清单-v2.md`` / ``report-final.md``。"
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "文件全部内容（覆盖写）。",
+                },
+            },
+            "required": ["name", "content"],
+            "additionalProperties": False,
+        }
+
+    @property
+    def is_read_only(self) -> bool:
+        return False
+
+    def execute(self, *, name: str, content: str, **_: Any) -> str:
+        task_id = self._transport.current_task_id
+        if task_id is None:
+            return "Error: 当前无活跃任务，无法落盘产物。"
+        task = self._tasks_store.get_task(task_id)
+        if task is None:
+            return f"Error: 任务 {task_id} 不存在（可能已被删除）。"
+        if task.status in CLOSED_STATUSES:
+            return f"Error: 任务 {task_id} 已 {task.status}，无法落盘新产物。"
+        try:
+            result = self._tasks_store.write_artifact(
+                task_id, name=name, content=content,
+            )
+        except ValueError as e:
+            return f"Error: {e}"
+        except TaskNotFoundError as e:
+            return f"Error: {e}"
+        except OSError as e:
+            return f"Error: 写入失败 - {e}"
+        return f"Successfully wrote {result['size']} bytes to ./task/{result['name']}。"
+
+
 def register_task_tools(
     agent: Any,
     *,
     tasks_store: TasksStore,
     transport: ChahuaTransport,
 ) -> None:
-    """把三个 task tool 注册到 agentao agent。工厂函数 —— TeaGuest 用一行调用。
+    """把四个 task tool 注册到 agentao agent。工厂函数 —— TeaGuest 用一行调用。
 
     工具构造时注入 ``tasks_store`` / ``transport``，让工具类不直接依赖 :class:`TeaGuest`
     （单测时各 mock 一份就够）。**不引入** ``TaskToolRegistry`` / plugin 抽象 ——
-    三个工具类 + 一个工厂函数足够（评审反馈：避免过度设计）。
+    四个工具类 + 一个工厂函数足够（评审反馈：避免过度设计）。
     """
     agent.tools.register(TaskListArtifactsTool(tasks_store=tasks_store, transport=transport))
     agent.tools.register(TaskProposeDecisionTool(transport=transport))
     agent.tools.register(TaskProposeOpenTool(transport=transport))
+    agent.tools.register(TaskWriteArtifactTool(tasks_store=tasks_store, transport=transport))

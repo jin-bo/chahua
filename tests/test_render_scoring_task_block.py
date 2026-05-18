@@ -93,14 +93,33 @@ def test_open_task_returns_title_goal_status_without_task_dir_hint():
     assert "自动入任务" not in body
 
 
-def test_open_task_compact_goal_takes_first_line_only():
-    """goal 多行 → 只取首行（沿 speak compact 同口径，控制 token 预算）。"""
+def test_open_task_scoring_renders_full_goal_multiline():
+    """goal 多行 → scoring 取**完整 goal**（与 speak compact 仅首行**不同**口径）。
+
+    用户在 goal 里常写"先 X 再 Y 后 Z"的流程编排（典型："关主编最后总结"），打分时砍首行
+    会让模型误判"应该最后说话"的角色为"现在就该说话"。scoring 每 pick 周期 1 次渲染、
+    N 个 scorer 共享，goal 膨胀不放大成本，所以走完整 goal。
+    """
     orch = _build_orch(_task(goal="第一行目标\n第二行细节\n第三行更多"))
     rendered = orch._maybe_render_scoring_task_block("t1")
     assert rendered is not None
     body, _ = rendered
-    assert "目标：第一行目标" in body
-    assert "第二行细节" not in body
+    # 多行 goal → "目标：\n<line1>\n<line2>\n<line3>" 形态（与 full 模式同口径）
+    assert "目标：" in body
+    assert "第一行目标" in body
+    assert "第二行细节" in body
+    assert "第三行更多" in body
+
+
+def test_open_task_scoring_renders_single_line_goal_inline():
+    """单行 goal → ``目标：<goal>`` 同行形态（无多余换行）。"""
+    orch = _build_orch(_task(goal="把茶话室文档补齐"))
+    rendered = orch._maybe_render_scoring_task_block("t1")
+    assert rendered is not None
+    body, _ = rendered
+    assert "目标：把茶话室文档补齐" in body
+    # 单行不应触发"目标：\n<goal>"分行
+    assert "目标：\n" not in body
 
 
 def test_open_task_empty_goal_skips_goal_line():

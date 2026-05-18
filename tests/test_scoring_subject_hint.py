@@ -106,6 +106,48 @@ def test_prompt_includes_current_task_when_task_block_present():
     assert prompt.index("<current_task") < prompt.index("<transcript>")
 
 
+# ── order_hint：goal 指定发言顺序时的 meta 规则 ───────────────────────────
+
+
+def test_prompt_omits_order_hint_when_task_block_empty():
+    """无 active task → 不注入 ``<order_hint>``（引用不存在的 <current_task> 会迷惑 LLM）。"""
+    prompt = _render_prompt(
+        guest_name="Elon Musk",
+        persona="founder",
+        transcript_text="老金 说：泡饭真好吃",
+        user_config=UserConfig(display_name="老金", full_md=None, source=None),
+    )
+    assert "<order_hint>" not in prompt
+
+
+def test_prompt_includes_order_hint_when_task_block_present():
+    """task_block 非空 → 注入 ``<order_hint>`` 显式让模型把 goal 里的发言顺序当硬信号。
+
+    典型场景：审稿委员会 goal 写"关主编最后总结"，没这条 hint 时关主编人设最契合"初筛"
+    被相关性顶到第一个发言。order_hint 给出明确的数字锚点（≤ 0.3 / ≥ 0.7）。
+    """
+    task_block = (
+        '\n<current_task status="进行中">\n标题：审稿\n目标：\n老金上传待审稿件，\n'
+        '各位评审专家依次评审，\n关主编 最后总结，并形成 PDF 的审稿报告\n</current_task>\n'
+    )
+    prompt = _render_prompt(
+        guest_name="关主编",
+        persona="editor-in-chief",
+        transcript_text="老金 说：新任务，我上传了稿件",
+        user_config=UserConfig(display_name="老金", full_md=None, source=None),
+        task_block=task_block,
+    )
+    assert "<order_hint>" in prompt
+    # hint 引用的是 ``<current_task>`` 标签名，必须保证两者拼写一致
+    assert "<current_task>" in prompt or "<current_task " in prompt
+    # 数字锚点：还没轮到 ≤ 0.3，轮到 ≥ 0.7
+    assert "0.3" in prompt
+    assert "0.7" in prompt
+    # order_hint 应在 task_block 之后、transcript 之前（meta 规则贴着任务上下文）
+    assert prompt.index("</current_task>") < prompt.index("<order_hint>")
+    assert prompt.index("<order_hint>") < prompt.index("<transcript>")
+
+
 # ── L2：_count_self_mentions ───────────────────────────────────────────────
 
 

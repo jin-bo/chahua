@@ -237,13 +237,19 @@ class Room:
 def format_messages(
     messages: Iterable[Message], display_for: Mapping[str, str]
 ) -> str:
-    """渲染 ``<display_name> 说：<text>`` 多行块。
+    """渲染 ``<message>\\n<display_name> 说：<text>\\n</message>`` 块序列。
 
     所有喂养 prompt（onboarding 末段原文 / 增量 / 打分 / 摘要）走同一格式 —— 茶客
-    人格卡（``personas/*.md``）里也明示这格式，所以**任何变更要同步改 personas**。
-    单点定义在这里，避免 4+ 处复制。
+    人格卡（``personas/*.md``）里也明示 "X 说：…"格式（内部内容不变，外层多一层
+    ``<message>`` 包裹），所以**任何变更要同步检查 personas**。单点定义在这里，避免
+    4+ 处复制。
+
+    外层 ``<message>`` 包是边界承重墙：消息 body 可能含 markdown HR（``---``）、H2
+    （``## xxx``）等结构化内容，单纯用 ``\\n`` 分隔会让"下一条 `X 说：` 起始"在视觉
+    与 tokenization 上都与"上一条 body 内的 markdown"难以区分。XML 包外层 + Markdown
+    渲内层是茶话室的标准口径（CLAUDE.md 关键不变量）。
     """
     return "\n".join(
-        f"{display_for.get(m.speaker_id, m.speaker_id)} 说：{m.text}"
+        f"<message>\n{display_for.get(m.speaker_id, m.speaker_id)} 说：{m.text}\n</message>"
         for m in messages
     )

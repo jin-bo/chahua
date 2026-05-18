@@ -7,6 +7,7 @@
 ③ owner=None 跳"负责人"行
 ④ decisions / artifacts / summary tail 各自截断
 ⑤ goal 多行 compact 只取首行
+⑥ ./task/ 落盘文案：compact 极简 vs full 详细分层（鼓励长内容落盘）
 
 XML 化重构后：``_render_task_block`` 返回 ``(body, status_display)`` 元组，
 status 由调用方拼到 ``<current_task status="...">`` XML 属性里，body 不再含状态行。
@@ -76,9 +77,9 @@ def test_full_block_all_fields_present():
     assert "负责人：汪小姐" in body
     assert "近期决策" in body and "用 Electron" in body
     assert "当前产物" in body and "README.md" in body
-    # P5.4：artifact label 强调 ./task/ 可读写 + 新产物自动入任务
+    # artifact label 强调 ./task/ 读路径 + 写走 task_write_artifact 工具
     assert "./task/" in body
-    assert "可读写" in body
+    assert "task_write_artifact" in body
     assert "自动入任务" in body
     assert "任务近期进展" in body and "老金说想做个茶话室" in body
 
@@ -93,9 +94,9 @@ def test_compact_block_short_header():
     assert len(lines) == 3
     assert lines[0] == "标题：写 README"
     assert lines[1] == "目标：把 README 写完"
-    # P5.4：compact 文案告诉茶客 ./task/ 可读写 + 新产物自动入任务
+    # compact 文案告诉茶客 ./task/ 读 + 写走 task_write_artifact 工具
     assert "./task/" in lines[2]
-    assert "可读写" in lines[2]
+    assert "task_write_artifact" in lines[2]
     assert "自动入任务" in lines[2]
     # compact 不含 full 块的小标题
     assert "近期决策" not in body
@@ -108,16 +109,16 @@ def test_compact_block_short_header():
 
 def test_full_block_no_artifacts_no_decisions_no_summary():
     # 空 decisions / artifacts / summary_tail → 对应小节整段省略，不出现空"近期决策："等
-    # 但 full 模式无 artifact 时会渲一行 ./task/ 工作目录可读写 + 当前为空 + 怎么写入的提示
+    # 但 full 模式无 artifact 时会渲一行 ./task/ 当前为空 + task_write_artifact 落盘指引
     task = _task(owner=None)
     body, _ = _render_task_block(task, [], [], [], compact=False)
     assert "近期决策" not in body
     assert "任务近期进展" not in body
     assert "标题：写 README" in body
     assert "目标：" in body
-    # P5.4 不变量：full 模式始终告诉茶客 ./task/ 可读写 + 怎么贡献产物
+    # 不变量：full 模式始终告诉茶客 ./task/ + task_write_artifact 工具 + 当前为空
     assert "./task/" in body
-    assert "可读写" in body
+    assert "task_write_artifact" in body
     assert "当前为空" in body
     assert "自动入任务" in body
 
@@ -188,3 +189,94 @@ def test_compact_empty_goal_skips_goal_line():
     assert "标题：写 README" in body
     assert "目标：" not in body
     assert "./task/" in body
+
+
+# ─── ⑥ 文案升级：compact 极简 vs full 详细 ──────────────────────────────────
+
+
+def test_compact_artifact_hint_is_concise():
+    """compact 路径每轮喂，文案极简 —— 软触发"你判断" + 专用工具名 + 边界提醒三句，
+    不含 full 的类型枚举 / 命名示例 / 落盘原因等长内容。
+    """
+    body, _ = _render_task_block(_task(), [], [], [], compact=True)
+    # 软触发 + 落盘动作（指明专用工具名）+ 边界提醒
+    assert "你判断" in body  # 软触发（让 Agent 自主判断，不给硬阈值）
+    assert "task_write_artifact" in body  # 落盘动作（专用工具名，绕开 PathPolicy）
+    assert "聊天里只放一句概要" in body  # 边界提醒
+    # 极简：不含 full 才有的类型枚举 / 命名建议 / 为什么详细段
+    assert "评审意见" not in body  # 类型枚举留给 full（onboarding 看过即可）
+    assert "命名建议" not in body
+    assert "何时该落盘" not in body
+    assert "为什么" not in body  # full 路径才解释"为什么要落盘"
+    # 不再给字数硬阈值（让 Agent 自主判断）
+    assert "200 字" not in body
+
+
+def test_full_empty_artifact_hint_has_four_sections():
+    """full 路径无 artifact 时给详细版：触发 / 命名 / 为什么 四段，鼓励 onboarding
+    阶段就建立"长内容落盘"习惯。触发条件用软描述"你判断"，类型枚举只作锚点。
+    """
+    body, _ = _render_task_block(_task(owner=None), [], [], [], compact=False)
+    # 四段标题（markdown 加粗）
+    assert "**何时该落盘**" in body
+    assert "**命名建议**" in body
+    assert "**为什么**" in body
+    # 软触发（不再给"超过 200 字"硬阈值——茶客自主判断）
+    assert "你判断" in body
+    assert "200 字" not in body
+    # 类型枚举作为锚点示例（不是硬规则）
+    assert "评审意见" in body or "决策清单" in body or "报告草稿" in body
+    # 命名示例（含角色 placeholder + 版本号）
+    assert "你的名字" in body
+    # 原有不变量（向后兼容老断言）仍在
+    assert "./task/" in body
+    assert "task_write_artifact" in body  # 专用工具名替代旧"可读写"措辞
+    assert "当前为空" in body
+    assert "自动入任务" in body  # 包含在"自动入任务产物清单"里
+
+
+def test_full_with_artifacts_includes_when_to_save_again_hint():
+    """full 路径已经有 artifact 时，提醒"何时该再落盘 + 命名习惯"，避免茶客把后续
+    报告又只塞回聊天。同样用"你判断"软触发，不给字数硬阈值。
+    """
+    body, _ = _render_task_block(
+        _task(),
+        [],
+        [_artifact("水文献-评审-v1.md")],
+        [],
+        compact=False,
+    )
+    # 已有产物清单照常渲染
+    assert "当前产物" in body
+    assert "水文献-评审-v1.md" in body
+    # 升级文案：催"再落盘"
+    assert "再落盘" in body or "何时该再落盘" in body
+    # 软触发（不再 "200 字"）
+    assert "你判断" in body
+    assert "200 字" not in body
+    assert "命名建议" in body
+    # 边界提醒仍在
+    assert "./share/" in body
+
+
+def test_full_block_significantly_longer_than_compact():
+    """compact 极简 vs full 详细的分层验证 —— 同 task 同上下文下，full 显著长于 compact。
+
+    阈值：
+    - full empty ≥ compact 的 2×（onboarding 空产物，最积极催落盘）。
+    - full with artifacts ≥ compact 的 1.5×（已有产物作为视觉证据，催"再落盘"文案略短）。
+    这是文案分层的硬底线 —— 防止后续维护时把 full 的内容回流到 compact 让每轮都涨 token，
+    或反过来把 full 削得跟 compact 没差。
+    """
+    compact_body, _ = _render_task_block(_task(), [], [], [], compact=True)
+    full_empty_body, _ = _render_task_block(_task(owner=None), [], [], [], compact=False)
+    full_with_artifacts_body, _ = _render_task_block(
+        _task(), [], [_artifact("a.md")], [], compact=False,
+    )
+    assert len(full_empty_body) >= 2 * len(compact_body), (
+        f"full empty ({len(full_empty_body)}) 应至少是 compact ({len(compact_body)}) 的 2×"
+    )
+    assert len(full_with_artifacts_body) >= 1.5 * len(compact_body), (
+        f"full with artifacts ({len(full_with_artifacts_body)}) "
+        f"应至少是 compact ({len(compact_body)}) 的 1.5×"
+    )

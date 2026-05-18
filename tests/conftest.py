@@ -85,6 +85,53 @@ class NoopSummarizer(Summarizer):
         return self._fixed
 
 
+@pytest.fixture
+def task_inbound_srv(env_paths, monkeypatch):
+    """挂真 ``RoomSession`` + ``ChahuaServer`` 的回归夹具，monkeypatch ``_run_ai_chain``
+    成 no-op 让 ``submit_user_message`` 跑到 ``room.append`` 后立刻返回 —— 避免在测试
+    event loop 上真打分 / 调 LLM。yield ``(session, srv)``。
+
+    任何需要走真 ``_handle_inbound`` 链路又不能真跑 AI 链的测都拿这条；fixture 之外
+    自己 ``build_room_session`` + ``object.__new__`` 这套样板会跟设计走样（
+    ``_install_handler_slots`` 与 ``_bind_inbound_handlers`` 顺序敏感）。
+    """
+    from chahua import admin
+    from chahua.orchestrator import Orchestrator
+    from chahua.server import (
+        ChahuaServer,
+        _bind_inbound_handlers,
+        _install_handler_slots,
+    )
+    from chahua.session import build_room_session
+
+    async def _noop_ai_chain(self, *, sink, active_task_id=None):
+        return None
+
+    monkeypatch.setattr(Orchestrator, "_run_ai_chain", _noop_ai_chain)
+
+    rc = admin.create_room(
+        paths=env_paths, room_id="t1", name="t1",
+        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+    )
+    session = build_room_session(rc.room_dir, env_paths)
+    srv = object.__new__(ChahuaServer)
+    srv._session = session
+    srv._paths = env_paths
+    srv._inflight_turn_task = None
+    _install_handler_slots(srv)
+    srv._inbound_handlers = _bind_inbound_handlers(srv)
+    yield session, srv
+    session.close()
+
+
+async def drain_inflight(srv) -> None:
+    """让 ``_kick_synthesized_user_message`` 创建的 turn task 跑到 ``room.append`` 之后
+    再返回控制权。配合 :func:`task_inbound_srv` 的 no-op AI 链 —— await 即完成。"""
+    task = srv._inflight_turn_task
+    if task is not None and not task.done():
+        await task
+
+
 def build_orch(*names: str, scorer: IntentScorer | None = None) -> Orchestrator:
     """组一只装好 ``names`` 的 Orchestrator；默认走 NoopScorer + NoopSummarizer。
 

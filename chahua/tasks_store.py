@@ -107,6 +107,30 @@ def _is_os_metadata_file(name: str) -> bool:
     return False
 
 
+_INVALID_ARTIFACT_NAME_CHARS = ("/", "\\", "..")
+
+
+def _validate_artifact_name(name: str) -> Optional[str]:
+    """artifact 文件名校验 —— 返回错误描述或 ``None``（合法）。
+
+    四档拒绝：空名 / 含 ``/`` / 含 ``\\`` / 含 ``..`` / 前缀 ``.``。最后一档把 ``.DS_Store`` /
+    ``._foo`` 等元数据文件挡在写入门外 —— 与 :func:`_is_os_metadata_file` 同口径，避免
+    "写进 artifacts/ 但 detector 又跳过"的鬼影状态。
+    """
+    if not name or not name.strip():
+        return "name 不能为空。"
+    if any(ch in name for ch in _INVALID_ARTIFACT_NAME_CHARS):
+        return (
+            f"name={name!r} 含路径分隔符或 ..，必须是单一文件名（如 ``评审.md``）。"
+        )
+    if name.startswith("."):
+        return (
+            f"name={name!r} 以 . 开头（避免与 .DS_Store / Thumbs.db 等"
+            "幽灵 artifact 冲突）。"
+        )
+    return None
+
+
 class TasksStoreError(Exception):
     """业务约束违例的基类。各种具体错落到下面的子类。"""
 
@@ -651,6 +675,11 @@ class TasksStore:
         adir = self.artifacts_dir(task_id)
         adir.mkdir(parents=True, exist_ok=True)
         dst_name = real_src.name
+        # share/ 上传的文件名也走 artifact name 校验 —— 避免用户把 .DS_Store / Thumbs.db
+        # 拖进 share/ 后 attach 进 artifacts/，落地但又被 detector 当元数据跳过的鬼影。
+        invalid = _validate_artifact_name(dst_name)
+        if invalid is not None:
+            raise ArtifactSourceMissingError(f"share_rel={share_rel!r}: {invalid}")
         dst = adir / dst_name
         shutil.copy2(real_src, dst)
         try:
@@ -661,6 +690,38 @@ class TasksStore:
             "name": dst_name,
             "size": size,
             "rel": f"tasks/{task_id}/{_ARTIFACTS_DIRNAME}/{dst_name}",
+        }
+
+    def write_artifact(self, task_id: str, *, name: str, content: str) -> dict:
+        """直接把 ``content`` 写入 ``tasks/<task_id>/artifacts/<name>``。
+
+        与 :meth:`attach_artifact` 区别：attach 从 ``share/`` 拷贝既有文件（copy 不 move），
+        本方法从内存字符串落盘新文件。茶客的 ``task_write_artifact`` 工具走这条 ——
+        agentao ``WriteFileTool`` 经 ``PathPolicy`` 检查后会拒绝 ``./task/<x>``（软链解析
+        到 cwd 外），所以茶客不能走原生写工具，必须通过 chahua 自己的路径。
+
+        ``name`` 走 :func:`_validate_artifact_name`（与 attach_artifact 同口径）；非法时
+        抛 :class:`ValueError`。task 不存在抛 :class:`TaskNotFoundError`。已 closed 的
+        task **本方法不挡**——状态守卫由调用方负责（``task_write_artifact`` 工具在 store
+        外检查 ``CLOSED_STATUSES``，与 attach_artifact "可往 closed 任务追老资料"口径
+        对称）。
+
+        返 ``{name, size, rel}`` 与 ``attach_artifact`` 同形 —— 便于上层合成
+        ``task_artifact_added`` envelope。
+        """
+        if task_id not in self._tasks:
+            raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
+        invalid = _validate_artifact_name(name)
+        if invalid is not None:
+            raise ValueError(invalid)
+        adir = self.artifacts_dir(task_id)
+        adir.mkdir(parents=True, exist_ok=True)
+        dst = adir / name
+        dst.write_text(content, encoding="utf-8")
+        return {
+            "name": name,
+            "size": len(content.encode("utf-8")),
+            "rel": f"tasks/{task_id}/{_ARTIFACTS_DIRNAME}/{name}",
         }
 
 
