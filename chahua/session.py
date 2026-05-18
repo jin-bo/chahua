@@ -269,7 +269,9 @@ class RoomSession:
         permission 改这些需要重建 ``TeaGuest`` 的，仍走 ``server._replace_session``。
         """
         object.__setattr__(self, "room_config", new_rc)
-        self.orchestrator.config = _make_orchestrator_config(new_rc.orchestrator_overrides)
+        self.orchestrator.set_config(
+            _make_orchestrator_config(new_rc.orchestrator_overrides)
+        )
 
 
 def _resolve_room_default_spec(room_config: RoomConfig) -> LLMSpec:

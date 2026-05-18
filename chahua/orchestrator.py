@@ -146,6 +146,17 @@ class Orchestrator:
         self.room.add_participant(guest.name)
         self._renderer.invalidate_display_cache()
 
+    def set_config(self, config: OrchestratorConfig) -> None:
+        """热替换编排参数 —— 同步更新 Orchestrator 自身 + 内嵌 ContextRenderer 的 ref。
+
+        ContextRenderer 持独立 ``self.config`` ref（读 onboarding_threshold /
+        onboarding_recent_messages / scoring_transcript_recent 等）；只改
+        ``orchestrator.config`` 会让这几个字段沿用旧值，导致 UI 改编排参数后行为不一致。
+        ``swap_room_config`` 的唯一调用方走这里。
+        """
+        self.config = config
+        self._renderer.config = config
+
     @property
     def guest_names(self) -> tuple[str, ...]:
         return tuple(self._guests)
