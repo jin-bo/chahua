@@ -1,0 +1,339 @@
+
+/* modal —— 添加茶客 / 新建房间 / 编辑用户配置 共用样式。
+   backdrop 全屏半透明；.modal 居中卡片。点 backdrop 自身 / × 按钮 / ESC 都能关。 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-backdrop[hidden] { display: none; }
+.modal {
+  background: #fbf8f1;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  min-width: 360px;
+  max-width: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e8e3d6;
+  font-weight: 600;
+  color: #555;
+}
+.modal-close {
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  color: #888;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  font-family: inherit;
+}
+.modal-close:hover { color: #333; }
+.modal-body {
+  padding: 12px 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+.modal-footer {
+  padding: 10px 16px;
+  border-top: 1px solid #e8e3d6;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.modal-footer button.primary {
+  padding: 6px 16px;
+  background: #6b4f2a;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.modal-footer button.primary:hover { background: #7a5a32; }
+.modal-field {
+  display: block;
+  margin-bottom: 12px;
+}
+.modal-field > span {
+  display: block;
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 4px;
+}
+.modal-field input[type="text"] {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.modal-field input[type="text"]:focus { outline: none; border-color: #888; }
+
+/* 编辑 USER.md 用 —— 等宽字体（用户在写半结构化 markdown） + 较大默认高度。 */
+.modal-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #fff;
+  resize: vertical;
+  min-height: 240px;
+}
+.modal-textarea:focus { outline: none; border-color: #888; }
+/* 新建任务 modal 的 goal 字段：用比 USER.md 编辑器矮一档的高度（≈ 6 行），让 title +
+   goal + owner 三段一屏可见。 */
+.modal-textarea-short { min-height: 120px; }
+.modal-select {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.modal-select:focus { outline: none; border-color: #888; }
+.modal-hint {
+  font-size: 11px;
+  color: #888;
+  margin: 4px 0 8px;
+  line-height: 1.4;
+}
+
+/* 茶客详细设置 modal（P4.5）—— 模型 / 权限 / 隔离 / persona+room MCP / skills。
+   modal-wide 宽一点（580px）给三段并排 radio + MCP 行 [name][cmd][args][×] 留宽度。 */
+.modal-wide { max-width: 580px; min-width: 460px; }
+.modal-fieldset {
+  border: 1px solid #e8e3d6;
+  border-radius: 4px;
+  padding: 8px 12px 10px;
+  margin: 0 0 12px;
+}
+.modal-fieldset > legend {
+  font-size: 12px;
+  color: #666;
+  padding: 0 4px;
+}
+.modal-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #444;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.modal-radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.modal-radio-row .modal-radio { padding: 0; }
+/* LLM 字段块 —— custom radio 选中时才展开，default 时折回（hidden 属性）。 */
+.modal-llm-fields { padding-left: 22px; margin-top: 4px; }
+.modal-llm-fields .modal-field { margin-bottom: 8px; }
+.modal-mcp-list {
+  list-style: none;
+  margin: 4px 0 6px;
+  padding: 0;
+  font-size: 12px;
+}
+.modal-mcp-list .modal-mcp-readonly {
+  display: flex;
+  gap: 8px;
+  padding: 3px 4px;
+  color: #555;
+}
+.modal-mcp-list .modal-mcp-empty {
+  padding: 3px 4px;
+  color: #aaa;
+  font-style: italic;
+}
+/* 可编辑行：[name 1/4][command 1/3][args 余下][×]，行内对齐。 */
+.modal-mcp-list.editable .modal-mcp-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 0;
+}
+.modal-mcp-list.editable input[type="text"] {
+  padding: 4px 8px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  background: #fff;
+}
+.modal-mcp-list.editable .modal-mcp-name { flex: 1 1 80px; }
+.modal-mcp-list.editable .modal-mcp-cmd { flex: 1 1 120px; }
+.modal-mcp-list.editable .modal-mcp-args { flex: 2 1 160px; }
+.modal-secondary {
+  padding: 6px 12px;
+  border: 1px solid #d0c8b4;
+  background: #f5efe0;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.modal-secondary:hover { background: #ece5d2; }
+/* 房间详细设置 modal：编排参数 4 字段两列网格。label 强制单行 + ellipsis 兜底，
+   范围 / 默认值放进 input placeholder（聚焦时消失），4 格高度一致 input 竖直对齐。 */
+.modal-orch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+.modal-orch-grid .modal-field { margin-bottom: 0; }
+.modal-orch-grid .modal-field > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.modal-orch-grid .modal-field > span code {
+  font-size: 11px;
+  color: #6b4f2a;
+  background: transparent;
+}
+.modal-orch-grid input[type="number"] {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.modal-orch-grid input[type="number"]:focus { outline: none; border-color: #888; }
+/* 当前茶客列表 [名字][meta][设置]，flex 行内对齐。 */
+.modal-room-guests { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.modal-room-guest-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid #f1ecdf;
+}
+.modal-room-guest-row:last-child { border-bottom: none; }
+.modal-room-guest-name { flex: 0 0 auto; min-width: 60px; color: #444; }
+.modal-room-guest-meta { flex: 1; color: #888; font-size: 12px; }
+/* footer spacer 把"打开 raw room.toml"推到左边、取消/保存留右边。 */
+.modal-footer-spacer { flex: 1; }
+/* popover 末尾"详细设置…"入口 —— 视觉上和上面权限选项分开。 */
+.popover-details-entry {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid #e8e3d6;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: #6b4f2a;
+  cursor: pointer;
+}
+.popover-details-entry:hover { background: #ece5d2; }
+
+/* 导入 persona modal：radio + 输入框 + (本地)选目录按钮 横向排版。 */
+.import-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #444;
+}
+.import-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.import-row input[type="text"] {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.import-row input[type="text"]:focus { outline: none; border-color: #888; }
+.import-row button {
+  padding: 6px 12px;
+  border: 1px solid #d0c8b4;
+  background: #f5efe0;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.import-row button:hover { background: #ece5d2; }
+
+/* persona picker —— 单选模式（添加茶客）click 即 dispatch；
+   多选模式（.multi，新建房间）click 切 .selected。 */
+.persona-picker { list-style: none; margin: 0; padding: 0; }
+.persona-picker .persona-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #444;
+}
+.persona-picker .persona-item:hover:not(.disabled) { background: #ece5d2; }
+.persona-picker .persona-item.disabled { color: #aaa; cursor: not-allowed; }
+.persona-picker .persona-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.persona-picker .persona-name { flex: 1; }
+.persona-picker .persona-hint {
+  font-size: 11px;
+  color: #aaa;
+}
+/* 多选模式选中态 —— 左侧实心圆点替代 checkbox，避免新引入控件。 */
+.persona-picker.multi .persona-item.selected {
+  background: #d8c9a3;
+  color: #2a200f;
+}
+.persona-picker.multi .persona-item.selected::before {
+  content: "✓";
+  color: #6b4f2a;
+  font-weight: bold;
+  width: 14px;
+  text-align: center;
+}
+.persona-picker.multi .persona-item:not(.selected)::before {
+  content: "";
+  width: 14px;
+}
+.persona-picker .persona-empty {
+  padding: 12px;
+  color: #888;
+  font-size: 12px;
+  font-style: italic;
+}
+

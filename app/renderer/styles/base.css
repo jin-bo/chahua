@@ -1,0 +1,7 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; }
+
+.status { font-size: 12px; padding: 6px 12px; color: #999; border-bottom: 1px solid #eee; }
+.status.error { color: #c00; }
+.status.ok { color: #690; }

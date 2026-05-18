@@ -7,7 +7,16 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
   <title>茶话室</title>
-  <link rel="stylesheet" href="style.css">
+  <!-- P5.7 拆分：按 feature 8 个文件，**顺序敏感** —— 与原 style.css 行号区间一一对应，
+       别重排或插队，否则 cascade 优先级会变（sidebar 的 .popover 被 composer task chip 复用）。 -->
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/sidebar.css">
+  <link rel="stylesheet" href="styles/task_panel.css">
+  <link rel="stylesheet" href="styles/chat.css">
+  <link rel="stylesheet" href="styles/composer.css">
+  <link rel="stylesheet" href="styles/sidebar_me.css">
+  <link rel="stylesheet" href="styles/modal.css">
+  <link rel="stylesheet" href="styles/proposal_card.css">
 </head>
 <body>
   <div id="status" class="status">连接中…</div>

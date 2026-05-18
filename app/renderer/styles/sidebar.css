@@ -1,0 +1,315 @@
+
+/* P3.2.2：sidebar | messages 横向布局；composer 横跨底。 */
+#main { flex: 1; display: flex; min-height: 0; }
+
+#sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  padding: 12px;
+  border-right: 1px solid #eee;
+  background: #f5f1e6;
+  overflow-y: auto;
+}
+.sidebar-section { margin-bottom: 16px; }
+.sidebar-title {
+  font-size: 11px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+/* sidebar 标题右侧的"+"按钮 —— 添加茶客 / 新建房间。低对比度，但比 row-remove 略显眼。 */
+.sidebar-add {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: #888;
+  background: transparent;
+  border: 1px solid #d0c8b4;
+  border-radius: 50%;
+  cursor: pointer;
+  font-family: inherit;
+}
+.sidebar-add:hover:not(:disabled) { background: #ece5d2; color: #555; }
+.sidebar-add:disabled { color: #ccc; border-color: #e5e0d0; cursor: not-allowed; }
+.sidebar-room-name { font-weight: 600; color: #555; }
+.sidebar-room-topic { font-size: 12px; color: #888; margin-top: 2px; }
+/* 「清空聊天」按钮 —— 故意做小、低对比度，把误点门槛抬高（confirm() 在 click 路径
+   兜底，但视觉先劝退）。 */
+.sidebar-action {
+  margin-top: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #888;
+  background: transparent;
+  border: 1px solid #d0c8b4;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.sidebar-action:hover:not(:disabled) { background: #ece5d2; color: #555; }
+.sidebar-action:disabled { color: #bbb; border-color: #e5e0d0; cursor: not-allowed; }
+#guests { list-style: none; margin: 0; padding: 0; }
+#guests li { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
+#guests li .avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+#guests li .guest-name { color: #444; }
+/* 打分小数字 —— sidebar 茶客名右侧；margin-left:auto 推到行末。
+   默认浅灰，[data-kind] 区分 mention / cooldown / error 三档语义色。 */
+#guests li .guest-score {
+  margin-left: auto;
+  font-size: 11px;
+  color: #aaa;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  min-width: 24px;
+  text-align: right;
+}
+#guests li .guest-score[data-kind="mention"] { color: #6a9; }
+#guests li .guest-score[data-kind="cooldown"] { color: #999; font-style: italic; }
+#guests li .guest-score[data-kind="error"] { color: #c66; }
+/* Permission V 标 —— 圆形彩色 + 白 ✓。read-only 不渲染（renderer 先过滤）；
+   workspace-write 蓝、full-access 红。base 共形（sidebar inline fallback / @ dropdown），
+   ``.on-avatar`` 修饰让它浮在头像右上角。 */
+.permission-badge,
+.mention-permission {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 11px;
+  height: 11px;
+  margin-left: 4px;
+  border-radius: 50%;
+  font-size: 8px;
+  font-weight: bold;
+  color: #fff;
+  line-height: 1;
+  flex-shrink: 0;
+  /* 半透明 —— 让 V 标"轻"一点，不抢头像戏；颜色靠 alpha 与底色调和。 */
+  opacity: 0.7;
+}
+.permission-badge[data-permission="workspace-write"],
+.mention-permission[data-permission="workspace-write"] { background: #4a90e2; }
+.permission-badge[data-permission="full-access"],
+.mention-permission[data-permission="full-access"] { background: #d05050; }
+
+/* sidebar 头像 + V 标的 wrap：让 V 标用绝对定位浮在头像右上角。 */
+#guests li .avatar-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
+.permission-badge.on-avatar {
+  position: absolute;
+  /* 头像 28px 圆，badge 中心放到圆 45° tangent 外侧 —— 大部分 badge 在头像外面，
+     只用左下小角搭在头像边缘上。 */
+  top: -4px;
+  right: -4px;
+  margin: 0;
+  /* 跟 sidebar 背景同色的描边，从头像里"切"出一块感，避免边缘混在皮肤里。 */
+  border: 1.5px solid #f5f1e6;
+  box-sizing: content-box;
+}
+/* 权限 popover 入口 —— sidebar 头像 / 名字 可点改权限。hover 时给点视觉反馈，
+   光标变 pointer 提示可交互。 */
+#guests li .permission-anchor { cursor: pointer; }
+#guests li .avatar.permission-anchor:hover,
+#guests li .avatar-wrap.permission-anchor:hover { opacity: 0.85; }
+#guests li .guest-name.permission-anchor:hover { color: #6b4f2a; text-decoration: underline; }
+
+/* popover 卡片底座 —— fixed 定位由 renderer.js 计算（贴 anchor 右侧）。
+   宽度限定区间，避免短描述时太窄/长描述时撑爆。z-index 高于 modal-backdrop（100），
+   保证从 modal 里触发的 popover 也可见。.permission-popover / .action-popover 是
+   按内容分的修饰类，只承载内容差异（左侧色点、danger 红 hover 等）。 */
+.popover {
+  background: #fff;
+  border: 1px solid #d0c8b4;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  padding: 6px;
+  z-index: 200;
+  min-width: 240px;
+  max-width: 300px;
+  font-family: inherit;
+}
+.popover-title {
+  font-size: 11px;
+  color: #888;
+  padding: 4px 6px 6px;
+  border-bottom: 1px solid #f0ebe0;
+  margin-bottom: 4px;
+}
+.popover-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  color: #444;
+}
+.popover-option:hover:not(.current) { background: #f5f1e6; }
+.popover-option.current { background: #ece5d2; cursor: default; }
+/* 左侧小色点 —— 与 .permission-badge 同 [data-permission] 配色，read-only 中性灰。
+   不复用 .permission-badge（V 标）—— popover 里的 ✓ 字符会混淆"已选"语义。 */
+.permission-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  background: #bbb;
+}
+.permission-swatch[data-permission="workspace-write"] { background: #4a90e2; }
+.permission-swatch[data-permission="full-access"] { background: #d05050; }
+.popover-option-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.popover-option-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+}
+.popover-option-current {
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: normal;
+  color: #888;
+}
+.popover-option-desc {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.35;
+}
+
+/* popover 内的 MCP / Skills 摘要段 —— 用分隔线起头，与上面的 option 列表分开。
+   "信任 MCP" 勾选 + server 列表 / skill 列表都套同一组样式。 */
+.popover .popover-section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #f0ebe0;
+}
+.popover .popover-section-title {
+  font-size: 11px;
+  color: #888;
+  padding: 0 6px 4px;
+}
+.popover-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: #444;
+  cursor: pointer;
+  line-height: 1.35;
+}
+.popover-checkbox input[type="checkbox"] {
+  margin-top: 2px;
+  cursor: pointer;
+}
+.popover-mcp-list,
+.popover-skills-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 6px 0 20px;
+}
+.popover-mcp-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+.popover-mcp-name {
+  color: #444;
+  font-weight: 500;
+}
+.popover-mcp-cmd {
+  color: #888;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popover-skills-list li {
+  padding: 1px 0;
+  font-size: 11px;
+  color: #555;
+  list-style: disc;
+}
+
+/* 切换房间列表。当前高亮 + cursor default；其它项可点。 */
+#rooms { list-style: none; margin: 0; padding: 0; }
+#rooms li {
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+#rooms li:hover:not(.current) { background: #ece5d2; }
+#rooms li.current {
+  background: #d8c9a3;
+  cursor: default;
+}
+#rooms li .room-name { color: #444; font-weight: 500; }
+#rooms li .room-topic {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 行内"删除"按钮 —— hover 行时浮现。茶客行 / 房间行共用：圆角小红 ×。
+   disabled（最后一位茶客）灰色不响应。 */
+.row-remove {
+  margin-left: 6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: #c66;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+  font-family: inherit;
+}
+#guests li:hover .row-remove,
+#rooms li:hover .row-remove,
+.row-remove:focus { opacity: 1; }
+.row-remove:hover:not(:disabled) { background: #fbe6e6; border-color: #f5b3b3; }
+.row-remove:disabled { color: #ccc; cursor: not-allowed; opacity: 0; }
+
+/* 房间行：左侧 meta 块（name + topic），右侧 row-remove。 */
+#rooms li { display: flex; align-items: center; }
+#rooms li .room-meta { flex: 1; min-width: 0; }
+
+/* isolation 占位徽章 —— P4 接真值时这里读 data-isolation 区分 room / global。 */
+#guests li .isolation-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: #dfe7ec;
+  color: #467;
+}
+
+#messages { flex: 1; list-style: none; margin: 0; padding: 8px 12px; overflow-y: auto; }
+#messages li { padding: 4px 0; line-height: 1.5; }
+

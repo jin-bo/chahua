@@ -14,9 +14,9 @@ status 由调用方拼到 ``<current_task status="...">`` XML 属性里，body �
 
 from __future__ import annotations
 
-from chahua.orchestrator import _render_task_block
 from chahua.summarizer import SummarySpan
 from chahua.task import Decision, Task
+from chahua.task_rendering import render_task_block as _render_task_block
 
 
 def _task(title: str = "写 README", goal: str = "把 README 写完", *, owner=None, status="open"):

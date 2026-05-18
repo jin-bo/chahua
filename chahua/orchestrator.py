@@ -28,12 +28,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
-from xml.sax.saxutils import quoteattr
+from typing import Any, Optional
 
 # Sentinel for "task_id arg not passed" —— 区分 None（显式无任务）vs 缺省（要内部 snapshot）。
 _UNSET: Any = object()
 
+from .artifact_detector import ArtifactDetector
+from .context_renderer import ContextRenderer
 from .cursor import GuestCursor
 from .events import (
     NOOP_SINK,
@@ -46,127 +47,22 @@ from .events import (
     new_turn_id,
 )
 from .guest import TeaGuest
-from .room import Message, Room, format_messages
+from .mentions import BROADCAST_TOKENS, iter_at_positions, matches_at
+from .orchestrator_config import OrchestratorConfig
+from .room import Message, Room
 from .scoring import IntentScorer, ScoreKind, ScoreResult
-from .summarizer import SummarySpan, Summarizer, TaskSummaries
-from .task import (
-    ARTIFACT_CREATED_BY_GUEST,
-    TASK_STATUS_DISPLAY,
-    TASK_UNTITLED,
-    Decision,
-    Task,
-    format_artifact_mtime,
-    format_artifact_size,
-)
-from .tasks_store import CLOSED_STATUSES, TasksStore, build_task_info_payload
-from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
+from .summarizer import Summarizer, TaskSummaries
+from .task_rendering import score_to_dict as _score_to_dict, wrap_current_task as _wrap_current_task
+from .tasks_store import TasksStore
+from .user_md import USER_SPEAKER_ID, UserConfig  # noqa: F401  # USER_SPEAKER_ID re-exported (used by tests / callers)
 
 _log = logging.getLogger(__name__)
 
 
-# ── 配置 ─────────────────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class OrchestratorConfig:
-    """房间编排参数。字段对应 ``room.toml`` ``[room]`` 段（P2 才会真读 toml）。"""
-
-    want_threshold: float = 0.45
-    """打分 ≥ 此值才允许发言。0.55 起步时招呼/中性话题全员低于阈值导致冷场（实测），
-    降到 0.45 让常见话题至少有一人接住；同时配合 ``threshold_decay_per_turn`` 防 AI 跑飞。"""
-
-    max_consecutive_ai_turns: int = 4
-    """连续 AI 发言数上限；达到后强制让麦给用户。一次"同回合 1~2 人抢话"算 1~2 轮。"""
-
-    max_speakers_per_pick: int = 2
-    """同一回合最多几位茶客同时抢话。设计文档 §3.3 「取分数 ≥ 阈值的前 1~2 名」。
-    设 1 退回 P1 初版"一回合一人"行为。"""
-
-    speaker_cooldown_turns: int = 1
-    """刚发言的茶客在多少"AI 轮"内打分自动归零（防止自己接自己）。"""
-
-    threshold_decay_per_turn: float = 0.1
-    """每多一轮没有用户发言、没有 @ 提及，阈值线性抬升的量。"""
-
-    onboarding_threshold: int = 20
-    """增量超过此条数 → 切回 onboarding 路径（含摘要、近 K 条原文）。"""
-
-    onboarding_recent_messages: int = 6
-    """onboarding 末尾"最近原文"块塞几条增量。仅 onboarding 路径用。"""
-
-    onboarding_recent_summaries: int = 5
-    """onboarding"近期梗概"块塞最近几条 :class:`SummarySpan` —— 防止长会话时所有
-    历史摘要全往 prompt 里堆。"""
-
-    summary_block_size: int = 20
-    """transcript 自上次摘要后累积多少条触发新摘要。"""
-
-    scoring_transcript_recent: int = 20
-    """打分 prompt 里塞最近多少条 transcript（保持小，便宜模型也能吃下）。"""
-
-
-# ── @ 路由 ───────────────────────────────────────────────────────────────────
-
-
-_BROADCAST_TOKENS: frozenset[str] = frozenset(
-    {"all", "everyone", "大家", "各位", "所有人"}
-)
-
-# 短语边界标点 —— ``@`` 提及的左右两侧用 ``str.isspace()`` + 这个集合。规则：必须是
-# **短语级别**分隔（空白 / 句末标点 / 开闭括号引号），不是**词内**衔接字符（``-``
-# ``_`` ``/`` 等）。
-#
-# 用白名单而非 "isalnum 取反" 是为了过滤：
-#   - URL：``https://x.com/@Elon/status``（``@`` 左边是 ``/`` → 不起匹配）
-#   - 复合词：``@all-hands``（``-`` 不是边界 → 不算 broadcast）
-#   - email：``support@all.com``（``@`` 左边是字母 → 不起匹配）
-#
-# 空白单独走 ``str.isspace()`` 以覆盖全 Unicode 空白（CJK 全角空格 ``　``、
-# nbsp ``\xa0`` 等），不必手工补 codepoint。
-_PHRASE_BOUNDARY_PUNCT: frozenset[str] = frozenset(
-    "，。！？、；：…"  # 中文句末
-    ",.!?;:"  # 英文句末
-    "（）「」『』【】《》"  # 中文括号
-    "()[]{}"  # 英文括号
-    "\"'“”‘’"  # 引号
-    "~～"  # tilde
-)
-
-
-def _is_phrase_boundary_char(ch: str) -> bool:
-    return ch.isspace() or ch in _PHRASE_BOUNDARY_PUNCT
-
-
-def _is_phrase_boundary(text: str, idx: int) -> bool:
-    """``text[idx]`` 是不是短语边界（end-of-string 或空白 / 句末标点 / 括号引号）。"""
-    if idx >= len(text):
-        return True
-    return _is_phrase_boundary_char(text[idx])
-
-
-def _iter_at_positions(text: str) -> Iterator[int]:
-    """yield ``text`` 里**作为提及起点**的 ``@`` 下标。
-
-    要求 ``@`` 左边是字符串起点或短语边界字符，过滤 email / URL 里 ``@`` 紧跟字母或
-    路径符的情况（``foo@x.com``、``https://x.com/@Elon`` 都不算提及）。
-    """
-    i = text.find("@")
-    while i >= 0:
-        if i == 0 or _is_phrase_boundary_char(text[i - 1]):
-            yield i
-        i = text.find("@", i + 1)
-
-
-def _matches_at(text: str, start: int, token: str, *, case_insensitive: bool = False) -> bool:
-    """``text[start:]`` 是否以 ``token`` 起头且后面是名字边界。``case_insensitive``
-    给 broadcast token 用（``@ALL`` 也算）；茶客名走默认大小写敏感。"""
-    end = start + len(token)
-    slice_ = text[start:end]
-    if case_insensitive:
-        slice_ = slice_.lower()
-    if slice_ != token:
-        return False
-    return _is_phrase_boundary(text, end)
+# ``OrchestratorConfig`` re-export 保留 —— server / session / 测试均走
+# ``from chahua.orchestrator import OrchestratorConfig``，定义已搬到 :mod:`.orchestrator_config`
+# 以避免与 :class:`ContextRenderer` 循环依赖。
+__all__ = ["Orchestrator", "OrchestratorConfig"]
 
 
 # ── 茶客注册项 ───────────────────────────────────────────────────────────────
@@ -218,29 +114,27 @@ class Orchestrator:
         #   _rounds_without_user_or_mention —— 驱动阈值衰减（@ 也清零）
         self._consecutive_ai_turns = 0
         self._rounds_without_user_or_mention = 0
-        # 缓存 ``_display_map`` —— 它只随 register() / user_config 变化，每轮被 4 次调用。
-        self._display_for: Optional[dict[str, str]] = None
+        # prompt 装配 / display_map / scoring transcript 全部委托给 ContextRenderer
+        # —— Orchestrator 留调度 / pick / speak / cooldown / cancel 状态机。
+        # display_map 缓存在 renderer 内；register() 后必须 invalidate。
+        self._renderer = ContextRenderer(
+            room=room,
+            user_config=user_config,
+            summarizer=summarizer,
+            config=config,
+            tasks_store=tasks_store,
+            task_summaries=task_summaries,
+        )
         # 后台摘要任务：每轮发言后被 ``_kick_summarize`` 启动；下次再 kick 时如果还在跑
         # 就跳过，避免堆积。摘要慢点不影响当前回合，所以**不 await**。
         self._summary_task: Optional[asyncio.Task[None]] = None
 
-        # P5.4 茶客自动归集：``_kick_detect_new_artifacts`` 在每个 pick 周期末尾
-        # 扫 active task 的 ``artifacts/``，diff 与本字典缓存的"上次扫到的文件名 set"
-        # 比对，新增 → emit hint + ``task_info``。
-        #
-        # 初始化只 seed open / in_progress / blocked 任务的 artifacts —— closed task
-        # 永远不会被 detect 函数读到（前置过滤），seed 进来纯浪费 readdir 还堆 dict。
-        # boot 时已有的 artifacts 不当新增 emit（启动时 task_info 已经给过前端）；
-        # runtime ``open_task`` 后的新任务首次扫时 ``.get(..., frozenset())`` 兜底，
-        # 从空 set 起 diff —— 茶客生成的第一个文件正确判为新增。
-        self._seen_artifacts: dict[str, set[str]] = {}
-        if self.tasks_store is not None:
-            for t in self.tasks_store.list_tasks():
-                if t.status in CLOSED_STATUSES:
-                    continue
-                self._seen_artifacts[t.id] = {
-                    a["name"] for a in self.tasks_store.list_artifacts(t.id)
-                }
+        # P5.4 茶客自动归集：每个 pick 周期末尾扫 active task 的 ``artifacts/``，
+        # diff "上次扫到的文件名 set" emit hint + ``task_info``。逻辑搬到
+        # :class:`ArtifactDetector`；本类经 ``_seen_artifacts`` 属性向测试暴露内部 dict。
+        self._artifact_detector = ArtifactDetector(
+            room_id=self.room.name, tasks_store=tasks_store,
+        )
 
     # ── 注册 / 信息 ────────────────────────────────────────────────────
 
@@ -250,7 +144,7 @@ class Orchestrator:
             raise ValueError(f"茶客 {guest.name!r} 已经注册过")
         self._guests[guest.name] = _GuestEntry(guest=guest, persona_md=persona_md)
         self.room.add_participant(guest.name)
-        self._display_for = None  # 失效缓存
+        self._renderer.invalidate_display_cache()
 
     @property
     def guest_names(self) -> tuple[str, ...]:
@@ -565,19 +459,19 @@ class Orchestrator:
         text = last.text
         # 注册名按长度倒序：``Elon Musk`` 排在 ``Elon`` 之前，最长前缀优先。
         names_by_length = sorted(self._guests, key=len, reverse=True)
-        for at_idx in _iter_at_positions(text):
+        for at_idx in iter_at_positions(text):
             start = at_idx + 1
             # 此 @ 是个 broadcast token？跳过（broadcast 由调用方独立判定）。
-            if any(_matches_at(text, start, tok, case_insensitive=True) for tok in _BROADCAST_TOKENS):
+            if any(matches_at(text, start, tok, case_insensitive=True) for tok in BROADCAST_TOKENS):
                 continue
             for name in names_by_length:
-                if _matches_at(text, start, name):
+                if matches_at(text, start, name):
                     return name
         return None
 
     def _find_user_broadcast(self) -> bool:
         """扫 transcript 最后一条消息里有没有 @broadcast 词（all / everyone / 大家 /
-        各位 / 所有人 —— 见 :data:`_BROADCAST_TOKENS`，英文大小写无关）。
+        各位 / 所有人 —— 见 :data:`BROADCAST_TOKENS`，英文大小写无关）。
 
         匹配带词边界 —— ``@allies`` 不会被当成 ``@all``，因为 ``e`` 不是名字边界。
 
@@ -587,9 +481,9 @@ class Orchestrator:
         if last is None or last.speaker_id != USER_SPEAKER_ID:
             return False
         text = last.text
-        for at_idx in _iter_at_positions(text):
+        for at_idx in iter_at_positions(text):
             start = at_idx + 1
-            if any(_matches_at(text, start, tok, case_insensitive=True) for tok in _BROADCAST_TOKENS):
+            if any(matches_at(text, start, tok, case_insensitive=True) for tok in BROADCAST_TOKENS):
                 return True
         return False
 
@@ -658,217 +552,41 @@ class Orchestrator:
         for name in list(self._cooldown):
             self._cooldown[name] = max(0, self._cooldown[name] - 1)
 
-    # ── 上下文喂养 ─────────────────────────────────────────────────────
+    # ── 上下文喂养（委托 ContextRenderer）─────────────────────────────
+
+    def _sync_renderer(self) -> None:
+        """同步 ``user_config`` 到 renderer。测试场景里直接 mutate ``orch.user_config``
+        要让下一次 render 看到新值；display_map 缓存里也固化了 display_name，所以一并
+        invalidate。生产路径不调，user_config 启动后即不动。
+        """
+        if self._renderer.user_config is not self.user_config:
+            self._renderer.user_config = self.user_config
+            self._renderer.invalidate_display_cache()
 
     def _build_context_for(
         self, guest_name: str, *, task_id: Optional[str] = None
     ) -> str:
-        """组 prompt 上下文。``task_id`` 是 ``_let_speak`` 入口的 snapshot 值（不读当前
-        store.active），P5.3.2 起注入到 task block；不存在 / 终结态由 :meth:`_maybe_render_task_block`
-        过滤后返 ``None``。"""
-        last_seen = self.cursor.get(guest_name)
-        increment = self.room.messages_since(last_seen)
-        use_onboarding = (
-            last_seen == 0 or len(increment) > self.config.onboarding_threshold
-        )
-        task_block = self._maybe_render_task_block(
-            task_id, compact=not use_onboarding
-        )
-        if use_onboarding:
-            return self._render_onboarding(guest_name, increment, task_block=task_block)
-        return self._render_incremental(guest_name, increment, task_block=task_block)
-
-    def _resolve_renderable_task(
-        self, task_id: Optional[str]
-    ) -> Optional[Task]:
-        """``task_id`` → ``Task``，``None`` 表示本轮不该注入任何 task 视野。
-
-        四个 None 路径：① 缺 task_id；② 缺 store；③ store 无该任务；④ 任务终结态
-        （done / abandoned）。onboarding / incremental / scoring 三条 render 路径共用
-        这个 gate —— 一次 ``get_task`` 就出，不触碰 list_decisions / list_artifacts /
-        task_summaries.get 三个 read API（闲聊回合 / closed task 时省掉三次 IO）。
-        """
-        if task_id is None or self.tasks_store is None:
-            return None
-        task = self.tasks_store.get_task(task_id)
-        if task is None or task.status in CLOSED_STATUSES:
-            return None
-        return task
-
-    def _maybe_render_task_block(
-        self, task_id: Optional[str], *, compact: bool
-    ) -> Optional[tuple[str, str]]:
-        """两步取数 + 调纯 renderer：``None`` 表示本轮不注入 task 块。
-
-        返回 ``(body, status_display)`` 元组（调用方拼到 ``<current_task status="...">``
-        XML 属性里）或 ``None``。
-
-        compact 路径短路：renderer 在 compact=True 时只读 task.title / task.goal，
-        丢弃 decisions / artifacts / summary —— 提前不取这三个数据，省掉 incremental 主
-        路径每位发言茶客一次 artifacts/ 目录磁盘扫。
-        """
-        task = self._resolve_renderable_task(task_id)
-        if task is None:
-            return None
-        if compact:
-            return _render_task_block(task, [], [], [], compact=True)
-        decisions = self.tasks_store.list_decisions(task_id)
-        artifacts = self.tasks_store.list_artifacts(task_id)
-        summary_tail: list[SummarySpan] = []
-        if self.task_summaries is not None:
-            handle = self.task_summaries.get(task_id)
-            if handle is not None:
-                summary_tail = list(handle.summaries)
-        return _render_task_block(
-            task, decisions, artifacts, summary_tail, compact=False
+        """转发到 :meth:`ContextRenderer.build_context_for`。"""
+        self._sync_renderer()
+        return self._renderer.build_context_for(
+            guest_name, self.cursor.get(guest_name), task_id=task_id
         )
 
     def _maybe_render_scoring_task_block(
         self, task_id: Optional[str]
     ) -> Optional[tuple[str, str]]:
-        """P5.6：scoring 专用极简 task body —— title + goal first line + status。
-
-        与 :meth:`_maybe_render_task_block(compact=True)` 区别：**不含** ``./task/`` 写入
-        指引（那是发言阶段执行语义，混进打分会污染"想接话吗"的相关性信号）。每 pick 周期
-        调一次，N 个 scorer 共享结果。``None`` 路径同 :meth:`_resolve_renderable_task`。
-
-        共享 :func:`_render_task_header`：与 speak compact body 在 title / goal first line
-        / status 这层纯数据格式化上同源（CLAUDE.md P5.6 invariant 明示允许共享的层）；
-        差异在调用方 —— speak compact 会追加 ``./task/`` 指引行，scoring 不追加。
-        """
-        task = self._resolve_renderable_task(task_id)
-        if task is None:
-            return None
-        lines, status_display = _render_task_header(task)
-        return "\n".join(lines), status_display
-
-    def _render_onboarding(
-        self,
-        guest_name: str,
-        increment: list[Message],
-        *,
-        task_block: Optional[tuple[str, str]] = None,
-    ) -> str:
-        """首次 / 长间隔回归路径：5+ 个 XML 块拼成 user message。
-
-        XML 标签包外层 + Markdown 渲内层是茶话室喂茶客 LLM 的固定形态（见
-        CLAUDE.md 关键不变量）。块顺序：``<room>`` → ``<user_persona>`` →
-        ``<room_summary>`` → ``<current_task>`` → ``<recent_messages>`` →
-        ``<speak_instruction>``。可选块按"无内容则整块省略"裁剪。
-        """
-        display_for = self._display_map()
-
-        def label(p: str) -> str:
-            name = display_for.get(p, p)
-            return f"{name}（人类用户）" if p == USER_SPEAKER_ID else name
-
-        blocks: list[str] = []
-
-        # 属性值走 quoteattr 转义 —— room.name / display_name 来自用户配置，含 `"` / `<` /
-        # `&` 时若裸插入会破坏 XML 边界（如 `<room name="a"&gt;<inject"`），整段块边界被
-        # 篡改、LLM 看到的结构错位。quoteattr 自带外层引号，f-string 里 attr 名后直接拼。
-        room_lines = [f"<room name={quoteattr(self.room.name)}>"]
-        if self.room.topic:
-            room_lines.append(f"话题：{self.room.topic}")
-        if self.room.rules:
-            room_lines.append(f"规则：{self.room.rules}")
-        room_lines.append("在场：" + ", ".join(label(p) for p in self.room.participants))
-        room_lines.append("</room>")
-        blocks.append("\n".join(room_lines))
-
-        # USER.md 自带的 H2（"## 身份" 等）被 <user_persona> 包住后自然降级为段内标题，
-        # 不再与外层 XML 结构同视觉级 —— 这是 XML 化包外层的核心收益。
-        if self.user_config.has_persona and self.user_config.full_md:
-            body = strip_top_h1(self.user_config.full_md).strip()
-            if body:
-                blocks.append(
-                    f"<user_persona display_name={quoteattr(self.user_config.display_name)}>\n"
-                    "以下是该参与者关于自己的说明：\n\n"
-                    f"{body}\n"
-                    "</user_persona>"
-                )
-
-        # 长会话历史摘要堆爆 prompt 是真实风险，只塞最近 K 段。
-        if self.summarizer.summaries:
-            recent = self.summarizer.summaries[
-                -self.config.onboarding_recent_summaries :
-            ]
-            bullets = "\n\n".join(s.text for s in recent)
-            blocks.append(f"<room_summary>\n{bullets}\n</room_summary>")
-
-        if task_block:
-            blocks.append(_wrap_current_task(task_block))
-
-        tail = increment[-self.config.onboarding_recent_messages :]
-        if tail:
-            blocks.append(
-                f'<recent_messages count="{len(tail)}">\n'
-                f"{format_messages(tail, display_for)}\n"
-                "</recent_messages>"
-            )
-
-        blocks.append(
-            f"<speak_instruction>\n{self._speak_instruction(guest_name)}\n"
-            "</speak_instruction>"
-        )
-
-        return "\n\n".join(blocks) + "\n"
-
-    def _render_incremental(
-        self,
-        guest_name: str,
-        increment: list[Message],
-        *,
-        task_block: Optional[tuple[str, str]] = None,
-    ) -> str:
-        """短间隔回归路径：仅 ``<room_update>`` + 可选 ``<current_task>`` + ``<speak_instruction>``。
-
-        与 onboarding 同样走 XML 包外层 + markdown 渲内层。``<room_update>`` 标签
-        + name 属性已表达"房间继续"语义，不再额外加口语 header。
-        """
-        # 增量空（理论不会发生 —— 编排器只在 transcript 有新消息时调）：兜底成只指令。
-        body = (
-            format_messages(increment, self._display_map())
-            if increment
-            else "（无新消息）"
-        )
-        blocks: list[str] = [
-            f"<room_update name={quoteattr(self.room.name)}>\n{body}\n</room_update>"
-        ]
-        if task_block:
-            blocks.append(_wrap_current_task(task_block))
-        blocks.append(
-            f"<speak_instruction>\n{self._speak_instruction(guest_name)}\n"
-            "</speak_instruction>"
-        )
-        return "\n\n".join(blocks) + "\n"
-
-    def _speak_instruction(self, guest_name: str) -> str:
-        return (
-            f"（请以「{guest_name}」的身份发言。只说你要说的内容，"
-            f"不要复述别人的话，不要加引号或前缀。）"
-        )
-
-    def _scoring_transcript(self) -> tuple[str, list[Message]]:
-        """打分用的 transcript 切片，返回 ``(格式化文本, 原始 Message 列表)``。
-
-        文本喂打分 prompt；list 给 :meth:`_count_self_mentions` 用——后者要按
-        ``speaker_id`` 排除"茶客自己之前发言里出现自己名字"的伪计数，所以不能只看
-        格式化文本。
-        """
-        latest = self.room.latest_seq
-        last_seen = max(0, latest - self.config.scoring_transcript_recent)
-        recent = self.room.messages_since(last_seen)
-        return format_messages(recent, self._display_map()), recent
+        """转发到 :meth:`ContextRenderer.maybe_render_scoring_task_block`。"""
+        return self._renderer.maybe_render_scoring_task_block(task_id)
 
     def _display_map(self) -> dict[str, str]:
-        """``speaker_id → display_name`` 映射。缓存：只随 register/user_config 变。"""
-        if self._display_for is None:
-            self._display_for = {
-                USER_SPEAKER_ID: self.user_config.display_name,
-                **{n: n for n in self._guests},
-            }
-        return self._display_for
+        """转发到 :meth:`ContextRenderer.display_map`。"""
+        self._sync_renderer()
+        return self._renderer.display_map()
+
+    def _scoring_transcript(self) -> tuple[str, list[Message]]:
+        """转发到 :meth:`ContextRenderer.scoring_transcript`。"""
+        self._sync_renderer()
+        return self._renderer.scoring_transcript()
 
     # ── 摘要（后台）────────────────────────────────────────────────────
 
@@ -897,184 +615,24 @@ class Orchestrator:
                 self.room, display, block_size=self.config.summary_block_size,
             )
 
+    # ── 茶客自动归集（委托 ArtifactDetector）────────────────────────────
+
+    @property
+    def _seen_artifacts(self) -> dict[str, set[str]]:
+        """``task_id → 上次扫到的 artifact 文件名 set``。
+
+        测试通过本属性读 detector 内部状态；属性返 detector 持有的 dict 引用，
+        ``orch._seen_artifacts[task_id] == {...}`` 与原本一致。
+        """
+        return self._artifact_detector.seen
+
     def _kick_detect_new_artifacts(
         self, sink: EnvelopeSink, active_task_id: Optional[str]
     ) -> None:
-        """扫 active task 的 ``artifacts/`` 目录，emit 茶客新写入的产物（P5.4）。
+        """转发到 :meth:`ArtifactDetector.detect`。
 
         触发：``_run_ai_chain`` 每个 pick 周期末尾。茶客直接写 ``./task/<name>``
         软链后，落在 ``tasks/<active>/artifacts/<name>``。
-
-        Emit 顺序：N 条 ``task_artifact_added`` hint（per file）+ 一帧 ``task_info``
-        权威快照（payload 走 :func:`tasks_store.build_task_info_payload`，与
-        :meth:`server_inbound_task.TaskHandlers._emit_task_info` 共享）。
-
-        用户走 UI ``attach_artifact`` 上传时 ``_seen_artifacts`` 没同步更新，下次本函数
-        扫到那些文件会重复 emit hint —— 接受（前端以 ``task_info`` 为权威，hint 仅
-        做可选 toast / 动画；当前 UI 配置无 toast，重复无感），不在两个组件间加 sync
-        通道避免耦合。
         """
-        if active_task_id is None or self.tasks_store is None:
-            return
-        task = self.tasks_store.get_task(active_task_id)
-        if task is None or task.status in CLOSED_STATUSES:
-            return
-        artifacts = self.tasks_store.list_artifacts(active_task_id)
-        current_names = {a["name"] for a in artifacts}
-        seen = self._seen_artifacts.get(active_task_id, frozenset())
-        new_names = current_names - seen
-        removed_names = seen - current_names
-        if not new_names and not removed_names:
-            return
-        # 同步缓存到当前盘上状态：既要记入新增，也要去除已被 GC 的旧名（不去除会让
-        # 同名重建时不 emit）。
-        self._seen_artifacts[active_task_id] = current_names
+        self._artifact_detector.detect(sink, active_task_id)
 
-        def emit(event_type: ChahuaEventType, data: dict) -> None:
-            emit_to_sink(sink, ChahuaEnvelope(
-                room_id=self.room.name,
-                turn_id=None, guest_name=None, message_id=None,
-                type=event_type, data=data,
-            ))
-
-        for artifact in (a for a in artifacts if a["name"] in new_names):
-            emit(ChahuaEventType.TASK_ARTIFACT_ADDED, {
-                "task_id": active_task_id,
-                "name": artifact["name"],
-                "size": artifact["size"],
-                "rel": artifact["rel"],
-                "created_by": ARTIFACT_CREATED_BY_GUEST,
-            })
-        if new_names:
-            emit(
-                ChahuaEventType.TASK_INFO,
-                build_task_info_payload(self.tasks_store),
-            )
-
-
-# ── task 块渲染（P5.3.1，docs §6.1）──────────────────────────────────────────
-#
-# 纯字符串 renderer：不读 store、不接 self、不背状态分支。closed task / task 不存在的
-# 判断全部在调用方 ``_build_context_for``（P5.3.2）里做 —— 取到不该注入的 task 时调用方
-# 直接跳过本函数，本函数只负责"把已取好的纯数据拼成喂 LLM 的字符串"。
-#
-# 两态：``compact=False`` 走 onboarding 完整块（在"近期梗概"与"最近原文"之间插入）；
-# ``compact=True`` 走 incremental 短 header（1-3 行）。预算控制见模块顶 _FULL_*_CAP 常量。
-# ``task.owner`` 直接渲染原值（raw speaker_id，"user" 或茶客名）—— display name 映射不
-# 属于渲染层，调用方按需在传入前做。
-
-_FULL_DECISIONS_CAP = 5
-"""完整块最多渲染几条决策（取最近 N 条）；超出截断。预算 ≈ 5 × 50 字。"""
-
-_FULL_ARTIFACTS_CAP = 10
-"""完整块 artifact 清单条数上限（首 N 个按名字排序的产物）。"""
-
-_FULL_SUMMARY_TAIL_CAP = 3
-"""完整块"任务近期进展"取 task summary 末几段。"""
-
-
-def _wrap_current_task(task_block: tuple[str, str]) -> str:
-    """``(body, status_display)`` → ``<current_task status="...">{body}</current_task>``。
-
-    onboarding / incremental 两条路径共用同一段 XML 拼装，单点 helper 避免漏改。
-    """
-    body, status_display = task_block
-    return f"<current_task status={quoteattr(status_display)}>\n{body}\n</current_task>"
-
-
-def _render_task_header(task: Task) -> tuple[list[str], str]:
-    """compact body 的头两行 + status_display —— scoring 与 speak compact 共享（P5.6）。
-
-    输出 ``["标题：...", "目标：<first line>"]``（goal 为空时只输出标题行）+ status
-    枚举显示名。**不含** ``./task/`` 写入指引 —— 那是发言阶段执行语义，speak compact
-    自己在调用方追加，scoring 不追加。
-
-    full 模式（``_render_task_block(compact=False)``）独立路径，含 owner / full goal /
-    decisions / artifacts / summary —— 与 compact header 重叠仅一两行，不强行共享。
-    """
-    title = task.title or TASK_UNTITLED
-    status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
-    lines = [f"标题：{title}"]
-    first_line = task.goal.split("\n", 1)[0].strip() if task.goal else ""
-    if first_line:
-        lines.append(f"目标：{first_line}")
-    return lines, status_display
-
-
-def _render_task_block(
-    task: Task,
-    decisions: list[Decision],
-    artifacts: list[dict],
-    summary_tail: list[SummarySpan],
-    *,
-    compact: bool,
-) -> tuple[str, str]:
-    """把任务上下文渲染成给茶客 LLM 的文本块（P5.3.1）。
-
-    返回 ``(body, status_display)`` 元组——``status_display`` 由调用方拼到
-    ``<current_task status="...">`` XML 属性里，body 不再含状态行。
-    """
-    if compact:
-        lines, status_display = _render_task_header(task)
-        # P5.4：./task/ 是任务工作目录，可读写。茶客新产物**必须**写到 ./task/<name>。
-        # 写到 cwd / ./share/ 等别处不会自动归集进任务产物清单。scoring 路径不追加此行
-        # （走 _render_task_header 后直接 join）。
-        lines.append(
-            "./task/ 是本任务工作目录（可读写）。任务产物务必写到 ./task/<name>，"
-            "自动入任务；写到 cwd / ./share/ 等别处不算入任务产物。"
-        )
-        return "\n".join(lines), status_display
-
-    title = task.title or TASK_UNTITLED
-    status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
-    parts: list[str] = [f"标题：{title}"]
-    if task.owner:
-        parts.append(f"负责人：{task.owner}")
-    if task.goal:
-        parts.append(f"目标：\n{task.goal}")
-
-    if decisions:
-        recent = decisions[-_FULL_DECISIONS_CAP:]
-        bullets = "\n".join(f"- {d.summary}" for d in recent)
-        parts.append(f"近期决策（最近 {len(recent)} 条）：\n{bullets}")
-
-    if artifacts:
-        head = artifacts[:_FULL_ARTIFACTS_CAP]
-        bullets = "\n".join(
-            f"- {a['name']} ({format_artifact_size(a['size'])}, "
-            f"{format_artifact_mtime(a['mtime_ms'])})"
-            for a in head
-        )
-        # P5.4：./task/ 可读写。茶客**必须**把新产物写到 ./task/<name>，否则不会进任务清单。
-        parts.append(
-            "当前产物（./task/ 是本任务工作目录，可读写；"
-            "任务产物务必写到 ./task/<name>，自动入任务；"
-            f"写到 cwd / ./share/ 等别处不算入任务产物）：\n{bullets}"
-        )
-    else:
-        # full 模式无 artifact 时仍要明示 ./task/ 的存在 + 写权限 + 别处不算 —— 避免茶客
-        # 把产物写到 cwd / ./share/ 后纳闷"为什么没出现在任务里"。
-        parts.append(
-            "./task/ 是本任务工作目录（可读写，当前为空）。"
-            "任务产物务必写到 ./task/<name>，自动入任务；"
-            "写到 cwd / ./share/ 等别处不会自动归集进任务产物清单。"
-        )
-
-    if summary_tail:
-        tail = summary_tail[-_FULL_SUMMARY_TAIL_CAP:]
-        bullets = "\n\n".join(s.text for s in tail)
-        parts.append(f"任务近期进展：\n{bullets}")
-
-    return "\n\n".join(parts), status_display
-
-
-# ── 序列化 ───────────────────────────────────────────────────────────────────
-
-
-def _score_to_dict(r: ScoreResult) -> dict:
-    """:class:`ScoreResult` → JSON-safe dict（``turn_start.data.scores`` 里塞 N 条）。"""
-    return {
-        "guest_name": r.guest_name,
-        "score": r.score,
-        "kind": r.kind.value,
-    }

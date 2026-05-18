@@ -1,0 +1,338 @@
+/* 任务面板。width transition 挂 .task-panel-animated，task_panel.js 首帧后再补 ——
+   避免冷启动若 localStorage 是 collapsed 状态时 280px → 32px 的首屏抖动。 */
+#task-panel {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid #eee;
+  background: #faf6ea;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#task-panel.task-panel-animated { transition: width 120ms ease; }
+#task-panel[data-collapsed="1"] { width: 32px; }
+#task-panel[data-collapsed="1"] .task-panel-title,
+#task-panel[data-collapsed="1"] #task-panel-body { display: none; }
+#task-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+}
+.task-panel-toggle {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: #888;
+  background: transparent;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.task-panel-toggle:hover { background: #fff; color: #333; }
+.task-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+  letter-spacing: 0.3px;
+  flex: 1;
+}
+/* "+ 新任务" 按钮 —— P5.1 一房间最多 1 个任务：tasks.length > 0 时 disabled。 */
+.task-panel-new {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  color: #6a4f25;
+  background: #fff;
+  cursor: pointer;
+}
+.task-panel-new:hover:not(:disabled) { background: #fffbef; }
+.task-panel-new:disabled { color: #b0a890; cursor: not-allowed; background: transparent; }
+#task-panel[data-collapsed="1"] .task-panel-new { display: none; }
+.task-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* 空状态 —— 没任务时的占位提示 */
+.task-empty { padding: 24px 8px; text-align: center; }
+.task-empty-hint { font-size: 13px; color: #888; line-height: 1.6; }
+
+/* 任务卡：title + goal markdown + meta dl */
+.task-card {
+  background: #fff;
+  border: 1px solid #ece4cf;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.task-card-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.task-card-icon { font-size: 14px; }
+.task-card-title { font-size: 14px; font-weight: 600; color: #333; word-break: break-word; flex: 1; }
+.task-card-goal { font-size: 13px; color: #444; line-height: 1.6; margin-bottom: 8px; }
+/* inline 编辑视觉 —— 平时无边框，hover 出虚边提示可点；focus 实边 + 浅黄背景。
+   :empty::before 给空 contenteditable 显占位文案，提示"点这里写"。 */
+.task-card-title[contenteditable], .task-card-goal-editable[contenteditable] {
+  outline: none;
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  cursor: text;
+}
+.task-card-title[contenteditable]:hover, .task-card-goal-editable[contenteditable]:hover {
+  box-shadow: inset 0 0 0 1px #e0d8c4;
+}
+.task-card-title[contenteditable]:focus, .task-card-goal-editable[contenteditable]:focus {
+  background: #fffbef;
+  box-shadow: inset 0 0 0 1px #d0c8b4;
+}
+.task-card-title[contenteditable]:empty::before,
+.task-card-goal-editable[contenteditable]:empty::before {
+  content: attr(data-placeholder);
+  color: #b0a890;
+}
+.task-card-goal-editable {
+  white-space: pre-wrap;
+  min-height: 1.6em;
+}
+.task-card-goal p:first-child { margin-top: 0; }
+.task-card-goal p:last-child { margin-bottom: 0; }
+.task-card-goal pre {
+  background: #f6f3ea;
+  padding: 6px 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+.task-card-goal code { font-size: 12px; }
+.task-card-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 12px;
+  color: #777;
+}
+.task-card-meta dt { color: #999; }
+.task-card-meta dd { margin: 0; color: #555; }
+
+/* 任务卡可编辑控件（P5.2.9）：status / owner 下拉 + 完成 / 放弃按钮。
+   两栏 grid 给 controls，与下面 actions 行视觉对齐。 */
+.task-card-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+  margin: 8px 0;
+}
+.task-card-control {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: #777;
+}
+.task-card-control-label { color: #999; }
+.task-control-select {
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+}
+.task-control-select:hover { border-color: #b0a890; }
+.task-control-select:focus { outline: 2px solid #d0c8b4; outline-offset: 1px; }
+.task-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.task-card-close-btn {
+  flex: 1;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #fff;
+}
+/* 完成：浅绿基调（沿 .task-other-status[data-status=done]）。
+   放弃：浅红基调（沿 abandoned）—— 让用户一眼分辨破坏性 vs 收尾。 */
+.task-card-close-done {
+  border-color: #a8c9a0;
+  color: #406c2a;
+}
+.task-card-close-done:hover { background: #eaf5e3; }
+.task-card-close-abandoned {
+  border-color: #d4a8a8;
+  color: #8a4040;
+}
+.task-card-close-abandoned:hover { background: #f5e3e3; }
+
+/* 产物 / 决策两块：head + ul，空状态用淡色 hint */
+.task-section { margin-bottom: 12px; }
+.task-section-head {
+  font-size: 11px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #ece4cf;
+}
+.task-section-empty { font-size: 12px; color: #b0a890; padding: 4px 0; }
+.task-artifacts, .task-decisions { list-style: none; margin: 0; padding: 0; }
+.task-artifact, .task-decision {
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  background: #fff;
+  border: 1px solid transparent;
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+.task-artifact { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.task-artifact-name { color: #333; word-break: break-all; flex: 1; }
+.task-artifact-detail { color: #999; font-size: 11px; flex-shrink: 0; }
+.task-artifact-clickable { cursor: pointer; }
+.task-artifact-clickable:hover { background: #f6efd9; border-color: #e0c068; }
+.task-artifact-clickable:hover .task-artifact-name { color: #6f4f1a; }
+.task-artifact-clickable:focus-visible {
+  outline: 2px solid #c89a3e;
+  outline-offset: 1px;
+}
+.task-decision-text { font-size: 13px; color: #333; line-height: 1.5; }
+.task-decision-meta { font-size: 11px; color: #999; margin-top: 2px; }
+
+/* hint 高亮 —— task_open / task_update / task_decision_added /
+   task_artifact_added / task_close 命中 DOM 时短暂打底色 600ms，让用户感知"刚加 /
+   刚改 / 刚关"。 */
+.task-flash { background: #fff4c2 !important; border-color: #e0c068 !important; }
+
+/* "其它任务"折叠区（P5.2.7）。<details>/<summary> 走原生交互，summary 自带 disclosure
+   三角；这里仅给它一点呼吸 + 与 task-section 同款 head 排版。 */
+.task-others {
+  margin-top: 4px;
+  border-top: 1px solid #ece4cf;
+  padding-top: 10px;
+}
+.task-others-summary {
+  font-size: 11px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: revert; /* 兜底某些 UA reset 把 summary 的三角清掉 */
+}
+.task-others-summary:hover { color: #6a4f25; }
+.task-others-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+/* 单卡片"compact"形态：标题 + 状态 / owner 小字。背景比 active 卡浅一档 —— 既区分
+   active vs others，又不至于让"其它任务"看着像被废弃。 */
+.task-other {
+  background: #fbf8ee;
+  border: 1px solid #ece4cf;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  color: #555;
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+.task-other-clickable {
+  cursor: pointer;
+}
+.task-other-clickable:hover {
+  background: #fffbef;
+  border-color: #d0c8b4;
+}
+.task-other-clickable:focus-visible {
+  outline: 2px solid #d0c8b4;
+  outline-offset: 1px;
+}
+.task-other-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+}
+.task-other-title-text {
+  flex: 1;
+  word-break: break-word;
+  /* 截到两行截断 —— 任务标题理论上 ≤ 60 字（room.toml 校验），但用户也会复制段落进来；
+     -webkit-line-clamp 单 vendor 但所有 Chromium 都接，Electron 不需要兜底。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.task-other-icon { font-size: 13px; line-height: 1; flex-shrink: 0; }
+.task-other-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #888;
+}
+.task-other-status {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #ece4cf;
+  color: #6a4f25;
+}
+/* 状态色：进行中 = 浅金；完成 = 浅绿；放弃 = 浅红；阻塞 = 浅橙；未开始 = 默认。
+   per status 不爱手抄 5 个，留默认 + 三档区分即可（done / abandoned / blocked）。 */
+.task-other-status[data-status="done"] { background: #d9ead3; color: #406c2a; }
+.task-other-status[data-status="abandoned"] { background: #e6d4d4; color: #8a4040; }
+.task-other-status[data-status="blocked"] { background: #f0d9b8; color: #80531a; }
+.task-other-status[data-status="in_progress"] { background: #d4e3ec; color: #2a567c; }
+.task-other-owner {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* closed (done / abandoned) 把整张卡再翻灰一档 —— 语义"已结束 ≠ 仅"非 active""。 */
+.task-other-closed {
+  background: #f5f1e3;
+  opacity: 0.75;
+}
+.task-other-closed .task-other-title { color: #888; font-weight: 500; }
+
+/* 标为决策 modal 的"支持消息"列表 —— 每行 [✔][speaker]：[文本片段]。 */
+.decision-support-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #ece4cf;
+  border-radius: 4px;
+  background: #fff;
+}
+.decision-support-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f0ead9;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.decision-support-item:last-child { border-bottom: none; }
+.decision-support-item:hover { background: #fffbef; }
+.decision-support-item input[type="checkbox"] { margin-top: 2px; flex-shrink: 0; }
+.decision-support-speaker { color: #888; flex-shrink: 0; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.decision-support-snippet { color: #444; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
