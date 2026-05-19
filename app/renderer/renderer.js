@@ -1249,6 +1249,30 @@ composer.addEventListener("submit", (ev) => {
     autoResizeTextarea();
     return;
   }
+  // /clear task：清空当前 active 任务的全部产物（仅删 artifacts/，任务本身保留）。
+  // 必须排在 /clear / /new 之前 —— 否则 startsWith 边界让 "/clear task" 被前缀吞掉。
+  if (text === "/clear task" || text === "/clear-task") {
+    const active = taskState.getActiveTask();
+    if (!active) {
+      setStatus("error", "/clear task 需要先选中一个任务");
+      return;
+    }
+    const count = Array.isArray(active.artifacts) ? active.artifacts.length : 0;
+    if (count === 0) {
+      setStatus("", `任务「${active.title}」没有产物`);
+      textInput.value = "";
+      autoResizeTextarea();
+      return;
+    }
+    if (!window.confirm(
+      `确定清空任务「${active.title}」的全部产物（${count} 个文件）？\n任务本身（决策 / 状态 / 摘要）保留，仅删 artifacts/ 下的文件。`,
+    )) return;
+    send({ type: Inbound.CLEAR_TASK_ARTIFACTS, task_id: active.id });
+    setStatus("", `清空任务「${active.title}」的产物…`);
+    textInput.value = "";
+    autoResizeTextarea();
+    return;
+  }
   // /clear 与 /new：键盘快捷的"清空聊天"，与房间菜单同入口共用 confirm —— 滑指误打
   // /task 边界（如想 /task 打成 /clear）有 confirm 兜底；clearCurrentRoom 内部不连接
   // 时 noop，所以此处不再判 connected。

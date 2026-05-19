@@ -26,6 +26,7 @@ from .task import MARKED_BY_USER
 from .task_event_text import (
     add_decision_text,
     attach_artifact_text,
+    clear_artifacts_text,
     close_task_text,
     open_task_text,
 )
@@ -50,6 +51,8 @@ INBOUND_ADD_DECISION = "add_decision"
 # P5.2.5：多任务管理新增两个 inbound。
 INBOUND_SET_ACTIVE_TASK = "set_active_task"
 INBOUND_CLOSE_TASK = "close_task"
+# 2026-05-19：清空任务产物（/clear task 走的入口）。
+INBOUND_CLEAR_TASK_ARTIFACTS = "clear_task_artifacts"
 
 
 # 任务 inbound payload 白名单。加字段就动这里 —— 任何不在集合里的顶层键 → NOTICE error。
@@ -70,6 +73,7 @@ _ADD_DECISION_ALLOWED: frozenset[str] = frozenset(
 )
 _SET_ACTIVE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id"})
 _CLOSE_TASK_ALLOWED: frozenset[str] = frozenset({"task_id", "status"})
+_CLEAR_TASK_ARTIFACTS_ALLOWED: frozenset[str] = frozenset({"task_id"})
 
 
 class TaskHandlers:
@@ -484,6 +488,62 @@ class TaskHandlers:
         self._emit_task_info(sink)
         await self.server._kick_synthesized_user_message(
             add_decision_text(decision), sink, task_id=task_id,
+        )
+
+    async def _inbound_clear_task_artifacts(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        """删空 ``tasks/<task_id>/artifacts/`` 下所有产物文件（``/clear task`` 入口）。
+
+        范围严格 —— **只删 ``artifacts/`` 一层下的可见文件**。``task.json`` /
+        ``decisions.jsonl`` / ``summary.jsonl`` / ``events.jsonl`` / 摘要游标都不动；
+        任务本身（含 status / owner / 决策列表）原样保留。**写权限只在用户**口径
+        延续——茶客不能走这条 inbound，只能 propose（暂不支持 propose 清产物，与
+        propose 写产物不对称是因为"删"动作风险更高，必须用户主动）。
+
+        副作用顺序：
+        1. ``tasks_store.clear_artifacts`` 删盘 + 落 ``events.jsonl`` audit。
+        2. **重置 :class:`ArtifactDetector` 的 seen 缓存**——否则下一轮 detect 扫到
+           ``current_names = {}``、``prev = 老集合`` 走 ``removed_names`` 分支会与
+           本帧 ``task_info`` 形成两次广播（无害但冗余）。
+        3. emit ``task_info`` 权威快照（artifacts: []）。
+        4. ``_kick_synthesized_user_message`` 让茶客看见"用户清空了产物"。
+
+        与 ``clear_room`` 的区别：``clear_room`` 重置整间公共状态 + agent 会话窗口；
+        本 inbound 只清单任务产物，transcript / agent.messages 都不动。
+        """
+        if not self.server._reject_unknown_keys(
+            data, _CLEAR_TASK_ARTIFACTS_ALLOWED,
+            where=INBOUND_CLEAR_TASK_ARTIFACTS, sink=sink,
+        ):
+            return
+        task_id = require_str(data, "task_id", where=INBOUND_CLEAR_TASK_ARTIFACTS)
+        if task_id is None:
+            return
+        store = self.server._session.tasks_store
+        task = store.get_task(task_id)
+        if task is None:
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"清空产物失败：task_id={task_id!r} 不存在",
+            )
+            # 任务在 UI render 与 click 之间消失 —— 重发 task_info 让前端列表复位。
+            self._emit_task_info(sink)
+            return
+        try:
+            deleted = store.clear_artifacts(task_id)
+        except OSError as e:
+            self.server._notice_persist_failure(
+                sink, INBOUND_CLEAR_TASK_ARTIFACTS, e,
+            )
+            return
+        # 重置 detector 缓存 —— 防止下一轮 _kick_detect_new_artifacts 把"删走的旧名"
+        # 当 removed_names 触发多余广播；同时同名重建时仍能正常 emit。
+        self.server._session.orchestrator._artifact_detector.seen[task_id] = set()
+        _log.info("clear_task_artifacts: task=%s deleted=%d", task_id, len(deleted))
+        self._emit_task_info(sink)
+        await self.server._kick_synthesized_user_message(
+            clear_artifacts_text(task, len(deleted)), sink, task_id=task_id,
         )
 
     def _snapshot_active_task_id(self) -> Optional[str]:

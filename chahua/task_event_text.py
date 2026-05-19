@@ -45,3 +45,7 @@ def attach_artifact_text(name: str) -> str:
 
 def detect_artifacts_text(names: Iterable[str]) -> str:
     return f"📎 茶客产出：{', '.join(names)}"
+
+
+def clear_artifacts_text(task: Task, count: int) -> str:
+    return f"🗑️ 用户清空了任务【{task.title}】的产物（{count} 个文件）"

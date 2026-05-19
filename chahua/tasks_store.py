@@ -71,6 +71,7 @@ EVENT_KIND_BECAME_ACTIVE = "became_active"
 EVENT_KIND_BECAME_INACTIVE = "became_inactive"
 EVENT_KIND_CLOSED = "closed"  # payload: {"status": "done"|"abandoned"}
 EVENT_KIND_FIELD_CHANGED = "field_changed"  # payload: {"field", "before", "after"}
+EVENT_KIND_ARTIFACTS_CLEARED = "artifacts_cleared"  # payload: {"count", "names": [...]}
 
 # update_task 的 owner 参数 sentinel —— ``None`` 是合法值（清空 owner），不能复用 None
 # 表示"不改"。沿 :mod:`chahua.orchestrator` 的 ``_UNSET`` 同款 module-private 对象。
@@ -691,6 +692,47 @@ class TasksStore:
             "size": size,
             "rel": f"tasks/{task_id}/{_ARTIFACTS_DIRNAME}/{dst_name}",
         }
+
+    def clear_artifacts(self, task_id: str) -> list[str]:
+        """删空 ``tasks/<task_id>/artifacts/`` 下所有可见产物文件，返回已删的文件名列表。
+
+        范围严格只删 :meth:`artifacts_dir` 一层下的常规文件 —— 跳过子目录（P5.1 不支持
+        子目录，但守卫一下 future-proof）、跳过 :func:`_is_os_metadata_file` 命中的元
+        数据条目（``.DS_Store`` / ``._foo`` 等本来就不入 :meth:`list_artifacts`，删它们
+        反而把 OS 重新生成的影子文件牵连进来）。**不动 ``task.json`` / ``decisions.jsonl``
+        / ``summary.jsonl`` / ``events.jsonl``** —— 只清"产物"那一层，与 ``attach_artifact``
+        / ``write_artifact`` 的范围对称。已 closed 任务**本方法不挡** —— 与
+        :meth:`write_artifact` 注释"状态守卫由调用方负责"同口径。
+
+        单文件删除失败时：WARN 跳过、不抛、继续删余下文件，返回成功删除的子集 —— 与
+        rotation "部分失败不阻断" 同口径。``artifacts_dir`` 不存在 / 任务无产物 → 返回
+        空列表（不视作错误）。
+
+        落 ``events.jsonl`` 一条 ``artifacts_cleared{count, names}`` 给未来 audit。
+        """
+        if task_id not in self._tasks:
+            raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
+        adir = self.artifacts_dir(task_id)
+        if not adir.is_dir():
+            return []
+        deleted: list[str] = []
+        for p in sorted(adir.iterdir()):
+            if not p.is_file():
+                continue
+            if _is_os_metadata_file(p.name):
+                continue
+            try:
+                p.unlink()
+            except OSError:
+                _log.warning("clear_artifacts: 删除失败 %s", p, exc_info=True)
+                continue
+            deleted.append(p.name)
+        if deleted:
+            self._append_event(
+                task_id, EVENT_KIND_ARTIFACTS_CLEARED,
+                count=len(deleted), names=deleted,
+            )
+        return deleted
 
     def write_artifact(self, task_id: str, *, name: str, content: str) -> dict:
         """直接把 ``content`` 写入 ``tasks/<task_id>/artifacts/<name>``。

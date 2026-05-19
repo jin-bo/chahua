@@ -91,6 +91,7 @@ from .server_inbound_settings import (
 from .server_inbound_task import (
     INBOUND_ADD_DECISION,
     INBOUND_ATTACH_ARTIFACT,
+    INBOUND_CLEAR_TASK_ARTIFACTS,
     INBOUND_CLOSE_TASK,
     INBOUND_OPEN_TASK,
     INBOUND_SET_ACTIVE_TASK,
@@ -698,6 +699,7 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_ADD_DECISION: "task._inbound_add_decision",
     INBOUND_SET_ACTIVE_TASK: "task._inbound_set_active_task",
     INBOUND_CLOSE_TASK: "task._inbound_close_task",
+    INBOUND_CLEAR_TASK_ARTIFACTS: "task._inbound_clear_task_artifacts",
 }
 
 

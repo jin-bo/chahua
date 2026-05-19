@@ -117,6 +117,9 @@ export const Inbound = Object.freeze({
   // 走服务端 NOTICE error 退回。
   SET_ACTIVE_TASK: "set_active_task",
   CLOSE_TASK: "close_task",
+  // 2026-05-19：清空任务产物（/clear task 入口）。仅删 tasks/<id>/artifacts/ 下文件，
+  // 任务本身（status / decisions / 摘要）保留；服务端 confirm 由前端做（destructive）。
+  CLEAR_TASK_ARTIFACTS: "clear_task_artifacts",
   // P6.3.A：按 turn_id 拉历史 turn 详情 + 关联 prompt 文件。payload: {turn_id}。
   // 服务端 regex 校验 ``^turn_[0-9a-f]+$``；未知 / rotation 清掉 → TURN_DETAIL{found=false}。
   FETCH_TURN_DETAIL: "fetch_turn_detail",

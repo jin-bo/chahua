@@ -77,7 +77,7 @@ def _print_banner(session: RoomSession, *, paths: Paths) -> None:
         f"在场茶客：{'、'.join(parts)}   "
         f"房间默认模型：{spec.provider}/{spec.model}"
     )
-    print("输入回车发送；空行 / /quit 退出；/info 看权限状态；/clear /new 清空聊天；@<名字> 直接点茶客。")
+    print("输入回车发送；空行 / /quit 退出；/info 看权限状态；/clear /new 清空聊天；/clear task 清当前任务产物；@<名字> 直接点茶客。")
     print("─" * 60)
 
 
@@ -209,6 +209,28 @@ async def _repl(args: argparse.Namespace) -> int:
                 session.orchestrator.reset_room()
                 session.recorder.clear()
                 print("[已清空房间记录 —— 下一句重新走 onboarding]")
+                continue
+            if text in ("/clear task", "/clear-task"):
+                # 仅清当前 active 任务的 artifacts/。任务本身（决策 / 状态 / 摘要）保留，
+                # 与 ``/clear``（清整间房间）作用域有意不同。
+                store = session.tasks_store
+                active_id = store.active_task_id if store is not None else None
+                if active_id is None:
+                    print("[/clear task：当前没有 active 任务]")
+                    continue
+                task = store.get_task(active_id)
+                if task is None:
+                    print(f"[/clear task：task_id={active_id!r} 已不存在]")
+                    continue
+                # CLI 即时输入语境无误触场景，不加 input("确认?") 拦截；WS 路径有
+                # window.confirm 兜底。
+                deleted = store.clear_artifacts(active_id)
+                # 同步重置 detector 缓存（与 ``_inbound_clear_task_artifacts`` 同口径）。
+                session.orchestrator._artifact_detector.seen[active_id] = set()
+                print(
+                    f"[已清空任务「{task.title}」的产物（{len(deleted)} 个文件）"
+                    f" —— 任务本身保留]"
+                )
                 continue
 
             before_seq = session.room.latest_seq
