@@ -52,6 +52,7 @@ transcript / cursor / summary 持久化保留。
 - 多行输入：Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px 切滚动。
 - 附件上传：composer 左侧 `+`，文件落房间共享目录，随下一条消息一起进上下文。
 - 任务房间：右上角面板「+ 新任务」开任务 → composer 顶部 chip 显示当前 active 任务；茶客感知 active 任务（onboarding/incremental prompt 都注入 task 块），可写 `./task/<name>` 自动归集为 artifact、可 propose 决策 / 新任务待你「采纳」。产物列表点击即下载（带白名单 + symlink 防逃逸）。多任务共存，单时刻最多 1 个 active。
+- 调试抽屉：与任务面板互斥占右侧槽位，看每一轮谁被候选 / 分数 / 选谁 / prompt / 用了哪些工具 / 产物路径；切房 / 重启后仍能翻"开窗前"的历史 turn（点击索引行即拉详情）。默认开，盘上落到 `rooms/<id>/debug/`；`max_turns = 500` 按 turn 自动 rotation；`room.toml [debug] enabled = false` 可关。
 - sidebar：切换房间 / 加茶客 / 导入 persona（本地目录或 GitHub）；点茶客头像设权限、勾选信任其 MCP。
 - **双击房间名** 弹「更改房间配置（直接编辑 room.toml）/ 清空聊天」；**双击用户头像或显示名** 弹「编辑配置（USER.md）/ 换头像（PNG / JPG / WebP / GIF）」。
 
@@ -73,9 +74,9 @@ ship 自带的 python 包 + 默认 personas 在 `.app` bundle 内只读，与用
 
 ## 接下来
 
-- **P3.3.3 Windows 发布**：build-python-bundle 跑 win 端 + electron-builder NSIS 出未签名 .exe；接缝（platform 分支、sidecar resolver、build.win 配置、stdin EOF 替 SIGINT）P3.3.2.c+.d 已就位，剩 Windows 主机 / CI matrix 端跑。
-- **P4 打磨 + ACP 异构茶客**：逐茶客 provider/model、isolation=global、`[scoring]`/`[summary]` 分派、
-  人格画廊、运行时增删茶客、接第一个非 agentao 的 ACP 茶客。
+- **macOS 签名 / 公证**：当前 .dmg 仍未签名，用户双击会 Gatekeeper 红屏（ctrl-click → 打开 走一次即可）。脱 Gatekeeper 警告需 Apple Developer ID（$99/年），未排期。
+- **P3.3.3 Windows 实跑**：build-python-bundle 跑 win 端 + electron-builder NSIS 出未签名 .exe；接缝（platform 分支 / sidecar resolver / `mklink /J` junction / stdin EOF graceful shutdown / `build.win` 配置）从 v0.1.0 起一直就位，仍剩 Windows 主机 / CI matrix 端真跑一次。
+- **ACP 异构茶客**：当前只支持 agentao 驱动的茶客；接第一个非 agentao 的 ACP 茶客排在 P5 任务房间之后。
 
 ## 打包发布
 
