@@ -3,7 +3,7 @@
 #main { flex: 1; display: flex; min-height: 0; }
 
 #sidebar {
-  width: 200px;
+  width: var(--sidebar-width);
   flex-shrink: 0;
   padding: 12px;
   border-right: 1px solid #eee;

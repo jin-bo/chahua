@@ -17,6 +17,8 @@
   <link rel="stylesheet" href="styles/sidebar_me.css">
   <link rel="stylesheet" href="styles/modal.css">
   <link rel="stylesheet" href="styles/proposal_card.css">
+  <link rel="stylesheet" href="styles/debug_panel.css">
+  <link rel="stylesheet" href="styles/splitter.css">
 </head>
 <body>
   <div id="status" class="status">连接中…</div>
@@ -51,6 +53,11 @@
         <input id="avatar-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
       </div>
     </aside>
+    <!-- 三栏拖拽。splitter 由 splitter.js 接 mousedown → 改 :root CSS 变量 + 写
+         localStorage。左 splitter 控 sidebar 宽度；右 splitter 控 task / debug 抽屉
+         共享宽度。CSS resize: horizontal 用不了 —— 它只能在元素自身右下角拖。 -->
+    <div id="splitter-left" class="splitter" data-target="--sidebar-width"
+         role="separator" aria-orientation="vertical" tabindex="0"></div>
 
     <!-- 添加茶客 / 新建房间 modal。click .modal-backdrop 关闭；ESC 也关。-->
     <div id="add-guest-modal" class="modal-backdrop" hidden>
@@ -463,15 +470,28 @@
       </div>
     </div>
     <ul id="messages" aria-live="polite"></ul>
+    <div id="splitter-right" class="splitter" data-target="--right-panel-width"
+         role="separator" aria-orientation="vertical" tabindex="0"></div>
     <!-- 任务面板：placeholder 留容器与折叠按钮让首屏样式稳定，子 DOM 由
-         task_panel.js 在订阅 task_state 时填。 -->
+         task_panel.js 在订阅 task_state 时填。
+         调试面板（P6.2）与 task_panel 互斥占同一右侧槽位 —— ``#task-panel-show-debug`` 按钮
+         点开切到 ``#debug-panel``，debug 内的「← 任务」按钮切回。 -->
     <aside id="task-panel" aria-label="任务" data-collapsed="0">
       <div id="task-panel-header">
         <button type="button" id="task-panel-toggle" class="task-panel-toggle" title="折叠 / 展开任务面板">▶</button>
         <span class="task-panel-title">任务</span>
         <button type="button" id="task-panel-new" class="task-panel-new" title="新建任务" disabled>+ 新任务</button>
+        <button type="button" id="task-panel-show-debug" class="task-panel-show-debug" title="切到调试面板">🔬</button>
       </div>
       <div id="task-panel-body" class="task-panel-body"></div>
+    </aside>
+    <aside id="debug-panel" aria-label="调试" hidden>
+      <div id="debug-panel-header">
+        <button type="button" id="debug-panel-back" class="debug-panel-back" title="切回任务面板">🗂</button>
+        <span class="debug-panel-title">调试（实时）</span>
+        <button type="button" id="debug-panel-clear" class="debug-panel-clear" title="清空已记录的轮次">⌫</button>
+      </div>
+      <div id="debug-panel-body" class="debug-panel-body"></div>
     </aside>
   </div>
   <form id="composer">

@@ -586,6 +586,7 @@ export function createTaskPanel({
 
   return {
     flashHint,
+    setVisible(visible) { panelEl.hidden = !visible; },
     dispose() { unsubscribe(); },
   };
 }

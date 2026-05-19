@@ -36,6 +36,14 @@ _UNSET: Any = object()
 from .artifact_detector import ArtifactDetector
 from .context_renderer import ContextRenderer
 from .cursor import GuestCursor
+from .debug_recorder import (
+    NOOP_RECORDER,
+    SCORING_PATH_BROADCAST,
+    SCORING_PATH_MENTION,
+    SCORING_PATH_SCORING,
+    PickDebugMeta,
+    TurnRecorder,
+)
 from .events import (
     NOOP_SINK,
     STATUS_CANCELLED,
@@ -91,6 +99,7 @@ class Orchestrator:
         config: OrchestratorConfig = OrchestratorConfig(),
         tasks_store: Optional[TasksStore] = None,
         task_summaries: Optional[TaskSummaries] = None,
+        recorder: TurnRecorder = NOOP_RECORDER,
     ) -> None:
         self.room = room
         self.user_config = user_config
@@ -98,6 +107,10 @@ class Orchestrator:
         self.summarizer = summarizer
         self.cursor = cursor
         self.config = config
+        # P6.1：每个 pick 周期一行 turns.jsonl + 可选 prompt 文件。``NOOP_RECORDER`` =
+        # 测试 / [debug] enabled=false 时不动盘。``capture_prompts`` 单条件分支决定
+        # 是否走 ``IntentScorer.score_with_prompt`` 拿 prompt 字符串落盘。
+        self._recorder = recorder
         # ``None`` = 测试 / 程序化驱动场景；正常装配（session.py）注入房间唯一 store。
         # orchestrator 仅在 ``submit_user_message`` 入口 snapshot 一次 ``active_task_id``，
         # 保证整轮归属同一 task；用户在 turn 中改 active 不回追已开的发言（docs §4.4）。
@@ -246,8 +259,10 @@ class Orchestrator:
             # scoring 阶段被 cancel：上一轮已 emit turn_end(next='ai')，UI 守在「停止」
             # 按钮等下一个 turn_start。不补 fixup 的话 UI 永远收不到链终态。first-iter
             # （last_open_turn_id=None）UI 还在「发送」状态，无须补。
+            # **scoring 阶段无 recorder turn 在飞**：turn_id 在 pick 之后才 mint，所以
+            # 此处 cancel 不需要 flush_turn。要记本周期"为什么没说"得等 pick 跑完后。
             try:
-                pick = await self._pick_next_speaker(
+                winners, scores, prompts_by_guest, debug_meta = await self._pick_next_speaker(
                     respect_at_mention=self._consecutive_ai_turns == 0,
                     active_task_id=active_task_id,
                 )
@@ -255,13 +270,32 @@ class Orchestrator:
                 if last_open_turn_id is not None:
                     self._emit_cancel_fixup(sink, turn_id=last_open_turn_id)
                 raise
-            if pick is None:
-                # 没人想接话。两种子情况：
-                #   a) 本回合一上来就 None（用户消息触发，但全员低分 / 全员冷却）——
-                #      没 emit 过 turn_start，UI 状态干净，直接返回。
-                #   b) AI 链中途 None（前一轮 next='ai'，但下一轮打分全 miss）——
-                #      UI 上一轮收到 turn_end(next='ai') 守在"停止"按钮等永远不来的
-                #      下一个 turn_start，补一帧 turn_end(next='user') 让它回到"发送"。
+
+            # 始终 mint turn_id + start_turn + record_scoring —— 无人接话也记一行
+            # （不变量"每个 pick 周期一行 turns.jsonl"，docs §数据模型 P6）。
+            turn_id = new_turn_id()
+            self._recorder.start_turn(
+                turn_id=turn_id,
+                task_id=active_task_id,
+                trigger=self._compute_trigger(),
+            )
+            self._recorder.record_scoring(
+                threshold=debug_meta.threshold,
+                scorables=debug_meta.scorables,
+                cooled=debug_meta.cooled,
+                results=[
+                    (r, prompts_by_guest.get(r.guest_name)) for r in scores
+                ],
+                winners=winners,
+                scoring_path=debug_meta.scoring_path,
+            )
+
+            if not winners:
+                # 没人想接话。两种子情况（envelope 协议不变 —— turn_start 不 emit）：
+                #   a) 本回合一上来就空（全员低分 / 全员冷却）—— UI 状态干净，直接返回。
+                #   b) AI 链中途空（前一轮 next='ai'）—— 补一帧 turn_end(next='user')。
+                # turns.jsonl 仍 flush 一行（最需调试的就是"为什么没人说话"）。
+                self._recorder.flush_turn()
                 if last_open_turn_id is not None:
                     self._emit_turn(
                         sink,
@@ -271,15 +305,28 @@ class Orchestrator:
                     )
                 return
 
-            winners, scores = pick
-            turn_id = new_turn_id()
             # turn_start / turn_end 是轮级事件，跨多位茶客；guest_name=None。winners
             # 都在 data.scores 里，前端按 turn_id 聚合。
+            # ``capture_prompts=True`` 时 piggyback scoring prompt（前端调试抽屉拿了即用，
+            # 不另开 envelope 类型 / 不 bump schema_version；老前端忽略未知字段）。
+            # ``False`` 时整字段不写 key（区分"prompt 捕获关了" vs "prompt 是空"两种
+            # 语义，docs §不变量）。
+            turn_data: dict[str, Any] = {
+                "scores": [_score_to_dict(s) for s in scores]
+            }
+            if self._recorder.capture_prompts:
+                # 关键：``@guest`` / ``@all`` 路径绕过 LLM 打分 ⇒ ``prompts_by_guest`` 为空。
+                # 必须 **始终** 写 key（哪怕值是 ``{}``），让前端区分"capture 已关"（key
+                # 缺）与"capture 开但本 turn 无 LLM 打分"（空字典）—— 否则 mention /
+                # broadcast turn 会被误标"prompt 捕获已关"。
+                turn_data["scoring_prompts"] = {
+                    g: p for g, p in prompts_by_guest.items() if p
+                }
             self._emit_turn(
                 sink,
                 turn_id=turn_id,
                 type=ChahuaEventType.TURN_START,
-                data={"scores": [_score_to_dict(s) for s in scores]},
+                data=turn_data,
             )
 
             # 同回合"抢话"的多位茶客串行发言；第 2 位发言时，第 1 位的回复已经在
@@ -290,6 +337,7 @@ class Orchestrator:
             #
             # 发言阶段被 cancel：本 turn 的 turn_start 已 emit、message_* 可能在流。
             # scoring 阶段的 cancel 在外层 while 的 try 里独立处理。
+            # **P6.1 cancel 也 flush**：半截 prompt / 工具 / partial message 都是取证证据。
             bypass_inner_cap = all(s.kind == ScoreKind.MENTION for s in scores)
             try:
                 for guest_name in winners:
@@ -303,6 +351,7 @@ class Orchestrator:
                     self._rounds_without_user_or_mention += 1
             except asyncio.CancelledError:
                 self._emit_cancel_fixup(sink, turn_id=turn_id)
+                self._recorder.flush_turn()
                 raise
 
             next_state = (
@@ -320,6 +369,9 @@ class Orchestrator:
             # next='user' 时 UI 已自行收回按钮，无 pending 状态。
             last_open_turn_id = turn_id if next_state == "ai" else None
 
+            # 正常 turn 完结 —— flush 一行到 turns.jsonl 后清 in-flight（docs P6）。
+            self._recorder.flush_turn()
+
             # 摘要 / 冷却递减每"pick 周期"一次（不是每个发言者一次）—— 否则同回合 2 位
             # 同时说后第一位的冷却被立刻 tick 掉，下个 pick 就能再次入选，违背"刚发言不接自己"。
             self._kick_summarize()
@@ -332,11 +384,17 @@ class Orchestrator:
         *,
         respect_at_mention: bool,
         active_task_id: Optional[str] = None,
-    ) -> Optional[tuple[list[str], list[ScoreResult]]]:
-        """选下一回合发言者；返回 ``(winners, all_scores)``，选不出 → ``None``。
+    ) -> tuple[list[str], list[ScoreResult], dict[str, Optional[str]], PickDebugMeta]:
+        """选下一回合发言者；返回 ``(winners, scores, prompts_by_guest, debug_meta)``。
 
-        ``winners`` 是按分数倒序的茶客名列表，长度 1 ~ ``max_speakers_per_pick``
-        （设计文档 §3.3「取分数 ≥ 阈值的前 1~2 名」）。@ 提及命中时只返回 1 位。
+        - ``winners``：按分数倒序的茶客名列表，长度 0 ~ ``max_speakers_per_pick``。
+          **空 list = 无人接话**（旧版返 None 的两种场景：scorables=[]、no passed）；
+          P6 起改用 ``not winners`` 控制流（始终给 recorder 一条 turn 行可追溯）。
+        - ``scores``：含所有候选 ScoreResult（含冷却中那批 0 分占位）。
+        - ``prompts_by_guest``：``capture_prompts=True`` 时为 ``{guest_name: prompt}``，
+          否则空 dict（debug 落盘单点用；envelope piggyback 留给 step 3）。
+        - ``debug_meta``：:class:`PickDebugMeta`（threshold / scorables / cooled /
+          scoring_path）—— 给 ``recorder.record_scoring`` 用，避免上层重算。
 
         ``respect_at_mention=True``：检查 transcript 最后一条（用户消息）里的 ``@``。
         AI 间接力时（``_consecutive_ai_turns > 0``）不再认 @ —— 否则一个茶客在自己发言里
@@ -345,33 +403,50 @@ class Orchestrator:
         优先级：``@broadcast``（@all / @所有人 等）→ 全员发言一次（含冷却中的）；
         否则 ``@<guest>`` 单点路由；否则走打分。
         """
+        all_guests = list(self._guests.keys())
+
         # 1a) @broadcast → 全员一次（用户意图明确，绕过冷却 + 打分）
         if respect_at_mention and self._find_user_broadcast():
             self._rounds_without_user_or_mention = 0
-            winners = list(self._guests.keys())  # 注册顺序，确定性
+            winners = list(all_guests)  # 注册顺序，确定性
             scores = [
                 ScoreResult(guest_name=n, score=1.0, kind=ScoreKind.MENTION)
                 for n in winners
             ]
-            return winners, scores
+            return winners, scores, {}, PickDebugMeta(
+                threshold=None, scoring_path=SCORING_PATH_BROADCAST,
+            )
 
         # 1b) @ 提及确定性路由（仅当回应用户那条时）
         if respect_at_mention:
             mention = self._find_user_mention()
             if mention is not None and self._cooldown.get(mention, 0) == 0:
                 self._rounds_without_user_or_mention = 0
-                return [mention], [
+                scores = [
                     ScoreResult(
                         guest_name=mention, score=1.0, kind=ScoreKind.MENTION
                     )
                 ]
+                return [mention], scores, {}, PickDebugMeta(
+                    threshold=None, scoring_path=SCORING_PATH_MENTION,
+                )
 
         # 2) 并发打分（冷却中的茶客直接当 0 分，省 LLM 调用）
         scorables = [
-            name for name in self._guests if self._cooldown.get(name, 0) == 0
+            name for name in all_guests if self._cooldown.get(name, 0) == 0
         ]
+        cooled = [name for name in all_guests if name not in scorables]
+
+        # 全员冷却：无 LLM 调用，所有 guest 0 分占位记一行后由上层判 winners=[]。
         if not scorables:
-            return None
+            results = [
+                ScoreResult(guest_name=name, score=0.0, kind=ScoreKind.COOLDOWN)
+                for name in cooled
+            ]
+            return [], results, {}, PickDebugMeta(
+                threshold=None, cooled=cooled,
+                scoring_path=SCORING_PATH_SCORING,
+            )
 
         # P5.6：每 pick 周期渲染一次 task_block，N 个 scorer 共享同一字符串。
         # 不进 _score_one —— 那样 N 茶客就要 N 次 get_task。closed / missing → "".
@@ -381,7 +456,7 @@ class Orchestrator:
         )
 
         transcript_text, recent = self._scoring_transcript()
-        results: list[ScoreResult] = list(
+        scored: list[tuple[ScoreResult, Optional[str]]] = list(
             await asyncio.gather(
                 *(
                     self._score_one(name, transcript_text, recent, task_block)
@@ -389,15 +464,18 @@ class Orchestrator:
                 )
             )
         )
+        results = [r for r, _ in scored]
+        prompts_by_guest: dict[str, Optional[str]] = {
+            r.guest_name: p for r, p in scored if p is not None
+        }
 
-        # 把冷却中那些也填进 results 让 UI 看到"为什么没选他"。
-        for name in self._guests:
-            if name not in scorables:
-                results.append(
-                    ScoreResult(
-                        guest_name=name, score=0.0, kind=ScoreKind.COOLDOWN
-                    )
+        # 冷却中那些也填进 results 让 UI / recorder 看到"为什么没选他"。
+        for name in cooled:
+            results.append(
+                ScoreResult(
+                    guest_name=name, score=0.0, kind=ScoreKind.COOLDOWN
                 )
+            )
 
         threshold = min(
             1.0,
@@ -405,12 +483,16 @@ class Orchestrator:
             + self.config.threshold_decay_per_turn
             * self._rounds_without_user_or_mention,
         )
+        debug_meta = PickDebugMeta(
+            threshold=threshold, scorables=scorables, cooled=cooled,
+            scoring_path=SCORING_PATH_SCORING,
+        )
         passed = [r for r in results if r.score >= threshold]
         if not passed:
-            return None
+            return [], results, prompts_by_guest, debug_meta
         passed.sort(key=lambda r: r.score, reverse=True)
         winners = [r.guest_name for r in passed[: self.config.max_speakers_per_pick]]
-        return winners, results
+        return winners, results, prompts_by_guest, debug_meta
 
     async def _score_one(
         self,
@@ -418,10 +500,25 @@ class Orchestrator:
         transcript_text: str,
         recent: list[Message],
         task_block: str = "",
-    ) -> ScoreResult:
+    ) -> tuple[ScoreResult, Optional[str]]:
+        """单茶客打分 —— 返回 ``(ScoreResult, prompt|None)``。
+
+        ``recorder.capture_prompts=True`` 时走 :meth:`IntentScorer.score_with_prompt`
+        拿 prompt 字符串落 ``debug/prompts/<turn_id>/scoring_<guest>.txt``；否则走
+        :meth:`IntentScorer.score` 不材化 prompt（避免内存里存在但不落盘的"半捕获"）。
+        """
         entry = self._guests[guest_name]
         mention_count = self._count_self_mentions(guest_name, recent)
-        return await self.scorer.score(
+        if self._recorder.capture_prompts:
+            return await self.scorer.score_with_prompt(
+                guest_name=guest_name,
+                persona=entry.persona_md,
+                transcript_text=transcript_text,
+                user_config=self.user_config,
+                subject_mention_count=mention_count,
+                task_block=task_block,
+            )
+        result = await self.scorer.score(
             guest_name=guest_name,
             persona=entry.persona_md,
             transcript_text=transcript_text,
@@ -429,6 +526,7 @@ class Orchestrator:
             subject_mention_count=mention_count,
             task_block=task_block,
         )
+        return result, None
 
     def _count_self_mentions(
         self, guest_name: str, recent: list[Message]
@@ -558,6 +656,24 @@ class Orchestrator:
             data={"next": "user"},
             status=STATUS_CANCELLED,
         )
+
+    def _compute_trigger(self) -> dict[str, Any]:
+        """构造本周期 turns.jsonl 的 ``trigger`` 字段（docs §数据模型）。
+
+        - ``kind="user_msg"``：本周期是用户消息触发的第一轮（``_consecutive_ai_turns==0``）。
+        - ``kind="ai_chain"``：AI 接力中（前一轮 next='ai'）。
+        - ``ref_seq``：transcript 最后一条消息的 seq —— 用户路径指向用户那条，AI 链路径
+          指向上一位 AI 的发言。``None`` = transcript 全空（极少；onboarding 期）。
+
+        P6.1 不区分 ``synthesized``：``_kick_synthesized_user_message`` 最终也走
+        ``submit_user_message``，orchestrator 无从分辨。要分辨需新增形参一路透传，
+        本期不做。
+        """
+        last = self.room.last_message()
+        return {
+            "kind": "user_msg" if self._consecutive_ai_turns == 0 else "ai_chain",
+            "ref_seq": last.seq if last is not None else None,
+        }
 
     def _tick_cooldown(self) -> None:
         for name in list(self._cooldown):

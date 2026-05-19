@@ -57,6 +57,7 @@ class TomlSnapshot(TypedDict, total=False):
     room_llm: Optional[dict]                     # None = 不写 [room.llm]（P4.9）
     scoring: Optional[dict]                      # None = 不写 [scoring]（P4.1）
     summary: Optional[dict]                      # None = 不写 [summary]（P4.1）
+    debug: Optional[dict]                        # None = 不写 [debug]（P6.1；默认全 True）
     guests: list[GuestSnapshot]
 
 
@@ -143,9 +144,12 @@ def _render_llm_field(key: str, value: Any) -> str:
 
 
 def _format_toml_scalar(value: Any) -> str:
-    """TOML 数值字面量。float 走 ``repr`` 保留精度；bool 显式拒避免被当 int 写出 1/0。"""
+    """TOML 字面量。bool 先于 int 判（``True/False`` 是 ``int`` 子类），float 走 ``repr``
+    保留精度。bool 走 ``"true"``/``"false"`` —— P6.1 起 ``[debug]`` 段两个字段是 bool，
+    单点支持；早先的 ``NotImplementedError`` 是占位（"等用到时再实现"），现在实现了。
+    """
     if isinstance(value, bool):
-        raise NotImplementedError("bool 字面量当前 schema 不用，请加在需要时再实现")
+        return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
@@ -219,6 +223,20 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         for key in LLM_TOML_FIELDS:
             if key in spec_dict:
                 lines.append(f"{key} = {_render_llm_field(key, spec_dict[key])}")
+
+    # [debug] 段（P6.1）。snapshot 只在 **非默认**（用户显式写过）时携带 ——
+    # 见 ``_room_config_to_dict`` 的 ``_debug_config_to_snapshot`` 推断逻辑；如此
+    # 1) 默认房间 toml 不被结构化重写时塞进 ``[debug]`` 噪声；
+    # 2) 用户写过 ``enabled = false`` / ``capture_prompts = false`` 经 mutator
+    #    （如 update_guest_permission）round-trip 后保住设定，不被默认 ``true/true``
+    #    悄悄覆盖。
+    debug_dict = snapshot.get("debug")
+    if debug_dict:
+        lines.append("")
+        lines.append("[debug]")
+        for key in ("enabled", "capture_prompts"):
+            if key in debug_dict:
+                lines.append(f"{key} = {_format_toml_scalar(debug_dict[key])}")
 
     for g in snapshot["guests"]:
         gname = str(g["name"])

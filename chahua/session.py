@@ -22,6 +22,7 @@ from ._fs import link_dir_idempotent, unlink_managed_link
 from ._paths import Paths
 from .config import RoomConfig, RoomConfigError, load_room_config
 from .cursor import GuestCursor
+from .debug_recorder import TurnRecorder
 from .guest import TeaGuest
 from .llm_spec import LLMSpec, build_client
 from .orchestrator import Orchestrator, OrchestratorConfig
@@ -125,6 +126,7 @@ def _build_guests(
     paths: Paths,
     *,
     tasks_store: TasksStore,
+    recorder: TurnRecorder,
 ) -> list[tuple[TeaGuest, str]]:
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
@@ -173,6 +175,7 @@ def _build_guests(
             permission=gc.permission,
             assets=assets,
             room_level_mcp=gc.extra_mcp_servers,
+            recorder=recorder,
         )
         # TeaGuest.__init__ 已经 mkdir 了 working_directory，share 软链放这里安全。
         _link_guest_share(guest.working_directory, room_share)
@@ -414,8 +417,19 @@ def build_room_session(
     tasks_store = TasksStore(room_dir=room_config.room_dir)
     task_summaries = TaskSummaries(summary_client, tasks_store=tasks_store)
 
+    # P6.1：``[debug] enabled = false`` 时 ``TurnRecorder.__init__`` 早 return，
+    # 不动盘；同 NOOP_RECORDER 风格但保留 toml 的 capture_prompts 字段（即便
+    # enabled=False 时 ``capture_prompts`` 实际效果固定 False，不变量"recorder.
+    # enabled=False ⇒ capture_prompts=False"）。
+    recorder = TurnRecorder(
+        room_dir=room_config.room_dir,
+        enabled=room_config.debug.enabled,
+        capture_prompts=room_config.debug.capture_prompts,
+    )
+
     guest_entries = _build_guests(
-        room_config, guest_clients, room, paths, tasks_store=tasks_store,
+        room_config, guest_clients, room, paths,
+        tasks_store=tasks_store, recorder=recorder,
     )
     guests = [g for g, _ in guest_entries]
 
@@ -432,6 +446,7 @@ def build_room_session(
         config=effective_orch_config,
         tasks_store=tasks_store,
         task_summaries=task_summaries,
+        recorder=recorder,
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)

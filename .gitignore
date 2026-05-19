@@ -22,6 +22,8 @@ guests/
 rooms/**/transcript.jsonl
 rooms/**/summary.jsonl
 rooms/**/cursor.json
+# P6 调试落盘：prompt 文件含 USER.md / 工具参数 / 任务上下文（与 .env 同口径），不入仓 / 不随 export。
+rooms/**/debug/
 
 # Local agentao residue (from previous experiments in this dir, if any)
 .agentao/

@@ -1,0 +1,27 @@
+/* 三栏拖拽 splitter（splitter.js）。横向 flex 容器 #main 里的纵向分割条。
+   平时透明几乎不可见；hover / 拖动中显蓝。``cursor: col-resize`` 给反馈。 */
+
+.splitter {
+  width: 6px;
+  flex-shrink: 0;
+  background: transparent;
+  cursor: col-resize;
+  transition: background-color 120ms ease;
+}
+.splitter:hover,
+.splitter:focus-visible,
+.splitter.dragging {
+  background: #c89a3e;
+  outline: none;
+}
+
+/* 拖动期 body 加 .splitter-dragging：禁文本选择 + 全局指针变 col-resize，避免 mouse
+   滑过子元素时光标抖闪。 */
+body.splitter-dragging {
+  cursor: col-resize !important;
+  user-select: none;
+}
+body.splitter-dragging * {
+  cursor: col-resize !important;
+  user-select: none;
+}

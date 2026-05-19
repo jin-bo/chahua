@@ -52,6 +52,8 @@ import { createPermissionPopover } from "./permission_popover.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import { createTaskPanel } from "./task_panel.js";
+import { createDebugPanel } from "./debug_panel.js";
+import { createSplitter } from "./splitter.js";
 import { createProposalCard } from "./proposal_card.js";
 import { createComposerTaskChip } from "./composer_task_chip.js";
 
@@ -102,6 +104,11 @@ const taskPanelEl = document.getElementById("task-panel");
 const taskPanelToggleBtn = document.getElementById("task-panel-toggle");
 const taskPanelBodyEl = document.getElementById("task-panel-body");
 const taskPanelNewBtn = document.getElementById("task-panel-new");
+const taskPanelShowDebugBtn = document.getElementById("task-panel-show-debug");
+const debugPanelEl = document.getElementById("debug-panel");
+const debugPanelBodyEl = document.getElementById("debug-panel-body");
+const debugPanelBackBtn = document.getElementById("debug-panel-back");
+const debugPanelClearBtn = document.getElementById("debug-panel-clear");
 const composerTaskChipEl = document.getElementById("composer-task-chip");
 const newTaskModal = document.getElementById("new-task-modal");
 const newTaskTitleEl = document.getElementById("new-task-title");
@@ -559,6 +566,8 @@ function renderSidebar(roomInfo) {
   upload.clear();
   // propose 卡片去重指纹也按房间边界清 —— 否则跨房间同 proposer/kind/payload 会被错误折叠。
   proposalCard.reset();
+  // 调试抽屉只看实时本会话；切房 / 重连 / 清空 → reset 清 turn 记录。
+  debugPanel.reset();
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
@@ -768,6 +777,9 @@ function renderHistory(messages) {
 }
 
 function handleEnvelope(env) {
+  // 调试抽屉旁路消费 —— 模块内部按 env.type dispatch；ROOM_INFO 的 reset 在
+  // renderSidebar 里调（与 inFlight / proposalCard 同步清）。
+  debugPanel.onEnvelope(env);
   switch (env.type) {
     case EventType.ROOM_INFO:
       renderSidebar(env.data ?? {});
@@ -1187,6 +1199,38 @@ const taskPanel = createTaskPanel({
 // 茶客 propose 卡片渲染 + 去重 + 采纳/忽略闭环。renderSidebar 进新房时调 reset() 清
 // 跨房间 dedup；采纳按钮按 kind 拼 ADD_DECISION / OPEN_TASK inbound 走既有 server handler。
 const proposalCard = createProposalCard({ messagesEl, sendInbound: send });
+
+// 调试抽屉。默认隐藏 —— 用户点 task panel header 的 🔬 切到；调试内 ← 切回。
+// 模块级单例：重连时不重建（状态本就只活在本会话，renderSidebar 调 reset 清。）
+const debugPanel = createDebugPanel({
+  panelEl: debugPanelEl,
+  bodyEl: debugPanelBodyEl,
+  clearBtnEl: debugPanelClearBtn,
+});
+
+// task ↔ debug 互斥占槽：``setVisible(bool)`` 让各自模块持有自家 hidden 不变量，
+// renderer 只负责"一开一关"配对。
+taskPanelShowDebugBtn.addEventListener("click", () => {
+  taskPanel.setVisible(false);
+  debugPanel.show();
+});
+debugPanelBackBtn.addEventListener("click", () => {
+  debugPanel.hide();
+  taskPanel.setVisible(true);
+});
+
+// 三栏拖拽。左 splitter 改 sidebar 宽度；右 splitter 改 task / debug 抽屉共享宽度。
+// localStorage 持久化跨重启 + 跨房间（与 task_panel 折叠 pref 同口径）。
+createSplitter(
+  document.getElementById("splitter-left"),
+  "--sidebar-width",
+  { min: 140, max: 480, edge: "left", fallback: 200 },
+);
+createSplitter(
+  document.getElementById("splitter-right"),
+  "--right-panel-width",
+  { min: 200, max: 640, edge: "right", fallback: 300 },
+);
 
 // taskPanel 已通过 subscribe 重渲 panel body；这里多挂一条监听 composer chip + 按钮
 // 这俩 panel 之外的派生 UI。按钮的 hasAny 判断走 task 存在性而非 active —— state.json

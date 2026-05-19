@@ -238,6 +238,33 @@ def test_update_guest_permission_persists(paths):
     assert rc3.guests[0].permission == "full-access"
 
 
+def test_debug_section_preserved_across_structured_rewrite(paths):
+    """P6.1 回归：用户写过 ``[debug] enabled = false`` 后任一结构化 mutator
+    （update_guest_permission / update_room_llm / ...）重写 ``room.toml`` 必须保住
+    设定。早先 :class:`TomlSnapshot` 缺 ``debug`` 字段 → 重写时静默丢段 →
+    默认 ``enabled=true`` 复活 → prompt 捕获被悄悄重开。
+    """
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    # 模拟用户手动 append [debug]（载入期合法 —— 段缺时也 fall back 默认）。
+    toml_path = rc.room_dir / "room.toml"
+    toml_path.write_text(
+        toml_path.read_text(encoding="utf-8")
+        + "\n[debug]\nenabled = false\ncapture_prompts = false\n",
+        encoding="utf-8",
+    )
+    rc1 = load_room_config(rc.room_dir, paths=paths)
+    assert rc1.debug.enabled is False
+    assert rc1.debug.capture_prompts is False
+
+    # 任一结构化 mutator 都会重写 room.toml —— 选 update_guest_permission 当代表。
+    admin.update_guest_permission(
+        paths=paths, room_dir=rc.room_dir, name="宝总", permission="full-access"
+    )
+    rc2 = load_room_config(rc.room_dir, paths=paths)
+    assert rc2.debug.enabled is False
+    assert rc2.debug.capture_prompts is False
+
+
 def test_update_guest_permission_rejects_invalid(paths):
     rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
     with pytest.raises(ValueError, match="permission"):

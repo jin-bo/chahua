@@ -13,9 +13,15 @@ import pytest
 
 from chahua._paths import ENV_APP_ROOT, ENV_USER_DATA_ROOT, Paths
 from chahua.cursor import GuestCursor
+from chahua.events import (
+    STATUS_OK,
+    ChahuaEnvelope,
+    ChahuaEventType,
+    new_message_id,
+)
 from chahua.orchestrator import Orchestrator, OrchestratorConfig
 from chahua.room import Room
-from chahua.scoring import IntentScorer
+from chahua.scoring import IntentScorer, ScoreKind, ScoreResult
 from chahua.summarizer import Summarizer
 from chahua.user_md import USER_SPEAKER_ID, UserConfig
 
@@ -58,11 +64,106 @@ class StubGuest:
         self.name = name
 
 
+class SpeakingStubGuest:
+    """duck-typed TeaGuest：发 message_start/end + 写 transcript + （可选）调 recorder。
+
+    给 ``test_orchestrator_cancel_during_scoring`` / ``test_orchestrator_debug_capture``
+    这类需要真跑过 ``_let_speak`` 的测试用。``recorder=None`` 时跳过 recorder 调用
+    （cancel-during-scoring 测不挂 recorder）；``recorder=NOOP_RECORDER`` 或真实例时
+    各自按 enabled / capture_prompts 决定是否落盘。
+    """
+
+    def __init__(self, name: str, room: Room, recorder=None) -> None:
+        self.name = name
+        self._room = room
+        self._recorder = recorder
+
+    async def speak(
+        self,
+        context_message,
+        *,
+        turn_id,
+        sink,
+        cancellation_token=None,
+        task_id=None,
+    ):
+        message_id = new_message_id()
+        if self._recorder is not None:
+            self._recorder.record_message_start(
+                message_id=message_id, guest=self.name,
+                speak_prompt=context_message,
+            )
+        sink(
+            ChahuaEnvelope(
+                room_id=self._room.name,
+                turn_id=turn_id,
+                guest_name=self.name,
+                message_id=message_id,
+                type=ChahuaEventType.MESSAGE_START,
+            )
+        )
+        msg = self._room.append(
+            self.name, "(stub reply)", message_id=message_id, task_id=task_id,
+        )
+        sink(
+            ChahuaEnvelope(
+                room_id=self._room.name,
+                turn_id=turn_id,
+                guest_name=self.name,
+                message_id=message_id,
+                type=ChahuaEventType.MESSAGE_END,
+                status=STATUS_OK,
+                seq=msg.seq,
+                data={"text": "(stub reply)"},
+            )
+        )
+        if self._recorder is not None:
+            self._recorder.record_message_end(
+                message_id=message_id, status=STATUS_OK, seq=msg.seq,
+            )
+        return msg
+
+
 class NoopScorer(IntentScorer):
     """跳过 ``IntentScorer.__init__``——测试只调 ``_find_user_mention`` 等本地方法。"""
 
     def __init__(self) -> None:
         pass
+
+
+class FixedScorer(IntentScorer):
+    """按名字返固定分数的 :class:`IntentScorer` 替身；不调 LLM。
+
+    ``capture_prompts=True`` 路径走 :meth:`score_with_prompt`，返回 ``(result,
+    "PROMPT for <name>")`` —— 测试用 ``"PROMPT for "`` 前缀断言 piggyback 落点。
+    """
+
+    def __init__(self, scores: dict[str, float], *, include_raw: bool = True) -> None:
+        self._scores = scores
+        self._include_raw = include_raw
+
+    async def score(
+        self, *, guest_name, persona, transcript_text, user_config,
+        subject_mention_count=0, task_block="",
+    ):
+        s = self._scores.get(guest_name, 0.0)
+        return ScoreResult(
+            guest_name=guest_name,
+            score=s,
+            kind=ScoreKind.SCORED,
+            raw=(f'{{"score":{s}}}' if self._include_raw else ""),
+        )
+
+    async def score_with_prompt(
+        self, *, guest_name, persona, transcript_text, user_config,
+        subject_mention_count=0, task_block="",
+    ):
+        result = await self.score(
+            guest_name=guest_name, persona=persona,
+            transcript_text=transcript_text, user_config=user_config,
+            subject_mention_count=subject_mention_count, task_block=task_block,
+        )
+        return result, f"PROMPT for {guest_name}"
 
 
 class NoopSummarizer(Summarizer):

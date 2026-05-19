@@ -13,57 +13,13 @@ from chahua.events import (
     STATUS_OK,
     ChahuaEnvelope,
     ChahuaEventType,
-    new_message_id,
 )
 from chahua.orchestrator import Orchestrator, OrchestratorConfig
 from chahua.room import Room
 from chahua.scoring import IntentScorer, ScoreKind, ScoreResult
-from chahua.summarizer import Summarizer
 from chahua.user_md import USER_SPEAKER_ID, UserConfig
 
-
-class _StubGuest:
-    """duck-typed TeaGuest，足够 _let_speak 用：发 message_start/end + 写 transcript。"""
-
-    def __init__(self, name: str, room: Room) -> None:
-        self.name = name
-        self._room = room
-
-    async def speak(
-        self,
-        context_message,
-        *,
-        turn_id,
-        sink,
-        cancellation_token=None,
-        task_id=None,
-    ):
-        message_id = new_message_id()
-        sink(
-            ChahuaEnvelope(
-                room_id=self._room.name,
-                turn_id=turn_id,
-                guest_name=self.name,
-                message_id=message_id,
-                type=ChahuaEventType.MESSAGE_START,
-            )
-        )
-        msg = self._room.append(
-            self.name, "(stub reply)", message_id=message_id, task_id=task_id,
-        )
-        sink(
-            ChahuaEnvelope(
-                room_id=self._room.name,
-                turn_id=turn_id,
-                guest_name=self.name,
-                message_id=message_id,
-                type=ChahuaEventType.MESSAGE_END,
-                status=STATUS_OK,
-                seq=msg.seq,
-                data={"text": "(stub reply)"},
-            )
-        )
-        return msg
+from conftest import NoopSummarizer, SpeakingStubGuest
 
 
 class _ScriptedScorer(IntentScorer):
@@ -96,23 +52,6 @@ class _ScriptedScorer(IntentScorer):
         return ScoreResult(guest_name=guest_name, score=0.0, kind=ScoreKind.SCORED)
 
 
-class _NoopSummarizer(Summarizer):
-    """跳过 super().__init__ —— maybe_summarize 不会真触发 LLM 路径。"""
-
-    def __init__(self) -> None:
-        pass
-
-    async def maybe_summarize(self, *args, **kwargs):
-        return None
-
-    def clear(self) -> None:
-        pass
-
-    @property
-    def summaries(self):
-        return ()
-
-
 async def test_cancel_during_mid_chain_scoring_emits_fixup_turn_end():
     room = Room(name="test-room")
     room.add_participant(USER_SPEAKER_ID)
@@ -120,7 +59,7 @@ async def test_cancel_during_mid_chain_scoring_emits_fixup_turn_end():
     cursor = GuestCursor()
     second_round_started = asyncio.Event()
     scorer = _ScriptedScorer(second_round_started=second_round_started)
-    summarizer = _NoopSummarizer()
+    summarizer = NoopSummarizer()
 
     orch = Orchestrator(
         room=room,
@@ -137,8 +76,8 @@ async def test_cancel_during_mid_chain_scoring_emits_fixup_turn_end():
             summary_block_size=999,
         ),
     )
-    orch.register(_StubGuest("A", room), persona_md="A persona")
-    orch.register(_StubGuest("B", room), persona_md="B persona")
+    orch.register(SpeakingStubGuest("A", room), persona_md="A persona")
+    orch.register(SpeakingStubGuest("B", room), persona_md="B persona")
 
     captured: list[ChahuaEnvelope] = []
     sink: list = captured.append  # type: ignore[assignment]
@@ -190,7 +129,7 @@ async def test_cancel_during_first_round_scoring_no_fixup():
             return ScoreResult(guest_name=guest_name, score=0.0, kind=ScoreKind.SCORED)
 
     scorer = _HangingScorer()
-    summarizer = _NoopSummarizer()
+    summarizer = NoopSummarizer()
 
     orch = Orchestrator(
         room=room,
@@ -200,7 +139,7 @@ async def test_cancel_during_first_round_scoring_no_fixup():
         cursor=cursor,
         config=OrchestratorConfig(summary_block_size=999),
     )
-    orch.register(_StubGuest("A", room), persona_md="A persona")
+    orch.register(SpeakingStubGuest("A", room), persona_md="A persona")
 
     captured: list[ChahuaEnvelope] = []
     sink: list = captured.append  # type: ignore[assignment]

@@ -28,7 +28,7 @@ name 校验与 ``attach_artifact`` 共享 :func:`tasks_store._validate_artifact_
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from agentao.tools import Tool
 
@@ -39,7 +39,13 @@ from .events import (
 )
 from .task import format_artifact_mtime, format_artifact_size
 from .tasks_store import CLOSED_STATUSES, TaskNotFoundError, TasksStore
-from .transport_bridge import ChahuaTransport
+
+if TYPE_CHECKING:
+    # P6.1：transport_bridge.py 反向 import 本模块的 TASK_WRITE_ARTIFACT_TOOL_NAME
+    # 派生 ``messages[].artifact_paths`` —— 用 TYPE_CHECKING 把 ChahuaTransport 这条
+    # 仅用作类型注解的 import 推后到检查期，破除运行期循环。``from __future__ import
+    # annotations`` 已开，签名里的 ``transport: ChahuaTransport`` 在运行期是字符串。
+    from .transport_bridge import ChahuaTransport
 
 # artifact 清单 / propose ack 上限。与 orchestrator._render_task_block 完整块的 cap
 # 同步（docs §6.1 "list_artifacts 返 markdown 清单同 §6.1 注入格式"）—— 改一处记得
@@ -223,6 +229,11 @@ class TaskProposeOpenTool(_TaskProposeBase):
 # ── 写产物工具（绕开 agentao PathPolicy）────────────────────────────────────
 
 
+# 暴露给 transport_bridge 派生 ``messages[].artifact_paths`` 用（docs/P6 §6）。
+# 改名等于改 P6 debug 派生表 —— 单点常量避免散落字面值。
+TASK_WRITE_ARTIFACT_TOOL_NAME = "task_write_artifact"
+
+
 class TaskWriteArtifactTool(Tool):
     """把内容写入当前 active task 的 ``artifacts/<name>``，绕开 agentao PathPolicy。
 
@@ -247,7 +258,7 @@ class TaskWriteArtifactTool(Tool):
 
     @property
     def name(self) -> str:
-        return "task_write_artifact"
+        return TASK_WRITE_ARTIFACT_TOOL_NAME
 
     @property
     def description(self) -> str:

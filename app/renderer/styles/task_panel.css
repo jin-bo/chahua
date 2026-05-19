@@ -1,7 +1,7 @@
 /* 任务面板。width transition 挂 .task-panel-animated，task_panel.js 首帧后再补 ——
    避免冷启动若 localStorage 是 collapsed 状态时 280px → 32px 的首屏抖动。 */
 #task-panel {
-  width: 280px;
+  width: var(--right-panel-width);
   flex-shrink: 0;
   border-left: 1px solid #eee;
   background: #faf6ea;
@@ -9,10 +9,17 @@
   flex-direction: column;
   min-height: 0;
 }
+/* 显式 ``display: flex`` 会盖掉 ``hidden`` 属性自带的 ``display: none`` ——
+   切到调试抽屉时手 toggle hidden 需要这条 override 才生效（与 modal-backdrop /
+   composer-task-chip 等同口径）。 */
+#task-panel[hidden] { display: none; }
 #task-panel.task-panel-animated { transition: width 120ms ease; }
 #task-panel[data-collapsed="1"] { width: 32px; }
 #task-panel[data-collapsed="1"] .task-panel-title,
-#task-panel[data-collapsed="1"] #task-panel-body { display: none; }
+#task-panel[data-collapsed="1"] #task-panel-body,
+/* 折叠态宽 32px 容不下两枚 22×22 图标 —— 切到调试的按钮一起藏，只留 toggle。
+   想看调试？先展开任务面板。 */
+#task-panel[data-collapsed="1"] .task-panel-show-debug { display: none; }
 #task-panel-header {
   display: flex;
   align-items: center;
@@ -20,7 +27,12 @@
   padding: 10px 12px;
   border-bottom: 1px solid #eee;
 }
-.task-panel-toggle {
+/* 右侧抽屉的 22×22 小图标按钮 —— task panel 折叠 / 调试切换 / 调试返回 / 调试清空共用。
+   debug_panel.css 不再单独声明，避免两套抽屉各自维护一份。 */
+.task-panel-toggle,
+.task-panel-show-debug,
+.debug-panel-back,
+.debug-panel-clear {
   width: 22px;
   height: 22px;
   padding: 0;
@@ -32,7 +44,10 @@
   border-radius: 4px;
   cursor: pointer;
 }
-.task-panel-toggle:hover { background: #fff; color: #333; }
+.task-panel-toggle:hover,
+.task-panel-show-debug:hover,
+.debug-panel-back:hover,
+.debug-panel-clear:hover { background: #fff; color: #333; }
 .task-panel-title {
   font-size: 13px;
   font-weight: 600;

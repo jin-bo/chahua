@@ -26,6 +26,7 @@ from typing import Any, Iterator, Mapping, Optional
 
 from agentao.transport import AgentEvent, EventType, SdkTransport
 
+from .debug_recorder import NOOP_RECORDER, TurnRecorder, classify_tool_source
 from .events import (
     NOOP_SINK,
     STATUS_OK,
@@ -34,6 +35,8 @@ from .events import (
     EnvelopeSink,
     emit_to_sink,
 )
+from .task_tools import TASK_WRITE_ARTIFACT_TOOL_NAME
+from .tasks_store import _validate_artifact_name
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +61,9 @@ class ChahuaTransport(SdkTransport):
         # ``data.task_id`` 透出去，让前端把流式 chunk 与任务面板挂钩。
         self._task_id: Optional[str] = None
         self._partial: list[str] = []
+        # P6.1：bind() 时由 TeaGuest 传入；workflow tool_start/complete 事件下钩到这里。
+        # 未 bind 时为 NOOP_RECORDER；与 sink 同生命周期。
+        self._recorder: TurnRecorder = NOOP_RECORDER
 
     # ── per-speak 生命周期 ─────────────────────────────────────────────────
 
@@ -69,8 +75,10 @@ class ChahuaTransport(SdkTransport):
         turn_id: str,
         message_id: str,
         task_id: Optional[str] = None,
+        recorder: TurnRecorder = NOOP_RECORDER,
     ) -> Iterator["ChahuaTransport"]:
-        """绑定一次 speak() 的 (sink, turn_id, message_id [, task_id])；退出时复位。
+        """绑定一次 speak() 的 (sink, turn_id, message_id [, task_id, recorder])；
+        退出时复位。
 
         ``with self._transport.bind(...): self._transport.emit_chahua(...)`` ——
         把"开 envelope / 任何路径都得复位"用 Python 语法收紧，避免 set/clear 配对
@@ -78,11 +86,16 @@ class ChahuaTransport(SdkTransport):
 
         ``task_id``：本轮 message_* envelope 的 ``data.task_id``。``None`` = 房间级闲聊，
         data 里不写这个键（envelope schema 不变，老前端无感）。
+
+        ``recorder``：P6.1 起 ``TeaGuest.speak`` 透传；TOOL_START / TOOL_COMPLETE 帧
+        转译时同步 ``record_tool_start`` / ``record_tool_complete``。未 bind 期间为
+        ``NOOP_RECORDER`` —— 防 agentao 在 speak 外异步 emit 误流入。
         """
         self._sink = sink
         self._turn_id = turn_id
         self._message_id = message_id
         self._task_id = task_id
+        self._recorder = recorder
         self._partial.clear()
         try:
             yield self
@@ -93,6 +106,7 @@ class ChahuaTransport(SdkTransport):
             self._turn_id = None
             self._message_id = None
             self._task_id = None
+            self._recorder = NOOP_RECORDER
 
     @property
     def partial_text(self) -> str:
@@ -155,6 +169,37 @@ class ChahuaTransport(SdkTransport):
             ),
         )
 
+    def _maybe_record_artifact_path(
+        self, tool_name: str, args: Any
+    ) -> None:
+        """从已知写盘工具的 args 派生 artifact 绝对路径，喂给 recorder（docs/P6 §6）。
+
+        派生表显式枚举：MVP 仅 ``task_write_artifact``；后续加新写盘工具按 tool name
+        扩本函数。**不挂 ArtifactDetector**（debug 是侧路能力，与任务系统解耦）。
+
+        前置条件：调用方已确保 ``self._message_id is not None``（与 ``record_tool_start``
+        合并守卫，避免重复 nullable 判定）。
+        """
+        if (
+            tool_name != TASK_WRITE_ARTIFACT_TOOL_NAME
+            or self._task_id is None
+            or not isinstance(args, dict)
+        ):
+            return
+        name = args.get("name")
+        if not isinstance(name, str) or not name:
+            return
+        # 与写盘路径同口径：name 合法（无 ``/`` / ``\\`` / ``..`` / 前缀 ``.``）才记
+        # —— 否则 ``TasksStore.write_artifact`` 会拒、根本不会落盘，调试日志记一条
+        # "幽灵 artifact" 会误导用户去查根本不存在的文件。前端 ``deriveArtifactPath``
+        # 同算法跟进。
+        if _validate_artifact_name(name) is not None:
+            return
+        self._recorder.record_artifact_path(
+            message_id=self._message_id,  # type: ignore[arg-type]
+            path=f"tasks/{self._task_id}/artifacts/{name}",
+        )
+
     # ── agentao 事件回调 ───────────────────────────────────────────────────
 
     def _handle(self, event: AgentEvent) -> None:
@@ -179,27 +224,52 @@ class ChahuaTransport(SdkTransport):
 
         if et is EventType.TOOL_START:
             # 字段直接转 —— agentao 用的 key 与设计文档 §3.5.1 一致（见 events.py 注释）。
+            tool_name = data.get("tool") or ""
+            call_id = data.get("call_id")
+            args = data.get("args")
             self.emit_chahua(
                 ChahuaEventType.TOOL_START,
-                {
-                    "tool": data.get("tool"),
-                    "args": data.get("args"),
-                    "call_id": data.get("call_id"),
-                },
+                {"tool": tool_name, "args": args, "call_id": call_id},
             )
+            # P6.1：MCP 来源走 tool 名启发式（不变量"_classify_tool_source 仅
+            # best-effort"），不为识别 MCP 改 agentao event 形态。
+            if self._message_id is not None:
+                source, mcp_server = classify_tool_source(tool_name)
+                self._recorder.record_tool_start(
+                    message_id=self._message_id,
+                    call_id=call_id,
+                    tool=tool_name,
+                    args=args,
+                    source=source,
+                    mcp_server=mcp_server,
+                )
+                # P6.1 artifact 派生表显式枚举（docs §不变量"仅从特定写盘工具派生"）：
+                # ``task_write_artifact(name, content)`` → ``tasks/<task_id>/artifacts/<name>``。
+                # ``task_id`` 缺 / ``name`` 缺时跳过（不入 task）。后续加新写盘工具按
+                # tool name 扩派生表 —— 不挂 ArtifactDetector。
+                self._maybe_record_artifact_path(tool_name, args)
             return
 
         if et is EventType.TOOL_COMPLETE:
+            call_id = data.get("call_id")
             self.emit_chahua(
                 ChahuaEventType.TOOL_COMPLETE,
                 {
                     "tool": data.get("tool"),
-                    "call_id": data.get("call_id"),
+                    "call_id": call_id,
                     "status": data.get("status"),
                     "duration_ms": data.get("duration_ms"),
                     "error": data.get("error"),
                 },
             )
+            if self._message_id is not None:
+                self._recorder.record_tool_complete(
+                    message_id=self._message_id,
+                    call_id=call_id,
+                    status=data.get("status"),
+                    duration_ms=data.get("duration_ms"),
+                    error=data.get("error"),
+                )
             return
 
         if et is EventType.ERROR:

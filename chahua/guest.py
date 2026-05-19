@@ -28,6 +28,7 @@ from agentao.mcp import load_mcp_config
 from agentao.paths import user_root
 from agentao.permissions import PermissionEngine
 
+from .debug_recorder import NOOP_RECORDER, TurnRecorder
 from .events import (
     STATUS_CANCELLED,
     STATUS_ERROR,
@@ -103,11 +104,15 @@ class TeaGuest:
         permission: str = "read-only",
         assets: Optional[PersonaAssets] = None,
         room_level_mcp: Optional[dict[str, dict]] = None,
+        recorder: TurnRecorder = NOOP_RECORDER,
     ) -> None:
         self.name = name
         self.room = room
         self.working_directory = Path(working_directory)
         self.working_directory.mkdir(parents=True, exist_ok=True)
+        # P6.1：speak() 在 message_start/end 处调 recorder；NOOP_RECORDER = 测试 /
+        # [debug] enabled=false 时不动盘。也透传到 transport.bind() 给工具事件 hook。
+        self._recorder = recorder
 
         # transport 终身绑定 (room_id, guest_name)；per-speak 的 (sink, turn_id,
         # message_id) 通过 bind() 临时设。room_id 暂用 room.name —— P4 加 [room].id
@@ -183,41 +188,72 @@ class TeaGuest:
           里的 ``Message.message_id`` 与 envelope ``message_id`` 一致。
         - 取消：``message_end(status=cancelled, data={partial_text})``；不写 transcript；
           重抛让 orchestrator 决定是否中止后续。
-        - 失败：``message_end(status=error, data={partial_text, error})``；不写 transcript；
+        - 失败：``message_end(status=error, data={partial_text, error})``；不写 transcript;
           异常被吞，函数返回 ``None`` —— orchestrator 让链跑下去（与 P1 一致）。
 
         ``task_id``：orchestrator 在 turn_start 时 snapshot 的 active_task_id。本轮所有
         message_* envelope 的 data 都带这个 tag；transcript 落盘也带。``None`` = 房间级闲聊。
+
+        P6.1：``record_message_start`` 在 envelope MESSAGE_START 之后调（speak_prompt
+        从形参拿）；``record_message_end`` 单点在外层 ``finally``，``status`` 悲观初始化
+        为 ``STATUS_ERROR``，三条出口路径（return msg / raise / return None）共享 finally。
         """
         message_id = new_message_id()
-        with self._transport.bind(
-            sink=sink, turn_id=turn_id, message_id=message_id, task_id=task_id,
-        ):
-            self._transport.emit_chahua(ChahuaEventType.MESSAGE_START, {})
-            try:
-                text = await self.agent.arun(
-                    context_message,
-                    cancellation_token=cancellation_token,
+        # 悲观初始化：finally 路径永远拿到合法 status；ok 在 return msg 前覆写，
+        # cancel 在 except CancelledError 里覆写，error 走默认。
+        status: str = STATUS_ERROR
+        msg: Optional[Message] = None
+        try:
+            with self._transport.bind(
+                sink=sink, turn_id=turn_id, message_id=message_id, task_id=task_id,
+                recorder=self._recorder,
+            ):
+                # ``capture_prompts=True`` 时把 context_message 搭车 MESSAGE_START.data；
+                # 老前端忽略未知字段、``schema_version`` 不 bump。关闭时整字段不写 key
+                # （区分"prompt 捕获关了" vs "prompt 是空"，docs §不变量）。
+                start_data: dict = {}
+                if self._recorder.capture_prompts:
+                    start_data["speak_prompt"] = context_message
+                self._transport.emit_chahua(ChahuaEventType.MESSAGE_START, start_data)
+                self._recorder.record_message_start(
+                    message_id=message_id, guest=self.name,
+                    speak_prompt=context_message,
                 )
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                self._emit_failure(STATUS_CANCELLED, "cancelled")
-                raise
-            except Exception as e:
-                _log.exception("%s.speak() failed", self.name)
-                self._emit_failure(STATUS_ERROR, str(e))
-                return None
+                try:
+                    text = await self.agent.arun(
+                        context_message,
+                        cancellation_token=cancellation_token,
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    status = STATUS_CANCELLED
+                    self._emit_failure(STATUS_CANCELLED, "cancelled")
+                    raise
+                except Exception as e:
+                    _log.exception("%s.speak() failed", self.name)
+                    # status 保持 STATUS_ERROR
+                    self._emit_failure(STATUS_ERROR, str(e))
+                    return None
 
-            msg = self.room.append(
-                self.name, text, message_id=message_id, task_id=task_id,
+                msg = self.room.append(
+                    self.name, text, message_id=message_id, task_id=task_id,
+                )
+                # message_end.data.text 是兜底字段（前端可以靠它做一次性渲染，不用拼 chunk）。
+                self._transport.emit_chahua(
+                    ChahuaEventType.MESSAGE_END,
+                    {"text": text},
+                    status=STATUS_OK,
+                    seq=msg.seq,
+                )
+                status = STATUS_OK
+                return msg
+        finally:
+            # finally 在 with 退出后；recorder 与 transport 绑定状态解耦，bind 已复位
+            # 时调用更显安全。``record_message_end`` 自带 try/except —— recorder 失败
+            # 永远不阻断 speak。
+            self._recorder.record_message_end(
+                message_id=message_id, status=status,
+                seq=msg.seq if msg is not None else None,
             )
-            # message_end.data.text 是兜底字段（前端可以靠它做一次性渲染，不用拼 chunk）。
-            self._transport.emit_chahua(
-                ChahuaEventType.MESSAGE_END,
-                {"text": text},
-                status=STATUS_OK,
-                seq=msg.seq,
-            )
-            return msg
 
     def _emit_failure(self, status: str, error: str) -> None:
         """两条失败分支（cancelled / error）共用的 message_end emit。"""

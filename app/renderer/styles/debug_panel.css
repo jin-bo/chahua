@@ -1,0 +1,285 @@
+/* 调试抽屉（P6.2）。结构沿用 task_panel.css：280px 固定宽 + 米色调；与 #task-panel
+   **互斥**占右侧槽位（任一显示时另一个 ``hidden``，renderer.js 控）。
+   不复用 ``.task-*`` 选择器避免误连样式 —— 调试视图独立演化更安全。 */
+
+#debug-panel {
+  width: var(--right-panel-width);
+  flex-shrink: 0;
+  border-left: 1px solid #eee;
+  background: #f7f4e8;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* 显式 ``display: flex`` 盖掉 ``hidden`` 自带的 ``display: none`` —— 默认隐藏 +
+   切换互斥都需要这条 override 才生效（与 #task-panel 同口径）。 */
+#debug-panel[hidden] { display: none; }
+
+#debug-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+}
+.debug-panel-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+  letter-spacing: 0.3px;
+}
+/* 22×22 图标按钮规则统一在 task_panel.css 里 —— 避免两套抽屉各自维护一份。 */
+
+.debug-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* 空状态。 */
+.debug-empty {
+  padding: 24px 8px;
+  text-align: center;
+  font-size: 13px;
+  color: #888;
+  line-height: 1.6;
+}
+
+/* 单个 turn 块。最新在顶（renderer.js insertBefore firstChild）。 */
+.debug-turn {
+  background: #fff;
+  border: 1px solid #ece4cf;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.debug-turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #555;
+}
+.debug-turn-ts {
+  color: #888;
+  font-variant-numeric: tabular-nums;
+}
+.debug-turn-winners {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+}
+.debug-winner-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #d9ead3;
+  color: #406c2a;
+}
+
+/* 候选 / message 公用 <details>。原生 disclosure 三角足够。 */
+.debug-section {
+  margin-top: 6px;
+}
+.debug-section > summary {
+  font-size: 11px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  list-style: revert;
+  padding: 2px 0;
+  margin-bottom: 4px;
+}
+.debug-section > summary:hover {
+  color: #6a4f25;
+}
+
+/* 候选表。 */
+.debug-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.debug-candidate {
+  border-top: 1px solid #f0ead9;
+  padding: 4px 0;
+}
+.debug-candidate:first-child { border-top: none; }
+.debug-candidate-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.debug-candidate-name {
+  flex: 1;
+  color: #333;
+  font-weight: 500;
+}
+.debug-candidate-score {
+  color: #6a4f25;
+  font-variant-numeric: tabular-nums;
+}
+.debug-candidate-kind {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #ece4cf;
+  color: #6a4f25;
+}
+.debug-candidate-kind[data-kind="cooldown"] { background: #e6e6e6; color: #777; }
+.debug-candidate-kind[data-kind="mention"] { background: #f0d9b8; color: #80531a; }
+.debug-candidate-kind[data-kind="error"]   { background: #e6d4d4; color: #8a4040; }
+
+/* 候选行内嵌 details —— raw + prompt。 */
+.debug-candidate > details {
+  margin: 4px 0 4px 16px;
+}
+.debug-candidate > details > summary {
+  font-size: 11px;
+  color: #888;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.debug-pre {
+  background: #f6f3ea;
+  border: 1px solid #ece4cf;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 4px 0;
+  max-height: 240px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.debug-pre-label {
+  font-size: 10px;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 6px 0 2px;
+}
+.debug-pre-disabled {
+  font-size: 11px;
+  color: #b0a890;
+  font-style: italic;
+  padding: 4px 0;
+}
+
+/* message 子项。 */
+.debug-messages {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.debug-message {
+  border-top: 1px solid #f0ead9;
+  padding: 4px 0;
+}
+.debug-message:first-child { border-top: none; }
+.debug-message-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.debug-message-guest {
+  flex: 1;
+  font-weight: 500;
+  color: #333;
+}
+.debug-status {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #d9ead3;
+  color: #406c2a;
+}
+.debug-status[data-status="cancelled"] { background: #f0d9b8; color: #80531a; }
+.debug-status[data-status="error"]     { background: #e6d4d4; color: #8a4040; }
+.debug-status[data-status="running"]   { background: #d4e3ec; color: #2a567c; }
+
+.debug-message > details {
+  margin-left: 16px;
+  margin-top: 4px;
+}
+.debug-message > details > summary {
+  font-size: 11px;
+  color: #888;
+  cursor: pointer;
+}
+
+/* 工具时间线。 */
+.debug-tools {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.debug-tool {
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #fbf8ee;
+  border: 1px solid #ece4cf;
+  margin-bottom: 3px;
+}
+.debug-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.debug-tool-name {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #333;
+  word-break: break-all;
+}
+.debug-tool-source {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #ece4cf;
+  color: #6a4f25;
+}
+.debug-tool-source[data-source="mcp"]     { background: #d4e3ec; color: #2a567c; }
+.debug-tool-source[data-source="unknown"] { background: #e6e6e6; color: #777; }
+.debug-tool-duration {
+  color: #999;
+  font-variant-numeric: tabular-nums;
+}
+.debug-tool-status {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #d9ead3;
+  color: #406c2a;
+}
+.debug-tool-status[data-status="started"] { background: #d4e3ec; color: #2a567c; }
+.debug-tool-status[data-status="error"]   { background: #e6d4d4; color: #8a4040; }
+.debug-tool-error {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #8a4040;
+  word-break: break-all;
+}
+
+/* 产物路径。 */
+.debug-artifacts {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.debug-artifact {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #6a4f25;
+  word-break: break-all;
+  padding: 2px 0;
+}

@@ -42,6 +42,7 @@ from .config import (
     VALID_ISOLATION,
     _build_extra_mcp_servers,
     _build_orchestrator_overrides,
+    DebugConfig,
     RoomConfig,
     RoomConfigError,
     load_room_config,
@@ -241,8 +242,22 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
         "room_llm": _llm_spec_to_dict(rc.room_llm) if rc.room_llm else None,
         "scoring": _llm_spec_to_dict(rc.scoring_llm) if rc.scoring_llm else None,
         "summary": _llm_spec_to_dict(rc.summary_llm) if rc.summary_llm else None,
+        # [debug] 段：只在非默认时携带（默认 enabled=True / capture_prompts=True）。
+        # 这样默认房间结构化重写不会塞进 ``[debug]`` 噪声；用户显式 ``= false`` 经
+        # mutator round-trip 后保住设定，不被默认 true/true 悄悄覆盖。
+        "debug": _debug_config_to_dict(rc.debug),
         "guests": guests,
     }
+
+
+def _debug_config_to_dict(debug: DebugConfig) -> Optional[dict]:
+    """``DebugConfig`` → snapshot dict；全默认时返 ``None``（不 emit ``[debug]``）。"""
+    fields = {}
+    if not debug.enabled:
+        fields["enabled"] = False
+    if not debug.capture_prompts:
+        fields["capture_prompts"] = False
+    return fields or None
 
 
 def _persona_to_relative(persona_path: Path, paths: Paths) -> str:

@@ -214,6 +214,38 @@ class IntentScorer:
         subject_mention_count: int = 0,
         task_block: str = "",
     ) -> ScoreResult:
+        """公契约入口 —— 仅返 :class:`ScoreResult`（envelope 给前端用）。
+
+        P6.1 起内部走 :meth:`score_with_prompt`，丢弃 prompt 字符串；
+        debug 落盘路径走 :meth:`score_with_prompt` 直拿 prompt。
+        """
+        result, _ = await self.score_with_prompt(
+            guest_name=guest_name,
+            persona=persona,
+            transcript_text=transcript_text,
+            user_config=user_config,
+            subject_mention_count=subject_mention_count,
+            task_block=task_block,
+        )
+        return result
+
+    async def score_with_prompt(
+        self,
+        *,
+        guest_name: str,
+        persona: str,
+        transcript_text: str,
+        user_config: UserConfig,
+        subject_mention_count: int = 0,
+        task_block: str = "",
+    ) -> tuple[ScoreResult, str]:
+        """同 :meth:`score`，但额外返回拼好的完整 prompt 字符串（P6.1）。
+
+        给 debug 落盘 / envelope piggyback 用 —— orchestrator 在
+        ``recorder.capture_prompts=True`` 时走这条路径，落 prompt 到
+        ``debug/prompts/<turn_id>/scoring_<guest>.txt``（不变量"scoring prompt
+        渲染单点在 scoring.py"）。
+        """
         prompt = _render_prompt(
             guest_name=guest_name,
             persona=persona,
@@ -230,12 +262,21 @@ class IntentScorer:
         )
         if not raw:
             # chat_oneshot 已记日志；此处把降级语义显式起来给 UI 看到。
-            return ScoreResult(
-                guest_name=guest_name, score=0.0, kind=ScoreKind.ERROR, raw=""
+            return (
+                ScoreResult(
+                    guest_name=guest_name,
+                    score=0.0,
+                    kind=ScoreKind.ERROR,
+                    raw="",
+                ),
+                prompt,
             )
-        return ScoreResult(
-            guest_name=guest_name,
-            score=_parse_score(raw),
-            kind=ScoreKind.SCORED,
-            raw=raw,
+        return (
+            ScoreResult(
+                guest_name=guest_name,
+                score=_parse_score(raw),
+                kind=ScoreKind.SCORED,
+                raw=raw,
+            ),
+            prompt,
         )

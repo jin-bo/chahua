@@ -93,14 +93,30 @@ ISOLATION_ROOM: Literal["room"] = "room"
 ISOLATION_GLOBAL: Literal["global"] = "global"
 DEFAULT_ISOLATION: Literal["room"] = ISOLATION_ROOM
 VALID_ISOLATION: frozenset[str] = frozenset({ISOLATION_ROOM, ISOLATION_GLOBAL})
+
+# [debug] 段允许的键（P6.1）。同 [room.llm] 口径：未知字段 → RoomConfigError。
+_ALLOWED_DEBUG_KEYS: frozenset[str] = frozenset({"enabled", "capture_prompts"})
+
 # 顶层白名单。
 _ALLOWED_TOPLEVEL_KEYS: frozenset[str] = frozenset(
-    {"room", "guest", "scoring", "summary"}
+    {"room", "guest", "scoring", "summary", "debug"}
 )
 
 
 class RoomConfigError(ValueError):
     """``room.toml`` 解析错误。消息里要说清楚是哪个 toml、哪段出的问题。"""
+
+
+@dataclass(frozen=True)
+class DebugConfig:
+    """``[debug]`` 段（P6.1，docs/P6-调试与回放.md §2）。
+
+    ``enabled=False`` 时 ``capture_prompts`` 实际效果固定为 ``False`` —— 不变量见
+    设计文档「关键不变量」节："recorder.enabled=False ⇒ capture_prompts=False"。
+    """
+
+    enabled: bool = True
+    capture_prompts: bool = True
 
 
 @dataclass(frozen=True)
@@ -199,6 +215,11 @@ class RoomConfig:
     summary_llm: Optional[LLMSpec] = None
     """``[summary]`` 段解析结果；缺 = 复用 :attr:`scoring_llm`（仍缺则走房间默认）。"""
 
+    debug: DebugConfig = field(default_factory=DebugConfig)
+    """``[debug]`` 段解析结果（P6.1）。缺段 → 全字段默认（``enabled=True``、
+    ``capture_prompts=True``）。装配期由 :func:`chahua.session.build_room_session`
+    传给 :class:`chahua.debug_recorder.TurnRecorder`。"""
+
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
@@ -278,6 +299,8 @@ def _build(
         data.get("summary"), section="[summary]", toml_path=toml_path
     )
 
+    debug = _build_debug_section(data.get("debug"), toml_path=toml_path)
+
     guests = _build_guests(
         data.get("guest", []), paths=paths, toml_path=toml_path
     )
@@ -293,6 +316,7 @@ def _build(
         room_llm=room_llm,
         scoring_llm=scoring_llm,
         summary_llm=summary_llm,
+        debug=debug,
     )
 
 
@@ -319,6 +343,48 @@ def _build_room_llm_section(
             f"{toml_path}: {section} 必须是表（table），得到 {type(raw).__name__}"
         )
     return _parse_llm_or_raise(raw, label=section, toml_path=toml_path)
+
+
+def _build_debug_section(raw: Any, *, toml_path: Path) -> DebugConfig:
+    """解析 ``[debug]`` 段（P6.1）。缺段 → :class:`DebugConfig` 默认值。
+
+    未知字段 → :class:`RoomConfigError`（同 ``[room.llm]`` 口径，docs/P6 不变量
+    "``[debug]`` section all-or-nothing"）。``enabled=False`` 时 ``capture_prompts``
+    在 toml 里仍可显式写，但实际效果由 :class:`chahua.debug_recorder.TurnRecorder`
+    强制为 ``False``（不变量"recorder.enabled=False ⇒ capture_prompts=False"）—— 这里
+    只做字段解析，不做语义约束。
+    """
+    if raw is None:
+        return DebugConfig()
+    if not isinstance(raw, dict):
+        raise RoomConfigError(
+            f"{toml_path}: [debug] 必须是表（table），得到 {type(raw).__name__}"
+        )
+    _check_unknown_keys(
+        section="[debug]",
+        keys=raw,
+        allowed=_ALLOWED_DEBUG_KEYS,
+        deferred=frozenset(),
+        toml_path=toml_path,
+    )
+    enabled = _as_bool(
+        raw.get("enabled", True), label="[debug].enabled", toml_path=toml_path
+    )
+    capture_prompts = _as_bool(
+        raw.get("capture_prompts", True),
+        label="[debug].capture_prompts",
+        toml_path=toml_path,
+    )
+    return DebugConfig(enabled=enabled, capture_prompts=capture_prompts)
+
+
+def _as_bool(value: Any, *, label: str, toml_path: Path) -> bool:
+    """toml 字段必须是 bool。其它类型 → :class:`RoomConfigError`。"""
+    if not isinstance(value, bool):
+        raise RoomConfigError(
+            f"{toml_path}: {label} 必须是布尔值，得到 {type(value).__name__}"
+        )
+    return value
 
 
 def _build_orchestrator_overrides(

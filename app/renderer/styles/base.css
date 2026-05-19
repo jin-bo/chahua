@@ -2,6 +2,14 @@
 html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
 body { display: flex; flex-direction: column; background: #fbf8f1; color: #333; }
 
+/* 三栏宽度由 splitter.js 拖动写入 ``document.documentElement.style`` 覆盖；
+   localStorage 持久化以便重启后保留用户偏好。task / debug 抽屉共享同一宽度变量
+   ——互斥占槽时拖一次两边同步生效。 */
+:root {
+  --sidebar-width: 200px;
+  --right-panel-width: 300px;
+}
+
 .status { font-size: 12px; padding: 6px 12px; color: #999; border-bottom: 1px solid #eee; }
 .status.error { color: #c00; }
 .status.ok { color: #690; }
