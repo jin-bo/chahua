@@ -727,22 +727,17 @@ def _bind_inbound_handlers(srv: ChahuaServer) -> dict[str, _InboundHandler]:
 # ── 入口 ──────────────────────────────────────────────────────────────────
 #
 # 进程生命周期层（argv / serve / stdin EOF / parent-pid watch / Windows tree-kill）
-# 移到 :mod:`chahua.server_entry`。为兼容老导入路径 ——
-# pyproject 的 ``chahua-server = "chahua.server:main"`` 与
-# ``tests/test_server_owner_pid.py`` 的 ``from chahua.server import _owner_pid_from_env``
-# —— 这里把入口符号再 reexport 出去。
-
-
-from .server_entry import (  # noqa: E402, F401
-    _owner_pid_from_env,
-    _parse_args,
-    _serve,
-    _wait_for_parent_exit_windows,
-    _watch_parent_process,
-    _watch_stdin_eof,
-    main,
-)
-
+# 全部在 :mod:`chahua.server_entry`。``server.py`` **不在顶层 import server_entry**
+# 否则循环：``server_entry`` 顶头 ``from .server import ChahuaServer`` 在 ``python -m
+# chahua.server`` 时会双装载 server.py（一次作 ``__main__``、一次作 ``chahua.server``），
+# 第二次到底部 reexport 时 ``server_entry`` 还没定义到那些名字 → ``ImportError``。
+#
+# 入口分两条都走 ``chahua.server_entry``：
+#   1. CLI 脚本：pyproject ``chahua-server = "chahua.server_entry:main"``
+#   2. sidecar 在 Electron 内：``python -m chahua.server`` 进 ``if __name__`` 走延迟
+#      import（也可改 ``python -m chahua.server_entry``，已为兼容老路径保留）
 
 if __name__ == "__main__":
-    main()
+    from .server_entry import main as _main  # noqa: E402
+
+    _main()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from chahua.server import _owner_pid_from_env
+from chahua.server_entry import _owner_pid_from_env
 
 
 def test_env_unset_returns_zero(monkeypatch):

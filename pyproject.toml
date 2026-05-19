@@ -14,7 +14,7 @@ dependencies = [
 
 [project.scripts]
 chahua = "chahua.cli:main"
-chahua-server = "chahua.server:main"
+chahua-server = "chahua.server_entry:main"
 
 [dependency-groups]
 dev = [
