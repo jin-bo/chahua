@@ -191,9 +191,10 @@ function updateNewTaskBtn() {
 const SEND_ICON = "↑";
 const STOP_ICON = "■";
 
-// ``/help`` 输出文案 —— 用 markdown 渲，居中系统气泡承载。仅列前端支持的命令；
-// CLI 端 ``/quit`` ``/info`` 之类在 chahua/cli.py 的 banner / 自己的 help 里说。
-// 加 / 改命令时这里一并动 + chahua/cli.py 同步。
+// ``/help`` 输出文案 —— 用 markdown 渲，居中系统气泡承载。**Web 与 CLI 两面 help 各
+// 自维护本面支持的命令**：CLI 端的 ``_HELP_LINES`` 含 ``/info`` / ``/quit``（REPL 才
+// 有意义），Web 端含 ``/task``（CLI 走 ``@<名字>`` 路径不开任务）。加 / 改命令时
+// 改本面的那份即可，不必试图 cross-runtime 同步。
 const HELP_TEXT = [
   "**chahua 系统命令**",
   "",

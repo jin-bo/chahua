@@ -716,7 +716,7 @@ class TasksStore:
         if not adir.is_dir():
             return []
         deleted: list[str] = []
-        for p in sorted(adir.iterdir()):
+        for p in adir.iterdir():
             if not p.is_file():
                 continue
             if _is_os_metadata_file(p.name):

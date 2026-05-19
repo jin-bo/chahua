@@ -92,7 +92,8 @@ def _print_permission_info(guests: list[TeaGuest]) -> None:
         )
 
 
-# 加 / 改命令时 Electron 端 ``HELP_TEXT``（app/renderer/renderer.js）也要同步动。
+# Web 与 CLI 两面 help 各自列本面支持的命令（CLI 端含 ``/info`` / ``/quit`` REPL
+# 专属；Web 端 ``HELP_TEXT`` 含 ``/task``）。加命令时改本面的这份即可。
 _HELP_LINES: tuple[str, ...] = (
     "chahua 系统命令：",
     "  /help 或 /?         显示本帮助",
@@ -245,8 +246,7 @@ async def _repl(args: argparse.Namespace) -> int:
                 # CLI 即时输入语境无误触场景，不加 input("确认?") 拦截；WS 路径有
                 # window.confirm 兜底。
                 deleted = store.clear_artifacts(active_id)
-                # 同步重置 detector 缓存（与 ``_inbound_clear_task_artifacts`` 同口径）。
-                session.orchestrator._artifact_detector.seen[active_id] = set()
+                session.orchestrator._artifact_detector.forget(active_id)
                 print(
                     f"[已清空任务「{task.title}」的产物（{len(deleted)} 个文件）"
                     f" —— 任务本身保留]"

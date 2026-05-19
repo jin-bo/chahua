@@ -530,6 +530,10 @@ class TaskHandlers:
             # 任务在 UI render 与 click 之间消失 —— 重发 task_info 让前端列表复位。
             self._emit_task_info(sink)
             return
+        # in-flight 茶客可能正写 ./task/<x> —— 同 close_task / set_active_task 口径先
+        # drain，避免 unlink 与 write 撞或 _kick_detect_new_artifacts 把"刚写又刚被删"
+        # 当 removed_names + new_names 双重广播。
+        await self.server._cancel_and_drain_inflight()
         try:
             deleted = store.clear_artifacts(task_id)
         except OSError as e:
@@ -537,9 +541,7 @@ class TaskHandlers:
                 sink, INBOUND_CLEAR_TASK_ARTIFACTS, e,
             )
             return
-        # 重置 detector 缓存 —— 防止下一轮 _kick_detect_new_artifacts 把"删走的旧名"
-        # 当 removed_names 触发多余广播；同时同名重建时仍能正常 emit。
-        self.server._session.orchestrator._artifact_detector.seen[task_id] = set()
+        self.server._session.orchestrator._artifact_detector.forget(task_id)
         _log.info("clear_task_artifacts: task=%s deleted=%d", task_id, len(deleted))
         self._emit_task_info(sink)
         await self.server._kick_synthesized_user_message(

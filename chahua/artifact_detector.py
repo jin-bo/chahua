@@ -45,6 +45,16 @@ class ArtifactDetector:
                     continue
                 self.seen[t.id] = {a["name"] for a in tasks_store.list_artifacts(t.id)}
 
+    def forget(self, task_id: str) -> None:
+        """重置某任务的 seen 缓存到空集 —— 给"清空产物"路径用。
+
+        如果不重置，``/clear task`` 后下一轮 :meth:`detect` 会扫到 ``current_names={}``、
+        ``prev=老集合``，走 ``removed_names`` 分支，与服务端已 emit 的 ``task_info`` 形成
+        多余的二次广播（无害但冗余）。集中在这里而不是让调用方戳 ``self.seen[...] = set()``
+        —— 避免私属性外泄到 ``server_inbound_task`` / ``cli`` 两个调用点。
+        """
+        self.seen[task_id] = set()
+
     def detect(self, sink: EnvelopeSink, active_task_id: Optional[str]) -> None:
         """扫 active task 的 ``artifacts/``，emit 茶客新写入的产物（P5.4）。
 
