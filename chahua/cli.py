@@ -77,7 +77,7 @@ def _print_banner(session: RoomSession, *, paths: Paths) -> None:
         f"在场茶客：{'、'.join(parts)}   "
         f"房间默认模型：{spec.provider}/{spec.model}"
     )
-    print("输入回车发送；空行 / /quit 退出；/info 看权限状态；@<名字> 直接点茶客。")
+    print("输入回车发送；空行 / /quit 退出；/info 看权限状态；/clear /new 清空聊天；@<名字> 直接点茶客。")
     print("─" * 60)
 
 
@@ -201,6 +201,14 @@ async def _repl(args: argparse.Namespace) -> int:
                 break
             if text == "/info":
                 _print_permission_info(session.guests)
+                continue
+            if text in ("/clear", "/new"):
+                # 与 WebSocket 端 ``_clear_room`` 同口径（orchestrator.reset_room +
+                # recorder.clear）；CLI 无 envelope sink 复位 UI，靠下一次 input 提示
+                # 让用户知道房间已重新起步。
+                session.orchestrator.reset_room()
+                session.recorder.clear()
+                print("[已清空房间记录 —— 下一句重新走 onboarding]")
                 continue
 
             before_seq = session.room.latest_seq

@@ -1249,6 +1249,15 @@ composer.addEventListener("submit", (ev) => {
     autoResizeTextarea();
     return;
   }
+  // /clear 与 /new：键盘快捷的"清空聊天"，与房间菜单同入口共用 confirm —— 滑指误打
+  // /task 边界（如想 /task 打成 /clear）有 confirm 兜底；clearCurrentRoom 内部不连接
+  // 时 noop，所以此处不再判 connected。
+  if (text === "/clear" || text === "/new") {
+    textInput.value = "";
+    autoResizeTextarea();
+    clearCurrentRoom();
+    return;
+  }
   // 文件不空时即使 text 为空也允许发送 —— 用户拖了文件就是有意图。
   if (!text && !upload.hasPending()) return;
   const files = upload.snapshotRels();
