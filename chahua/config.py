@@ -94,8 +94,15 @@ ISOLATION_GLOBAL: Literal["global"] = "global"
 DEFAULT_ISOLATION: Literal["room"] = ISOLATION_ROOM
 VALID_ISOLATION: frozenset[str] = frozenset({ISOLATION_ROOM, ISOLATION_GLOBAL})
 
-# [debug] 段允许的键（P6.1）。同 [room.llm] 口径：未知字段 → RoomConfigError。
-_ALLOWED_DEBUG_KEYS: frozenset[str] = frozenset({"enabled", "capture_prompts"})
+# [debug] 段允许的键（P6.1 / P6.3.B）。同 [room.llm] 口径：未知字段 → RoomConfigError。
+# P6.3.B 加 ``max_turns``：按 turn 数截断 ``debug/turns.jsonl`` + ``debug/prompts/<turn_id>/``。
+_ALLOWED_DEBUG_KEYS: frozenset[str] = frozenset(
+    {"enabled", "capture_prompts", "max_turns"}
+)
+
+# ``[debug].max_turns`` 默认值（P6.3.B §8）。普通对话 ~50 turn / 天，500 ≈ 10 天历史；
+# 0 关闭 rotation（用户主动选"全量取证"）；负值 → RoomConfigError。
+DEBUG_DEFAULT_MAX_TURNS = 500
 
 # 顶层白名单。
 _ALLOWED_TOPLEVEL_KEYS: frozenset[str] = frozenset(
@@ -109,14 +116,20 @@ class RoomConfigError(ValueError):
 
 @dataclass(frozen=True)
 class DebugConfig:
-    """``[debug]`` 段（P6.1，docs/P6-调试与回放.md §2）。
+    """``[debug]`` 段（P6.1 / P6.3.B，docs/P6-调试与回放.md §2 + P6.3-历史 turn 与磁盘配额.md §8）。
 
     ``enabled=False`` 时 ``capture_prompts`` 实际效果固定为 ``False`` —— 不变量见
     设计文档「关键不变量」节："recorder.enabled=False ⇒ capture_prompts=False"。
+
+    ``max_turns``：``debug/turns.jsonl`` 行数上限。超额时 :class:`chahua.debug_recorder.TurnRecorder`
+    从最老 turn 开始按事务（一条 jsonl 行 + 对应 ``prompts/<turn_id>/`` 子目录）整组删。
+    ``0`` 表示不限（"全量取证"）；负值 → :class:`RoomConfigError`。默认值
+    :data:`DEBUG_DEFAULT_MAX_TURNS`。
     """
 
     enabled: bool = True
     capture_prompts: bool = True
+    max_turns: int = DEBUG_DEFAULT_MAX_TURNS
 
 
 @dataclass(frozen=True)
@@ -375,7 +388,23 @@ def _build_debug_section(raw: Any, *, toml_path: Path) -> DebugConfig:
         label="[debug].capture_prompts",
         toml_path=toml_path,
     )
-    return DebugConfig(enabled=enabled, capture_prompts=capture_prompts)
+    # max_turns（P6.3.B §8）。bool 是 int 子类，先剔；负值越界（与 ORCH_FIELD_BOUNDS
+    # 同款"配错宁可炸"口径）；缺省即默认值。0 = 关 rotation。
+    max_turns_raw = raw.get("max_turns", DEBUG_DEFAULT_MAX_TURNS)
+    if isinstance(max_turns_raw, bool) or not isinstance(max_turns_raw, int):
+        raise RoomConfigError(
+            f"{toml_path}: [debug].max_turns 必须是整数，得到 "
+            f"{type(max_turns_raw).__name__}"
+        )
+    if max_turns_raw < 0:
+        raise RoomConfigError(
+            f"{toml_path}: [debug].max_turns={max_turns_raw!r} 越界，要求 >= 0"
+        )
+    return DebugConfig(
+        enabled=enabled,
+        capture_prompts=capture_prompts,
+        max_turns=max_turns_raw,
+    )
 
 
 def _as_bool(value: Any, *, label: str, toml_path: Path) -> bool:

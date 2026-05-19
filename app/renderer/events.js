@@ -44,6 +44,11 @@ export const EventType = Object.freeze({
   // 在用户，前端渲染成"采纳/忽略"卡片，采纳后薄包装转译回既有 ADD_DECISION / OPEN_TASK
   // inbound。镜像 chahua/events.py::TASK_PROPOSAL。
   TASK_PROPOSAL: "task_proposal",
+  // P6.3.A：调试抽屉点击某条历史索引行后服务端按 turn_id 回吐。data 形状：
+  // ``found=true`` 路径 ``{found, turn, prompts: {<rel>: text}}``（``prompts`` 字段
+  // 始终存在，最少 ``{}``；单 key 严格三重满足才出现）；``found=false`` 路径
+  // ``{found: false}`` —— 被 rotation 清掉 / 协议过期。镜像 chahua/events.py::TURN_DETAIL。
+  TURN_DETAIL: "turn_detail",
 });
 
 // TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
@@ -112,6 +117,9 @@ export const Inbound = Object.freeze({
   // 走服务端 NOTICE error 退回。
   SET_ACTIVE_TASK: "set_active_task",
   CLOSE_TASK: "close_task",
+  // P6.3.A：按 turn_id 拉历史 turn 详情 + 关联 prompt 文件。payload: {turn_id}。
+  // 服务端 regex 校验 ``^turn_[0-9a-f]+$``；未知 / rotation 清掉 → TURN_DETAIL{found=false}。
+  FETCH_TURN_DETAIL: "fetch_turn_detail",
 });
 
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /

@@ -99,6 +99,13 @@ class ChahuaEventType(str, Enum):
     # 工具自己经 ``transport.emit_chahua`` 推（speak() bind 期内 sink 有效）；不走 SDK
     # AgentEvent 回调链，不动 transport_bridge._handle。
     TASK_PROPOSAL = "task_proposal"
+    # P6.3.A：调试抽屉点击某条历史索引行后，服务端按 turn_id 查 ``debug/turns.jsonl``
+    # 行 + 关联 prompt 文件后回吐。data 形状：``found=true`` 路径
+    # ``{found, turn, prompts: {<rel>: text}}``（``prompts`` 字段始终存在，最少 ``{}``；
+    # 单 key 严格 ``enabled=True && capture_prompts=True && 文件可读`` 三重满足才出现）；
+    # ``found=false`` 路径 ``{found: false}``（被 rotation 清 / 协议过期）。envelope
+    # 顶层 ``turn_id`` 与实时 envelope 同款；其它顶层字段 turn_id 之外为 None。
+    TURN_DETAIL = "turn_detail"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

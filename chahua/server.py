@@ -21,14 +21,11 @@ DESIGN.md §6 P2.3 行 + §8 落地决策。
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-import ctypes
 import json
 import logging
 import operator
-import os
-import signal
+import re
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -37,12 +34,11 @@ from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from ._paths import Paths, resolve_under
+from ._paths import Paths
 from ._server_helpers import (
     check_keys_whitelist as _check_keys_whitelist,
     require_str as _require_str,
 )
-from .config import RoomConfigError
 from .events import (
     ChahuaEnvelope,
     ChahuaEventType,
@@ -101,13 +97,7 @@ from .server_inbound_task import (
     INBOUND_UPDATE_TASK,
     TaskHandlers,
 )
-from .session import (
-    DEFAULT_ROOM_REL,
-    RoomSession,
-    build_room_session,
-    discover_rooms,
-    load_env_files,
-)
+from .session import RoomSession, build_room_session
 
 _log = logging.getLogger(__name__)
 
@@ -126,6 +116,15 @@ INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
 INBOUND_CLEAR_ROOM = "clear_room"
 INBOUND_CANCEL = "cancel"
+# P6.3.A：调试抽屉点击历史索引行按 turn_id 拉详情。inbound 严格白名单（同 task
+# inbound 口径），turn_id regex 强校验拒穿越（路径片段，``prompts/<turn_id>/*``
+# 后端直接拼字符串）。响应回 TURN_DETAIL envelope。
+INBOUND_FETCH_TURN_DETAIL = "fetch_turn_detail"
+
+# ``turn_id`` 形态：与 :func:`chahua.events.new_turn_id` 一致 = ``turn_<10 字节 hex>``。
+# 接受 ``turn_<≥ 1 hex>`` 让未来 ID 字节数变动不需要 inbound 端也跟着改；穿越（``../``）
+# / 空段 / 非 hex 字符一概拒。改 :func:`new_turn_id` ID 形态时同步动这条 regex。
+_TURN_ID_RE = re.compile(r"^turn_[0-9a-f]+$")
 # P5.2 重构（docs/P5-任务房间.md §7.2）：admin / io / settings / task 四类 inbound
 # 由独立 handler 类承担，:class:`ChahuaServer` 在 ``__init__`` 里实例化为四个 slot。
 # 模块级 :data:`_INBOUND_ROUTES` 是 wire 字符串 → 属性路径（"_inbound_cancel" /
@@ -406,6 +405,9 @@ class ChahuaServer:
         cancel。
         """
         self._session.orchestrator.reset_room()
+        # 同步擦 debug 取证落盘 —— 否则 room_history.turns_index / fetch_turn_detail
+        # 仍能把"已清"房间的老 turn 与 prompt 喂回前端。
+        self._session.recorder.clear()
         _log.info("clear_room: %r 已清空", self._session.room.name)
         self._emit_room_snapshot(sink)
 
@@ -536,6 +538,55 @@ class ChahuaServer:
         await self._cancel_and_drain_inflight()
         self._clear_room(sink)
 
+    async def _inbound_fetch_turn_detail(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """按 ``turn_id`` 查 ``debug/turns.jsonl`` + 读关联 prompt 文件后回 TURN_DETAIL。
+
+        P6.3.A 行为约束（docs/P6.3 §4.2 + §10 不变量）：
+
+        - 字段白名单严格 → 未知键 NOTICE error + 丢帧（同 task inbound 口径）。
+        - ``turn_id`` regex 校验 ``^turn_[0-9a-f]+$``，拒穿越 / 空段（这是路径片段，
+          后端 ``prompts/<turn_id>/*`` 直接拼字符串）；非法 → NOTICE error。
+        - ``debug.enabled=False`` / 未扫到 / rotation 清掉 → ``data={"found": False}``
+          **不** emit NOTICE（前端协议过期是预期场景，抖 user 体验恼人）。
+        - happy path → ``data={"found": True, "turn": <row>, "prompts": <dict>}``，
+          ``prompts`` 字段始终存在（最少 ``{}``，便于前端代码统一访问）。
+        - 不挂房间 turn / 不进 in-flight 流程（取证读盘，不动 transcript / cursor）。
+        """
+        if not self._reject_unknown_keys(
+            data, frozenset({"type", "turn_id"}),
+            where=INBOUND_FETCH_TURN_DETAIL, sink=sink,
+        ):
+            return
+        turn_id = _require_str(data, "turn_id", where=INBOUND_FETCH_TURN_DETAIL)
+        if turn_id is None:
+            return
+        if not _TURN_ID_RE.fullmatch(turn_id):
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_FETCH_TURN_DETAIL}: 非法 turn_id={turn_id!r}",
+            )
+            return
+        room_id = self._session.room.name
+
+        def _emit(data_payload: dict) -> None:
+            sink(ChahuaEnvelope(
+                room_id=room_id, turn_id=turn_id, guest_name=None,
+                message_id=None, type=ChahuaEventType.TURN_DETAIL,
+                data=data_payload,
+            ))
+
+        recorder = self._session.recorder
+        if not recorder.enabled:
+            _emit({"found": False})
+            return
+        turn, prompts = recorder.load_turn(turn_id)
+        if turn is None:
+            _emit({"found": False})
+            return
+        _emit({"found": True, "turn": turn, "prompts": prompts})
+
     # ── P5.1.7 任务 inbound（docs/P5-任务房间.md §4.3 P5.1 段）─────────────
     #
     # 共通契约：
@@ -611,10 +662,13 @@ _InboundHandler = Callable[[dict, EnvelopeSink], Awaitable[None]]
 # :func:`_bind_inbound_handlers` 一次把它转成 bound-method 字典装上 ``self._inbound_handlers``。
 _INBOUND_ROUTES: dict[str, str] = {
     # 核心 4 个：cancel / switch_room / clear_room / user_message 留在 ChahuaServer。
+    # P6.3.A 加 fetch_turn_detail 也归核心层（debug 取证不属任何 feature slot —— 不
+    # 与 admin / task / io / settings 同维度）。
     INBOUND_CANCEL: "_inbound_cancel",
     INBOUND_SWITCH_ROOM: "_inbound_switch_room",
     INBOUND_CLEAR_ROOM: "_inbound_clear_room",
     INBOUND_USER_MESSAGE: "_inbound_user_message",
+    INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
     # admin slot：guest / room / persona / permission。
     INBOUND_ADD_GUEST: "admin._inbound_add_guest",
     INBOUND_REMOVE_GUEST: "admin._inbound_remove_guest",
@@ -671,232 +725,23 @@ def _bind_inbound_handlers(srv: ChahuaServer) -> dict[str, _InboundHandler]:
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────
+#
+# 进程生命周期层（argv / serve / stdin EOF / parent-pid watch / Windows tree-kill）
+# 移到 :mod:`chahua.server_entry`。为兼容老导入路径 ——
+# pyproject 的 ``chahua-server = "chahua.server:main"`` 与
+# ``tests/test_server_owner_pid.py`` 的 ``from chahua.server import _owner_pid_from_env``
+# —— 这里把入口符号再 reexport 出去。
 
 
-def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="chahua-server",
-        description="多 Agent 群聊「茶话室」WebSocket server（P2.3）",
-    )
-    parser.add_argument(
-        "--room",
-        type=Path,
-        default=DEFAULT_ROOM_REL,
-        help=(
-            f"房间目录，含 room.toml（默认 {DEFAULT_ROOM_REL}）。"
-            f"相对路径相对 user_data_root（CHAHUA_USER_DATA 或 dev 仓库根），"
-            f"绝对路径原样。"
-        ),
-    )
-    parser.add_argument(
-        "--host",
-        default=DEFAULT_HOST,
-        help=f"绑定地址（默认 {DEFAULT_HOST}，仅本机回环）",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help=(
-            f"监听端口（默认从 CHAHUA_WS_PORT 读，未设则 {DEFAULT_PORT}）"
-        ),
-    )
-    return parser.parse_args(argv)
-
-
-async def _serve(args: argparse.Namespace) -> int:
-    paths = Paths.from_env()
-    load_env_files(paths)
-
-    room_dir = resolve_under(paths.user_data_root, args.room)
-    try:
-        session = build_room_session(room_dir, paths=paths)
-    except RoomConfigError as e:
-        print(f"房间配置错误：\n{e}", file=sys.stderr)
-        return 2
-
-    # 端口优先级：CLI > env > 默认。
-    port = args.port
-    if port is None:
-        env_port = os.environ.get("CHAHUA_WS_PORT")
-        port = int(env_port) if env_port else DEFAULT_PORT
-
-    # 启动日志打出两个 root —— 打包后区分 dev / packaged 路径走的是哪条，排查方便。
-    if paths.app_root != paths.user_data_root:
-        print(f"app_root      : {paths.app_root}", file=sys.stderr)
-        print(f"user_data_root: {paths.user_data_root}", file=sys.stderr)
-
-    server = ChahuaServer(session, host=args.host, port=port, paths=paths)
-    stop = asyncio.Event()
-
-    # 三条触发 stop 的路径，覆盖所有"父进程要我停"语义：
-    #
-    # 1. SIGINT / SIGTERM signal handler —— CLI 用户 Ctrl-C / `kill <pid>` 进来，
-    #    asyncio loop 内 add_signal_handler 设 stop。Windows 不支持 add_signal_handler
-    #    （只能通过 ProactorEventLoop + 老 signal 模块的两段式 trick），P3.3.2.d 走
-    #    第 3 条 stdin EOF 路径替代 —— 跨平台一致、还不踩 Windows 信号坑。
-    #
-    # 2. KeyboardInterrupt —— 上层 main() catch，stop 来不及 set 但 asyncio.run
-    #    会 cancel 所有 task。
-    #
-    # 3. stdin EOF watcher —— Electron 关 sidecar 时 child.stdin.end() 关写端，
-    #    Python 这边 sys.stdin 读到 EOF → set stop。stdin 是 tty 时（CLI 交互模式）
-    #    不装这个 watcher，避免乱抢用户敲的字符。
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:
-            pass
-
-    # 平台分流：POSIX 走 stdin EOF（child.stdin.end() → 收 EOF → set stop）；Windows
-    # ProactorEventLoop 上 connect_read_pipe(sys.stdin) 拿 WinError 6 静默挂掉，stdin
-    # 路径形同虚设，改走 OpenProcess + WaitForSingleObject 监 Electron owner PID。
-    stdin_watcher_task: Optional[asyncio.Task] = None
-    if os.name != "nt" and not sys.stdin.isatty():
-        stdin_watcher_task = asyncio.create_task(_watch_stdin_eof(stop))
-    parent_watcher_task: Optional[asyncio.Task] = None
-    if os.name == "nt":
-        owner_pid = _owner_pid_from_env()
-        if owner_pid > 0:
-            parent_watcher_task = asyncio.create_task(
-                _watch_parent_process(stop, owner_pid)
-            )
-
-    try:
-        await server.serve_forever(stop)
-    finally:
-        # 关 server 持有的当前 session（换房后 self._session 已不是局部 `session`）。
-        server.close()
-        if stdin_watcher_task and not stdin_watcher_task.done():
-            stdin_watcher_task.cancel()
-        if parent_watcher_task and not parent_watcher_task.done():
-            parent_watcher_task.cancel()
-    return 0
-
-
-async def _watch_stdin_eof(stop: asyncio.Event) -> None:
-    """监 sys.stdin EOF，作为跨平台 sidecar 优雅关停信号。
-
-    Electron main 进程关 sidecar 前调 ``child.stdin.end()`` 关 stdin pipe 的写端
-    （sidecar.js:stop）；Python 这边读到 EOF 即 set stop，server.serve_forever 返回
-    → 整套 graceful 关。Windows 的 ``child.kill("SIGINT")`` 实际是
-    TerminateProcess（不 graceful），全靠这条路径替代。
-
-    ``connect_read_pipe`` 在 Unix / Windows ProactorEventLoop 都支持；少数边角设置下
-    可能失败（如 dev tty 模式调到这里，但我们已经在调用方 ``isatty()`` 过滤；保留
-    try/except 兜底 OSError / NotImplementedError）。
-    """
-    log = logging.getLogger(__name__)
-    loop = asyncio.get_running_loop()
-    try:
-        reader = asyncio.StreamReader(loop=loop)
-        protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-    except (OSError, NotImplementedError) as e:
-        log.debug("stdin watcher disabled: %s", e)
-        return
-
-    # 父进程往 stdin 写东西不该触发关停（保留未来"命令通道"扩展空间，比如 main
-    # 想塞个 ``{"type":"switch_room"}`` 进来）—— 只 EOF（空 bytes）才 set stop。
-    while not stop.is_set():
-        try:
-            data = await reader.read(1024)
-        except asyncio.CancelledError:
-            return
-        if not data:
-            log.info("stdin EOF received; shutting down")
-            stop.set()
-            return
-
-
-def _owner_pid_from_env() -> int:
-    """Electron 通过 ``CHAHUA_PARENT_PID`` 显式喂自己的 PID 给 sidecar 用作 owner。
-
-    返回 0 = 没有可监控的 owner（独立跑 ``uv run chahua-server`` 时常态）。**不**回退
-    到 ``os.getppid()`` —— dev 模式 ppid 指向 wrapper（``uv.exe`` / shell），监它退出
-    会让 sidecar 在不该退的时刻退（比如 PowerShell 关掉但 Electron 还活着）。
-    """
-    raw = os.environ.get("CHAHUA_PARENT_PID")
-    if not raw:
-        return 0
-    try:
-        pid = int(raw)
-    except ValueError:
-        logging.getLogger(__name__).debug("invalid CHAHUA_PARENT_PID=%r", raw)
-        return 0
-    return pid if pid > 0 else 0
-
-
-async def _watch_parent_process(stop: asyncio.Event, parent_pid: int) -> None:
-    """Windows 下监 owner 进程退出 → set stop。
-
-    OpenProcess + WaitForSingleObject 的同步阻塞调用走 ``asyncio.to_thread`` 丢到
-    执行线程，await 完成后回到事件循环主线程继续 set stop —— 不必走
-    ``call_soon_threadsafe``。task 在 ``_serve.finally`` 里 cancel；CancelledError
-    silent return，避免进程正常退出时这边补 ERROR 日志。
-    """
-    log = logging.getLogger(__name__)
-    try:
-        await asyncio.to_thread(_wait_for_parent_exit_windows, parent_pid)
-    except asyncio.CancelledError:
-        return
-    except Exception as e:
-        log.debug("parent watcher disabled: %s", e)
-        return
-    if not stop.is_set():
-        log.info("parent process exited; shutting down")
-        stop.set()
-
-
-def _wait_for_parent_exit_windows(parent_pid: int) -> None:
-    """阻塞等待 Windows owner 进程退出。仅由 :func:`_watch_parent_process` via to_thread 调用。
-
-    ctypes argtypes / restype 必须显式声明：64 位 Windows 上 ``HANDLE`` 是指针
-    （8 字节），ctypes 默认按 C ``int``（4 字节）截断，handle 高位被砍后
-    ``WaitForSingleObject`` 拿到坏 handle 立刻返 ``WAIT_FAILED`` 让 sidecar 启动
-    秒退。这是隐性 bug，不写 argtypes 在小 PID 下偶然能跑、handle 高位非零时翻车。
-    """
-    if parent_pid <= 0:
-        return
-
-    from ctypes import wintypes
-
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    k32.OpenProcess.restype = wintypes.HANDLE
-    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    k32.WaitForSingleObject.restype = wintypes.DWORD
-    k32.CloseHandle.argtypes = [wintypes.HANDLE]
-    k32.CloseHandle.restype = wintypes.BOOL
-
-    SYNCHRONIZE = 0x00100000
-    INFINITE = 0xFFFFFFFF
-
-    handle = k32.OpenProcess(SYNCHRONIZE, False, parent_pid)
-    if not handle:
-        # PID 不存在 / 权限不足 —— 没法监控就不监，不当 ERROR（owner 已经死了
-        # 也走这条路径，调用方靠 stop 没被 set 来推断）。
-        return
-    try:
-        k32.WaitForSingleObject(handle, INFINITE)
-    finally:
-        k32.CloseHandle(handle)
-
-
-def main() -> None:
-    """``chahua-server`` 命令入口。"""
-    args = _parse_args(sys.argv[1:])
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    try:
-        rc = asyncio.run(_serve(args))
-    except KeyboardInterrupt:
-        rc = 130
-    sys.exit(rc)
+from .server_entry import (  # noqa: E402, F401
+    _owner_pid_from_env,
+    _parse_args,
+    _serve,
+    _wait_for_parent_exit_windows,
+    _watch_parent_process,
+    _watch_stdin_eof,
+    main,
+)
 
 
 if __name__ == "__main__":

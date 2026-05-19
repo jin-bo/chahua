@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Literal, Optional, TYPE_CHECKING
+from typing import Any, Literal, Optional, TYPE_CHECKING
 
 from . import admin, trust
 from .config import ORCH_FIELD_BOUNDS
+from .debug_recorder import TURNS_INDEX_HARD_CAP
 from .events import (
     ChahuaEnvelope,
     ChahuaEventType,
@@ -223,8 +224,19 @@ def emit_room_history(server: "ChahuaServer", sink: EnvelopeSink) -> None:
 
     所有历史一次性下发的取舍：实现简单；目前 transcript 体量（数百条）单帧没压力；
     将来 ws 默认 max_size（~1MB）不够时再改成分页 / 后向滚动懒拉。
+
+    P6.3.A：``debug.enabled=True`` 且 ``debug/turns.jsonl`` 非空时附 ``turns_index``
+    轻量索引（最新 ≤ 1000 条倒序），让调试抽屉"打开窗口前发生的 turn"也能翻。
+    不变量"``turns_index`` 在 ``room_history`` 中严格 ``enabled=True`` 才出现"——
+    关闭时整字段缺省（不下发空数组），让前端区分"关了" vs "开着但确实空"。
     """
     msgs = server._session.room.messages_since(0)
+    data: dict[str, Any] = {"messages": [m.to_jsonl_dict() for m in msgs]}
+    recorder = server._session.recorder
+    if recorder.enabled:
+        idx = recorder.load_index(limit=TURNS_INDEX_HARD_CAP)
+        if idx:
+            data["turns_index"] = idx
     sink(
         ChahuaEnvelope(
             room_id=server._session.room.name,
@@ -232,7 +244,7 @@ def emit_room_history(server: "ChahuaServer", sink: EnvelopeSink) -> None:
             guest_name=None,
             message_id=None,
             type=ChahuaEventType.ROOM_HISTORY,
-            data={"messages": [m.to_jsonl_dict() for m in msgs]},
+            data=data,
         )
     )
 

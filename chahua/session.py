@@ -227,6 +227,12 @@ class RoomSession:
     """per-task summarizer 池。``close()`` 一并 flush 所有 task cursor。业务流不取这个
     handle —— orchestrator 自己持引用做 ``_summarize_safe`` 的尾巴。"""
 
+    recorder: TurnRecorder
+    """房间级 debug 落盘 facade（P6.1 + P6.3）。orchestrator / 每位茶客都持同一引用
+    跑实时记录；server ``_inbound_fetch_turn_detail`` 也经它走 ``load_turn`` /
+    ``load_index`` 取证（P6.3.A）。``enabled=False`` 时是 ``NOOP_RECORDER`` 风格的
+    no-op 实例，但仍是真 ``TurnRecorder`` 句柄（session 装配期一次性创建）。"""
+
     def close(self) -> None:
         # cursor flush 是廉价同步 IO，先做完再走茶客 close（后者偶发卡 event loop）。
         self.task_summaries.close()
@@ -425,6 +431,7 @@ def build_room_session(
         room_dir=room_config.room_dir,
         enabled=room_config.debug.enabled,
         capture_prompts=room_config.debug.capture_prompts,
+        max_turns=room_config.debug.max_turns,
     )
 
     guest_entries = _build_guests(
@@ -463,6 +470,7 @@ def build_room_session(
         guest_specs=guest_specs,
         tasks_store=tasks_store,
         task_summaries=task_summaries,
+        recorder=recorder,
     )
     relink_task_dirs(session)
     return session

@@ -27,12 +27,20 @@ Orchestrator / TeaGuest / ChahuaTransport 在 splice 点调本对象，让"每�
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from ._persist import append_jsonl, write_text_atomic
+from ._persist import (
+    append_jsonl,
+    read_jsonl_skip_bad,
+    write_text_atomic,
+)
 from .events import (
     STATUS_CANCELLED,
     STATUS_ERROR,
@@ -59,6 +67,18 @@ VALID_SCORING_PATHS: frozenset[str] = frozenset(
     {SCORING_PATH_SCORING, SCORING_PATH_MENTION, SCORING_PATH_BROADCAST}
 )
 
+# ``load_index`` 投影出的轻量索引字段（docs/P6.3 §4.1）。
+# **不放** scoring.scorables / cooled / 各 guest 分数（每条 ≤ 200B 给 room_history
+# 单帧塞 1000 条留余裕）；详情走 :meth:`TurnRecorder.load_turn`。
+_INDEX_PROJECTION_FIELDS: tuple[str, ...] = (
+    "turn_id", "ts_ms", "task_id", "trigger_kind", "scoring_path", "winners",
+    "n_messages",
+)
+
+# room_history 下发的 turns_index 硬上限（docs/P6.3 §5.2）。超出仅下最新 N 条，
+# 让单帧 ws ~300KB（1000 × 300B）。更老的从盘上 grep，不开"翻页"协议。
+TURNS_INDEX_HARD_CAP = 1000
+
 
 @dataclass(frozen=True, slots=True)
 class PickDebugMeta:
@@ -81,6 +101,20 @@ class PickDebugMeta:
 TOOL_SOURCE_BUILTIN: str = "builtin"
 TOOL_SOURCE_MCP: str = "mcp"
 TOOL_SOURCE_UNKNOWN: str = "unknown"
+
+
+def _count_nonempty_lines(path: Path) -> int:
+    """文件不存在 → 0。仅扫非空行，不做 JSON parse —— 给 ``TurnRecorder.__init__``
+    的 ``_turn_count`` seed 用，hot path 避免 per-line json.loads。
+    """
+    if not path.is_file():
+        return 0
+    n = 0
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                n += 1
+    return n
 
 
 def classify_tool_source(tool: str) -> tuple[str, Optional[str]]:
@@ -121,18 +155,25 @@ class TurnRecorder:
         *,
         enabled: bool,
         capture_prompts: bool,
+        max_turns: int = 500,
     ) -> None:
         self.enabled: bool = enabled
         # 不变量：enabled=False ⇒ capture_prompts=False。
         # NOOP_RECORDER 实例两个 attr 都是 False；orchestrator 只用 capture_prompts
         # 单条件分支决定是否走 score_with_prompt。
         self.capture_prompts: bool = enabled and capture_prompts
+        # P6.3.B rotation cap。0 = 关 rotation；负值 → 装配层（config.py）已拒，
+        # 这里 defensive 也走"关 rotation"语义（不变量"max_turns = 0 关 rotation"）。
+        self._max_turns: int = max_turns if max_turns > 0 else 0
 
         # 唯一持久状态：``<room_dir>/debug/``。``turns.jsonl`` / ``prompts/`` 路径都从这里
         # 派生；``enabled=False`` 时为 None，所有 record_* / flush_turn 在前置守卫就 return。
         self._debug_dir: Optional[Path] = None
         # in-flight turn 记录；None = 当前没有 start_turn 过 / 已 flush / 已 discard。
         self._current: Optional[dict[str, Any]] = None
+        # 内存维护的 turn 计数（P6.3.B §9）—— ``__init__`` 期数一次后单调维护，
+        # ``flush_turn`` append 成功 +1、``rotate_if_needed`` 删 N 条 -= N。永远不重测盘。
+        self._turn_count: int = 0
 
         if not enabled:
             return
@@ -141,6 +182,19 @@ class TurnRecorder:
         # 构造期一次性 mkdir（与 _persist.append_jsonl 的"调用方一次性 mkdir"承诺对齐）。
         self._debug_dir = room_dir / "debug"
         self._debug_dir.mkdir(parents=True, exist_ok=True)
+        # 启动期 turn_count seed + 兜底 rotate（P6.3.B §9.1）。**只数非空行**而非
+        # json.loads 每条 —— 长跑房间 ~5000 行的 build_room_session 启动期才不被
+        # per-line JSON parse 拉慢（坏行被算进 count 顶多让 rotation 多剪 1 条，
+        # 与 transcript.jsonl 跳坏行同口径接受）。失败 WARN 不阻断。
+        try:
+            self._turn_count = _count_nonempty_lines(self._turns_path)
+        except Exception:
+            _log.warning(
+                "TurnRecorder __init__: seed _turn_count from jsonl failed",
+                exc_info=True,
+            )
+            self._turn_count = 0
+        self.rotate_if_needed()
 
     @property
     def _turns_path(self) -> Path:
@@ -447,15 +501,343 @@ class TurnRecorder:
         **cancel / 异常路径也走这里**（不变量"cancel / 异常路径仍 flush 一行"）——
         半截 prompt / 工具调用 / partial message 都是取证证据，丢了反而无证可查。
         各 ``messages[].status`` 已能逐条区分 ``ok`` / ``cancelled`` / ``error``。
+
+        append 成功后 ``_turn_count += 1`` 并紧跟 :meth:`rotate_if_needed` ——
+        热路径常态是一次 int 比较 + early-return，不引入节流。
         """
         if not self.enabled or self._current is None:
             return
+        appended = False
         try:
             append_jsonl(self._turns_path, self._current)
+            appended = True
         except Exception:
             _log.warning("TurnRecorder.flush_turn failed", exc_info=True)
         finally:
             self._current = None
+        if appended:
+            self._turn_count += 1
+            # rotate_if_needed 内部 try/except，rotation 失败不阻断房间。
+            self.rotate_if_needed()
+
+    # ── 加载入口（P6.3.A）────────────────────────────────────────────────
+
+    def _iter_index_rows(self):
+        """``read_jsonl_skip_bad`` 包一层：``enabled=False`` 直返空迭代。
+
+        其它调用方（:meth:`load_index` / :meth:`rotate_if_needed` /
+        :meth:`__init__` 期 seed）共享这个入口；改"读哪个文件 / 跳坏行口径"只动一处。
+        """
+        if not self.enabled:
+            return iter(())
+        assert self._debug_dir is not None
+        return read_jsonl_skip_bad(self._turns_path)
+
+    @staticmethod
+    def _project_index_row(row: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """投影 ``turns.jsonl`` 行 → 轻量索引 dict（docs §4.1 字段集）。
+
+        ``turn_id`` 缺则跳（坏行；同 ``transcript.jsonl`` 跳坏行口径）。其它字段缺
+        → 各自合理 fallback：``ts_ms`` 缺写 ``0``、``winners`` 缺写 ``[]``、
+        ``trigger_kind`` 走 ``trigger.kind`` 嵌套字段（jsonl schema 把它放在 trigger 内）。
+        """
+        turn_id = row.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id:
+            return None
+        trigger = row.get("trigger") or {}
+        scoring = row.get("scoring") or {}
+        messages = row.get("messages") or []
+        return {
+            "turn_id": turn_id,
+            "ts_ms": row.get("ts_ms") if isinstance(row.get("ts_ms"), int) else 0,
+            "task_id": row.get("task_id"),
+            "trigger_kind": (
+                trigger.get("kind") if isinstance(trigger, dict) else None
+            ),
+            "scoring_path": row.get("scoring_path") or SCORING_PATH_SCORING,
+            "winners": list(scoring.get("winners") or [])
+            if isinstance(scoring, dict) else [],
+            "n_messages": (
+                len(messages) if isinstance(messages, list) else 0
+            ),
+        }
+
+    def load_index(self, *, limit: Optional[int] = None) -> list[dict[str, Any]]:
+        """读 ``debug/turns.jsonl`` 投影成 ``turns_index``（倒序，最新在前）。
+
+        - ``enabled=False`` → ``[]``。
+        - 跳坏行（复用 :func:`chahua._persist.read_jsonl_skip_bad`）。
+        - ``limit=None`` → 全扫返全部。**rotation 必须用这条**：截断要看到完整老 turn
+          序列，否则 limit 之外的更老 turn 永远删不到、jsonl 仍超 cap（不变量
+          "``rotate_if_needed`` 内 ``load_index`` 必须 ``limit=None``"）。
+        - ``limit=N`` → 内部 ``deque(maxlen=N)`` 持最新 N 条然后反转返；
+          ``room_history`` snapshot 用 ``limit=TURNS_INDEX_HARD_CAP``。
+        """
+        if not self.enabled:
+            return []
+        try:
+            if limit is None:
+                rows = []
+                for row in self._iter_index_rows():
+                    projected = self._project_index_row(row)
+                    if projected is not None:
+                        rows.append(projected)
+                rows.reverse()
+                return rows
+            if limit <= 0:
+                return []
+            # deque(maxlen=N) 自动滚出最老 → 末端是最新 N 条；反转后最新在前。
+            tail: deque[dict[str, Any]] = deque(maxlen=limit)
+            for row in self._iter_index_rows():
+                projected = self._project_index_row(row)
+                if projected is not None:
+                    tail.append(projected)
+            out = list(tail)
+            out.reverse()
+            return out
+        except Exception:
+            _log.warning("TurnRecorder.load_index failed", exc_info=True)
+            return []
+
+    def load_turn(
+        self, turn_id: str
+    ) -> tuple[Optional[dict[str, Any]], dict[str, str]]:
+        """按 ``turn_id`` 查 jsonl 行 + 读关联 prompt 文件。
+
+        返回 ``(turn_dict | None, {rel: text})``。
+
+        - 顺序扫（不建内存索引）：单房间 ``turns.jsonl`` 撑死几千行，fetch 是用户主动
+          操作，不在 hot path；建索引就得加 rotation 失效逻辑，复杂度不值。
+        - 找到一条立即停；重复 ``turn_id``（手工编辑 / fsck）取第一条 + WARN。
+        - prompt 文件按行内 ``scoring[].prompt_file`` / ``messages[].speak_prompt_file``
+          字段读；任意路径校验 ``resolve().is_relative_to(debug_dir)`` ——
+          jsonl 自己写下来的字段也防一手（攻击模型：用户编辑 turns.jsonl 塞
+          ``"prompt_file": "../../.env"``）。单文件读失败 / 路径越界 → 该 key 整体
+          缺省（**不空串**），WARN 跳过。
+        """
+        if not self.enabled:
+            return (None, {})
+        assert self._debug_dir is not None
+        try:
+            hit: Optional[dict[str, Any]] = None
+            for row in self._iter_index_rows():
+                if row.get("turn_id") != turn_id:
+                    continue
+                if hit is None:
+                    hit = row
+                else:
+                    _log.warning(
+                        "TurnRecorder.load_turn: duplicate turn_id=%r in jsonl; "
+                        "using first",
+                        turn_id,
+                    )
+                    break
+            if hit is None:
+                return (None, {})
+            prompts = self._load_prompts_for_row(hit)
+            return (hit, prompts)
+        except Exception:
+            _log.warning("TurnRecorder.load_turn failed", exc_info=True)
+            return (None, {})
+
+    def _load_prompts_for_row(
+        self, row: dict[str, Any]
+    ) -> dict[str, str]:
+        """收集 ``row`` 内 ``prompt_file`` / ``speak_prompt_file`` 字段并读盘。
+
+        ``capture_prompts=False`` → 整字典空 dict 直接返。用户把 ``capture_prompts``
+        关掉的意图是"我不想再让 prompt 出现在 panel 里"，老 ``=True`` 期残留的 prompt
+        文件也要一起隐藏 —— 否则 P6.3 不变量"单 key 严格 enabled && capture_prompts &&
+        文件可读三重满足才出现"被破坏（codex 评审第 2 轮 P2 找出）。盘上残文件留给
+        ``clear_room`` / rotation / 手工 rm 处理；本函数只管协议层。
+
+        路径校验 + 读失败 → 跳过 + WARN（key 整体缺，不空串）。
+        """
+        if not self.capture_prompts:
+            return {}
+        out: dict[str, str] = {}
+        scoring = row.get("scoring")
+        if isinstance(scoring, dict):
+            results = scoring.get("results")
+            if isinstance(results, list):
+                for entry in results:
+                    if not isinstance(entry, dict):
+                        continue
+                    rel = entry.get("prompt_file")
+                    if isinstance(rel, str) and rel:
+                        text = self._read_prompt_file_safe(rel)
+                        if text is not None:
+                            out[rel] = text
+        messages = row.get("messages")
+        if isinstance(messages, list):
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                rel = msg.get("speak_prompt_file")
+                if isinstance(rel, str) and rel:
+                    text = self._read_prompt_file_safe(rel)
+                    if text is not None:
+                        out[rel] = text
+        return out
+
+    def _read_prompt_file_safe(self, rel: str) -> Optional[str]:
+        """按相对路径读 ``<debug_dir>/<rel>``，校验 ``resolve()`` 落在 ``debug_dir`` 之下。
+
+        路径越界 / IO 失败 → ``None`` + WARN（不空串，让上层 key 整体缺省）。
+        """
+        assert self._debug_dir is not None
+        try:
+            abs_path = (self._debug_dir / rel).resolve()
+        except (OSError, RuntimeError):
+            _log.warning(
+                "TurnRecorder._read_prompt_file_safe: resolve %r failed", rel,
+                exc_info=True,
+            )
+            return None
+        try:
+            debug_root = self._debug_dir.resolve()
+        except (OSError, RuntimeError):
+            _log.warning(
+                "TurnRecorder._read_prompt_file_safe: resolve debug_dir failed",
+                exc_info=True,
+            )
+            return None
+        try:
+            abs_path.relative_to(debug_root)
+        except ValueError:
+            _log.warning(
+                "TurnRecorder._read_prompt_file_safe: %r escapes debug dir",
+                rel,
+            )
+            return None
+        try:
+            return abs_path.read_text(encoding="utf-8")
+        except OSError:
+            _log.warning(
+                "TurnRecorder._read_prompt_file_safe: read %r failed", rel,
+                exc_info=True,
+            )
+            return None
+
+    # ── rotation（P6.3.B）─────────────────────────────────────────────────
+
+    def rotate_if_needed(self) -> None:
+        """超 ``max_turns`` 时从最老 turn 开始删 jsonl 行 + ``prompts/<turn_id>/`` 子目录。
+
+        - ``enabled=False`` / ``max_turns <= 0`` → early return（不变量
+          "``max_turns = 0`` 关 rotation，不关 debug"）。
+        - ``_turn_count <= max_turns`` → early return（热路径常态：一次 int 比较）。
+        - 否则按事务删 ``n_drop = _turn_count - max_turns`` 个最老 turn_id：
+          重写 jsonl（tmp+rename） + 删 ``prompts/<turn_id>/`` 子目录。
+        - 失败 try/except 包到底 + WARN —— rotation 失败永远不阻断房间运行。
+        """
+        if not self.enabled or self._max_turns <= 0:
+            return
+        if self._turn_count <= self._max_turns:
+            return
+        try:
+            # 必须 limit=None 全扫（不变量）；index 倒序：最新在 index[0]，最老在末尾。
+            index = self.load_index(limit=None)
+            if len(index) <= self._max_turns:
+                # 计数器与盘对齐（理论上不应发生，但 rotate 失败回来再调时这里兜底）。
+                self._turn_count = len(index)
+                return
+            n_drop = len(index) - self._max_turns
+            to_delete: set[str] = {
+                entry["turn_id"] for entry in index[-n_drop:]
+            }
+            if not to_delete:
+                return
+            self._rewrite_jsonl_dropping(to_delete)
+            for turn_id in to_delete:
+                self._rm_prompt_subdir(turn_id)
+            self._turn_count -= len(to_delete)
+            _log.info(
+                "TurnRecorder rotated %d turns (kept %d, cap=%d)",
+                len(to_delete),
+                self._turn_count,
+                self._max_turns,
+            )
+        except Exception:
+            _log.warning(
+                "TurnRecorder.rotate_if_needed failed", exc_info=True
+            )
+
+    def _rewrite_jsonl_dropping(self, drop: set[str]) -> None:
+        """tmp+rename 整体重写 ``turns.jsonl``，跳过 ``turn_id ∈ drop`` 的行。
+
+        与 ``cursor.json`` / ``write_json_atomic`` 同口径：中途崩溃留下完整旧文件而非半截。
+        坏行（``read_jsonl_skip_bad`` 跳过的）天然不进新文件。
+        """
+        assert self._debug_dir is not None
+        path = self._turns_path
+        if not path.is_file():
+            return
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for row in read_jsonl_skip_bad(path):
+                tid = row.get("turn_id")
+                if isinstance(tid, str) and tid in drop:
+                    continue
+                f.write(json.dumps(row, ensure_ascii=False))
+                f.write("\n")
+        os.replace(tmp, path)
+
+    def _rm_prompt_subdir(self, turn_id: str) -> None:
+        """``shutil.rmtree`` 单子目录最多 N+1 个 .txt，整目录删比逐文件 unlink 干净。
+
+        权限 / 文件被打开 → WARN，下次 rotation 再尝试。残留 orphan
+        ``prompts/turn_xxx/`` 是可接受的（用户 ls 看到也不会迷惑，turn_id 命名自带语义）。
+        """
+        assert self._debug_dir is not None
+        sub = self._debug_dir / "prompts" / turn_id
+        if not sub.is_dir():
+            return
+        try:
+            shutil.rmtree(sub)
+        except OSError:
+            _log.warning(
+                "TurnRecorder._rm_prompt_subdir %r failed", sub, exc_info=True,
+            )
+
+    def clear(self) -> None:
+        """``clear_room`` 复位调用：删 ``turns.jsonl`` + ``prompts/`` 整子树。
+
+        与 ``Orchestrator.reset_room`` 同口径（``room.clear`` / ``summarizer.clear`` /
+        ``cursor.clear``）—— transcript 清了，debug 取证也必须同步清，否则 P6.3.A 的
+        ``room_history.turns_index`` / ``fetch_turn_detail`` 仍能把"已清房间"的老
+        turn 与 prompt 喂回前端（典型回归：用户点"清空"后 debug panel 重新填上之前的
+        历史索引）。
+
+        - ``enabled=False`` → early return。
+        - 调用方（``server._clear_room``）已在 inbound 串行循环里 cancel +
+          drain 完 in-flight turn，正常路径 ``self._current`` 必为 None；保险起见
+          这里仍 reset 一次（损坏状态走 :meth:`discard_turn` 同等语义）。
+        - try/except 包到底 + WARN —— 删 IO 失败永远不阻断 clear_room。盘上若残留
+          孤儿文件下次同名 clear 会重试。
+        """
+        if not self.enabled:
+            return
+        assert self._debug_dir is not None
+        self._current = None
+        try:
+            if self._turns_path.is_file():
+                self._turns_path.unlink()
+        except OSError:
+            _log.warning(
+                "TurnRecorder.clear: unlink %r failed", self._turns_path,
+                exc_info=True,
+            )
+        prompts_dir = self._debug_dir / "prompts"
+        if prompts_dir.is_dir():
+            try:
+                shutil.rmtree(prompts_dir)
+            except OSError:
+                _log.warning(
+                    "TurnRecorder.clear: rmtree %r failed", prompts_dir,
+                    exc_info=True,
+                )
+        self._turn_count = 0
 
     def discard_turn(self) -> None:
         """**仅供 recorder 自身状态损坏时调** —— 丢 in-flight 不写 jsonl。

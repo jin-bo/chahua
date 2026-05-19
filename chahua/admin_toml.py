@@ -234,7 +234,9 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
     if debug_dict:
         lines.append("")
         lines.append("[debug]")
-        for key in ("enabled", "capture_prompts"):
+        # 字段顺序固定 enabled / capture_prompts / max_turns —— 与 DebugConfig 字段
+        # 声明顺序一致，用户读 toml 时 [debug] 段视觉稳定（先开关后数值上限）。
+        for key in ("enabled", "capture_prompts", "max_turns"):
             if key in debug_dict:
                 lines.append(f"{key} = {_format_toml_scalar(debug_dict[key])}")
 
