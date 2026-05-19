@@ -312,7 +312,10 @@ class Orchestrator:
             # ``False`` 时整字段不写 key（区分"prompt 捕获关了" vs "prompt 是空"两种
             # 语义，docs §不变量）。
             turn_data: dict[str, Any] = {
-                "scores": [_score_to_dict(s) for s in scores]
+                "scores": [_score_to_dict(s) for s in scores],
+                # 前端调试抽屉折叠态显示 scoring_path 徽标（与 room_history 索引行同款），
+                # 同时透给 piggyback 调试视图。schema_version 不 bump，老前端忽略未知字段。
+                "scoring_path": debug_meta.scoring_path,
             }
             if self._recorder.capture_prompts:
                 # 关键：``@guest`` / ``@all`` 路径绕过 LLM 打分 ⇒ ``prompts_by_guest`` 为空。

@@ -61,7 +61,60 @@
   margin-bottom: 8px;
   font-size: 12px;
   color: #555;
+  cursor: pointer;
+  user-select: none;
 }
+.debug-turn-chevron {
+  display: inline-block;
+  width: 10px;
+  color: #999;
+  font-size: 10px;
+  transition: transform 120ms ease;
+}
+.debug-turn.debug-turn-collapsed .debug-turn-chevron {
+  transform: rotate(-90deg);
+}
+/* 折叠态：除 header 外整 section 子元素隐藏；header 自身仍占位 + 可再次点开。
+   外观完全对齐 ``.debug-history-row``（紧凑米色行 + path 徽标 + winners 纯文本 +
+   N 条计数）—— 折叠后视觉与历史索引行同密度同布局，避免"白色宽卡 + 米色窄行"两
+   种节奏并排造成的视觉断裂。 */
+.debug-turn.debug-turn-collapsed > :not(.debug-turn-header) {
+  display: none;
+}
+.debug-turn.debug-turn-collapsed {
+  padding: 4px 8px;
+  margin-bottom: 2px;
+  background: #fbf8ee;
+}
+.debug-turn.debug-turn-collapsed .debug-turn-header {
+  margin-bottom: 0;
+  font-size: 11px;
+  gap: 8px;
+  color: #555;
+}
+.debug-turn.debug-turn-collapsed .debug-turn-chevron {
+  display: none;
+}
+.debug-turn.debug-turn-collapsed .debug-turn-ts {
+  min-width: 56px;
+}
+.debug-turn.debug-turn-collapsed .debug-winner-badge {
+  display: none;
+}
+.debug-turn.debug-turn-collapsed .debug-turn-winners {
+  color: #333;
+  word-break: break-word;
+}
+
+/* 展开态：path 徽标 / winners 纯文本 / 消息数计数三个仅折叠态可见的元素隐藏。 */
+.debug-turn:not(.debug-turn-collapsed) .debug-turn-path,
+.debug-turn:not(.debug-turn-collapsed) .debug-turn-winners-text,
+.debug-turn:not(.debug-turn-collapsed) .debug-turn-n {
+  display: none;
+}
+
+/* .debug-turn-path / .debug-turn-n 与 .debug-history-* 完全共款（折叠态视觉对齐
+   历史索引行）；选择器并列在 .debug-history-* 节，调色板单点维护。 */
 .debug-turn-ts {
   color: #888;
   font-variant-numeric: tabular-nums;
@@ -282,4 +335,74 @@
   color: #6a4f25;
   word-break: break-all;
   padding: 2px 0;
+}
+
+/* P6.3.A 历史 turn 索引区。``ul.debug-history`` 紧随实时 turn 块之后；倒序最新在
+   顶。轻量行（一行高 ~24px，每行 ~200B DOM），常驻不参与 evict。点击行后 swap 为
+   完整详情卡片（``.debug-history-detail`` 包裹复用 ``.debug-turn`` 同款样式）；
+   evict 时还原成 ``.debug-history-row``，DOM 节点位置不动。 */
+.debug-history {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.debug-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: #555;
+  background: #fbf8ee;
+  border: 1px solid #ece4cf;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.debug-history-row:hover {
+  background: #f0ead9;
+}
+.debug-history-row.debug-history-loading {
+  opacity: 0.6;
+  cursor: progress;
+}
+.debug-history-detail {
+  /* 详情 swap 后，<li> 直接包 ``<section.debug-turn>`` —— 撤掉自身样式，让内部
+     卡片继承既有 .debug-turn 视觉。``margin: 0`` 让内部 section 自己的 margin-bottom
+     生效（展开 12px / 折叠 2px），否则 <li> 自带 margin 会盖掉折叠态的紧凑间距、
+     折叠后与下一行间距停在 12px 而非 2px。 */
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: default;
+}
+.debug-history-ts {
+  color: #888;
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+}
+.debug-history-path,
+.debug-turn-path {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #ece4cf;
+  color: #6a4f25;
+}
+.debug-history-path[data-path="mention"],
+.debug-turn-path[data-path="mention"] { background: #f0d9b8; color: #80531a; }
+.debug-history-path[data-path="broadcast"],
+.debug-turn-path[data-path="broadcast"] { background: #d4e3ec; color: #2a567c; }
+.debug-history-winners {
+  flex: 1;
+  color: #333;
+  word-break: break-word;
+}
+.debug-history-n,
+.debug-turn-n {
+  color: #999;
+  font-variant-numeric: tabular-nums;
 }
