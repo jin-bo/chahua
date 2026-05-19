@@ -179,9 +179,20 @@ class Orchestrator:
     def reset_room(self) -> None:
         """清空房间公共状态：transcript / 摘要 / 游标 + 自身运行时计数器。
 
-        茶客实例 / agentao session 不动 —— 茶客对用户的人设印象、自有笔记保留，但他们
-        在"房间公共记录"里看不到之前发生过什么；游标归零意味着下一条消息会重新走
-        onboarding 路径（重新介绍房间 + 当前在场）。
+        分清两层"茶客记忆"：
+
+        - 进程内对话窗口 = ``agent.messages`` —— 跨 ``arun`` 累加的 user / assistant
+          列表，**必须随 clear 同步清**。否则下一次发言时 LLM 看到的是"clear 前全部
+          对话 + onboarding 重新介绍房间"，前后矛盾，茶客容易出戏。
+        - 跨重启长期记忆 = ``<workdir>/.agentao/memory.db`` —— ``clear_history()`` 不
+          动盘，所以茶客对用户的人设印象 / 自有笔记仍保留，与"清空聊天 ≠ 重置茶客
+          认知"的语义一致。
+
+        ``agent.clear_history()`` 同时清 active skills / todos / token counter ——
+        这几样都是会话窗口内状态（"刚刚还在做的事"），与"重启房间公共视图"语义自洽。
+        异常按茶客隔离吞（一个 agent 坏掉不阻断其它茶客 reset），WARN 落日志。
+
+        游标归零意味着下一条消息会重新走 onboarding 路径（重新介绍房间 + 当前在场）。
 
         ``_summary_task`` 若在跑就 cancel —— 它读了 clear 前的 transcript 切片，跑完
         会把陈旧 SummarySpan append 到刚清空的列表里。cancel 不 await（同 _kick_summarize
@@ -197,6 +208,11 @@ class Orchestrator:
         self._consecutive_ai_turns = 0
         self._rounds_without_user_or_mention = 0
         self._cooldown.clear()
+        for name, entry in self._guests.items():
+            try:
+                entry.guest.agent.clear_history()
+            except Exception:
+                _log.warning("clear_history failed for guest %r", name, exc_info=True)
         if self._summary_task is not None and not self._summary_task.done():
             self._summary_task.cancel()
         self._summary_task = None
