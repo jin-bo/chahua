@@ -77,7 +77,7 @@ def _print_banner(session: RoomSession, *, paths: Paths) -> None:
         f"在场茶客：{'、'.join(parts)}   "
         f"房间默认模型：{spec.provider}/{spec.model}"
     )
-    print("输入回车发送；空行 / /quit 退出；/info 看权限状态；/clear /new 清空聊天；/clear task 清当前任务产物；@<名字> 直接点茶客。")
+    print("输入回车发送；空行 / /quit 退出；/help 看全部命令；@<名字> 直接点茶客。")
     print("─" * 60)
 
 
@@ -90,6 +90,23 @@ def _print_permission_info(guests: list[TeaGuest]) -> None:
             f"(engine.mode={eng.active_mode.value}, "
             f"tool_runner.readonly={runner.readonly_mode})"
         )
+
+
+# 加 / 改命令时 Electron 端 ``HELP_TEXT``（app/renderer/renderer.js）也要同步动。
+_HELP_LINES: tuple[str, ...] = (
+    "chahua 系统命令：",
+    "  /help 或 /?         显示本帮助",
+    "  /info               显示每位茶客的权限模式",
+    "  /quit /exit :q      退出 REPL",
+    "  /clear 或 /new      清空整间房间聊天（重置 transcript / 摘要 / 茶客会话窗口）",
+    "  /clear task         清空当前任务的全部产物（仅删 artifacts/，任务本身保留）",
+    "  @<名字>             绕过打分直接点名一位茶客",
+)
+
+
+def _print_help() -> None:
+    for line in _HELP_LINES:
+        print(line)
 
 
 _KIND_BADGE: dict[str, str] = {
@@ -201,6 +218,9 @@ async def _repl(args: argparse.Namespace) -> int:
                 break
             if text == "/info":
                 _print_permission_info(session.guests)
+                continue
+            if text in ("/help", "/?"):
+                _print_help()
                 continue
             if text in ("/clear", "/new"):
                 # 与 WebSocket 端 ``_clear_room`` 同口径（orchestrator.reset_room +

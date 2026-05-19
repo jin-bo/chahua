@@ -44,6 +44,21 @@
 #messages li.error .speaker { color: #c00; }
 #messages li.error .text { color: #c00; }
 
+/* 系统气泡（``/help`` 等本地 UI 提示）：居中、米黄边、虚框 —— 与茶客 / 用户都不
+   像。不挂头像 / 不挂 speaker / 不进 transcript，刷新即消失。 */
+#messages li.sys { display: flex; justify-content: center; }
+#messages li.sys .bubble-system {
+  background: #fbf8ee;
+  border: 1px dashed #d9cfae;
+  color: #5b4a26;
+  max-width: 80%;
+  font-size: 13px;
+}
+#messages li.sys .bubble-system .text.markdown code {
+  background: #f1ead4;
+  color: #5b4a26;
+}
+
 /* 任务房间消息 chip（P5.2.10）：非 active 任务的消息气泡左上角浮一颗灰 pill，点击
    进入该任务 filter 视图。.bubble 已有 position:relative，chip 直接绝对定位即可。 */
 .message-task-chip {

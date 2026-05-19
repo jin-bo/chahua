@@ -190,6 +190,20 @@ function updateNewTaskBtn() {
 // 不是裸符号。颜色由 .stop 类 + style.css 控制。
 const SEND_ICON = "↑";
 const STOP_ICON = "■";
+
+// ``/help`` 输出文案 —— 用 markdown 渲，居中系统气泡承载。仅列前端支持的命令；
+// CLI 端 ``/quit`` ``/info`` 之类在 chahua/cli.py 的 banner / 自己的 help 里说。
+// 加 / 改命令时这里一并动 + chahua/cli.py 同步。
+const HELP_TEXT = [
+  "**chahua 系统命令**",
+  "",
+  "- `/help` 或 `/?` —— 显示本帮助",
+  "- `/task <标题>` —— 新建任务（已有 active 时服务端会拒）",
+  "- `/clear` 或 `/new` —— 清空整间房间聊天（重置 transcript / 摘要 / 茶客会话窗口）",
+  "- `/clear task` —— 清空当前任务的全部产物（仅删 `artifacts/`，任务本身保留）",
+  "",
+  "_本帮助是本地提示，不进 transcript；刷新 / 切房后消失。_",
+].join("\n");
 function updateSendButton() {
   const busy = currentTurnId !== null;
   submitBtn.textContent = busy ? STOP_ICON : SEND_ICON;
@@ -1231,6 +1245,14 @@ composer.addEventListener("submit", (ev) => {
     return;
   }
   const text = textInput.value.trim();
+  // /help（或 /?）—— 在聊天区里以系统气泡显示可用斜杠命令清单。本地 UI 行为，不
+  // 走 server 帧、不进 transcript；刷新 / 切房 / clear 都会消失。
+  if (text === "/help" || text === "/?") {
+    appendBubble({ kind: "system", text: HELP_TEXT });
+    textInput.value = "";
+    autoResizeTextarea();
+    return;
+  }
   // 斜杠命令 —— /task <title> 走 open_task inbound 而非 user_message。已有任务等
   // server 端拒绝（NOTICE error），前端不重复判定，让两条路径决断口径完全同源。
   if (text.startsWith("/task ") || text === "/task") {

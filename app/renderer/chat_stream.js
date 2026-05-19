@@ -86,11 +86,29 @@ export function createChatStream({
     return li;
   }
 
+  // 居中浮签式系统气泡 —— 不带头像 / 不带 speaker / 不带 message_id；本地 UI 提示
+  // 专用（``/help`` 输出、未来其它 client-only 信息）。**不进 transcript** 也不与
+  // server envelope 流耦合，刷新 / 切房 / clear 都会消失。
+  function makeSystemRow(text) {
+    const li = document.createElement("li");
+    li.className = "sys";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble bubble-system";
+    const t = document.createElement("div");
+    t.className = "text markdown";
+    t.innerHTML = renderMarkdown(text);
+    bubble.appendChild(t);
+    li.appendChild(bubble);
+    return li;
+  }
+
   function appendBubble({ speaker, text, kind, messageId = null, taskId = null }) {
     stickToBottom(() => {
       let li;
       if (kind === "user") {
         li = makeUserRow(text, { messageId, taskId });
+      } else if (kind === "system") {
+        li = makeSystemRow(text);
       } else {
         const row = makeGuestRow(speaker, { messageId, taskId });
         renderGuestText(row, text);
