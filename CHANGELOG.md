@@ -3,6 +3,8 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)；版本号遵循 [SemVer](https://semver.org/)。
 完整发布说明见 [`docs/releases/`](docs/releases/)。
 
+## [Unreleased]
+
 ## [0.1.1] - 2026-05-19
 
 详见 [`docs/releases/v0.1.1.md`](docs/releases/v0.1.1.md)。
