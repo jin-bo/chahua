@@ -281,3 +281,50 @@ body:not(.has-active-task) .pending-file-attach { display: none; }
   color: #a07a3a;
   letter-spacing: 0.5px;
 }
+
+/* P7.1 handoff 队列预览小条 —— composer 卡片上方，左右边距与 #composer 对齐。
+   空队列时 handoff_queue_bar.js 置 hidden，整条不占位。 */
+.handoff-queue-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 12px 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  background: #f3ecda;
+  border: 1px solid #e0d6bd;
+  border-radius: 10px;
+}
+.handoff-queue-bar[hidden] { display: none; }
+.handoff-queue-label { color: #6b4f2a; font-weight: 500; flex-shrink: 0; }
+.handoff-queue-chain {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.handoff-queue-target {
+  color: #5a4520;
+  background: #fff;
+  border: 1px solid #e0d6bd;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.handoff-queue-sep { color: #b3a988; }
+.handoff-queue-clear {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: #c66;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  font-family: inherit;
+}
+.handoff-queue-clear:hover { background: #fbe6e6; border-color: #f5b3b3; }

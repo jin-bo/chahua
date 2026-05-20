@@ -44,6 +44,7 @@ import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
 import { createHandoffPopover } from "./handoff_popover.js";
+import { createHandoffQueueBar } from "./handoff_queue_bar.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import * as handoffState from "./handoff_state.js";
@@ -107,6 +108,7 @@ const debugPanelBodyEl = document.getElementById("debug-panel-body");
 const debugPanelBackBtn = document.getElementById("debug-panel-back");
 const debugPanelClearBtn = document.getElementById("debug-panel-clear");
 const composerTaskChipEl = document.getElementById("composer-task-chip");
+const handoffQueueBarEl = document.getElementById("handoff-queue-bar");
 const newTaskModal = document.getElementById("new-task-modal");
 const newTaskTitleEl = document.getElementById("new-task-title");
 const newTaskGoalEl = document.getElementById("new-task-goal");
@@ -982,6 +984,11 @@ handoffPopover = createHandoffPopover({
   setStatus,
   isConnected: () => connected,
 });
+
+// composer 上方的 handoff 队列预览小条 —— 订阅 handoff_state，队列变即重渲。
+// renderSidebar 的 handoffState.reset() 会触发一次空队列 render 把小条收起。
+const handoffQueueBar = createHandoffQueueBar({ barEl: handoffQueueBarEl, send });
+handoffState.subscribe((queue) => handoffQueueBar.render(queue));
 
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。

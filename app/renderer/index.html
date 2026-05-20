@@ -494,6 +494,9 @@
       <div id="debug-panel-body" class="debug-panel-body"></div>
     </aside>
   </div>
+  <!-- P7.1 handoff 队列预览小条：handoffQueueState 非空时浮现「下一句：A → B」，
+       右侧 ✕ 触发 handoff_clear。空队列时 hidden 不占位。 -->
+  <div id="handoff-queue-bar" class="handoff-queue-bar" hidden></div>
   <form id="composer">
     <input id="file-input" type="file" multiple hidden>
     <ul id="pending-files" class="pending-files" hidden></ul>
