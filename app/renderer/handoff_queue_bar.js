@@ -8,7 +8,7 @@
 
 import { Inbound } from "./events.js";
 
-export function createHandoffQueueBar({ barEl, send }) {
+export function createHandoffQueueBar({ barEl, send, isConnected }) {
   function render(queue) {
     barEl.replaceChildren();
     if (!Array.isArray(queue) || queue.length === 0) {
@@ -46,6 +46,7 @@ export function createHandoffQueueBar({ barEl, send }) {
     clear.textContent = "✕";
     clear.title = "全部取消（取消当前发言 + 清空后续队列）";
     clear.addEventListener("click", () => {
+      if (!isConnected()) return;
       send({ type: Inbound.HANDOFF_CLEAR });
     });
     barEl.appendChild(clear);

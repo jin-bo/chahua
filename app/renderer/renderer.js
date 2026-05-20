@@ -987,7 +987,11 @@ handoffPopover = createHandoffPopover({
 
 // composer 上方的 handoff 队列预览小条 —— 订阅 handoff_state，队列变即重渲。
 // renderSidebar 的 handoffState.reset() 会触发一次空队列 render 把小条收起。
-const handoffQueueBar = createHandoffQueueBar({ barEl: handoffQueueBarEl, send });
+const handoffQueueBar = createHandoffQueueBar({
+  barEl: handoffQueueBarEl,
+  send,
+  isConnected: () => connected,
+});
 handoffState.subscribe((queue) => handoffQueueBar.render(queue));
 
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
