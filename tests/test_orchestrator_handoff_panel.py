@@ -195,6 +195,28 @@ async def test_dead_panel_item_cost_exceeds_max_is_dropped() -> None:
     )
 
 
+async def test_dropping_dead_panel_emits_queue_snapshot() -> None:
+    """codex review P2 回归：drain 清掉死项后必须重发 HANDOFF_ENQUEUED 权威快照，
+    否则前端队列预览只认 enqueued/consumed/cleared 三事件、死 panel 残留不消。
+
+    队列 [panel(C,D,E) cost=3 死项, delegate G]，max_ai=2：死 panel 被 drop 后
+    应有一帧 HANDOFF_ENQUEUED，其 data.queue 不含 panel 项。"""
+    orch, _ = _build("C", "D", "E", "G", max_ai=2)
+    orch.enqueue_handoff(_panel(["C", "D", "E"]))
+    orch.enqueue_handoff(HandoffItem(kind=HandoffKind.DELEGATE, target="G"))
+    captured: list[ChahuaEnvelope] = []
+    await orch.run_pending_handoff(captured.append, task_id=None)
+
+    snapshots = [
+        e for e in captured if e.type is ChahuaEventType.HANDOFF_ENQUEUED
+    ]
+    assert snapshots, "丢弃死项后应重发 HANDOFF_ENQUEUED 快照"
+    kinds_after_drop = [
+        item.get("kind") for item in snapshots[0].data["queue"]
+    ]
+    assert "panel" not in kinds_after_drop
+
+
 async def test_dead_panel_does_not_block_later_runnable_item() -> None:
     """codex review P2 回归：valid 项后面跟一个死 panel、死 panel 后面还有
     runnable 项时，turn 末尾 lookahead 必须先清死项——否则死项让 has_next

@@ -480,7 +480,7 @@ class Orchestrator:
             # 把跑不起来的队首项（死项 / panel 欠员 / winner 全失效）就地清掉，
             # 返回第一个真能产出 turn 的项 + 过滤后 winners + scoring_path
             # （docs §4.1.1 / §4.4）。
-            head = self._advance_to_runnable_handoff()
+            head = self._advance_to_runnable_handoff(sink)
             if head is None:
                 break
             item, winners, scoring_path = head
@@ -547,7 +547,7 @@ class Orchestrator:
             # lookahead 必须走与 drain 主体同一个 _advance_to_runnable_handoff——
             # 否则死项 / 欠员 panel 会让 has_next 误判成"下一轮 AI"，但该项下一轮被
             # 静默 drop、永远不产 turn，客户端卡在 turn_end(next='ai')（codex review P2）。
-            next_runnable = self._advance_to_runnable_handoff()
+            next_runnable = self._advance_to_runnable_handoff(sink)
             if next_runnable is not None:
                 next_cost = self._handoff_cost(next_runnable[0])
                 has_next = (
@@ -875,6 +875,25 @@ class Orchestrator:
             ),
         )
 
+    def _emit_handoff_queue_snapshot(self, sink: EnvelopeSink) -> None:
+        """重发 ``HANDOFF_ENQUEUED`` 权威快照（连接级，``turn_id`` 全 None）。
+
+        drain 内静默 drop 跑不起来的队列项后必须调一次——前端队列镜像只认
+        ``HANDOFF_ENQUEUED`` / ``HANDOFF_CONSUMED`` / ``HANDOFF_CLEARED`` 三事件，
+        ``_advance_to_runnable_handoff`` 直接 ``popleft`` 死项不发事件会让队列预览
+        残留死项、后续 consumed 又对不上位（codex review P2）。``HANDOFF_ENQUEUED``
+        的语义本就是"权威快照、整体替换"（见 ``handoff_state.js``），重发即修正。
+        """
+        emit_to_sink(
+            sink,
+            ChahuaEnvelope(
+                room_id=self.room.name, turn_id=None,
+                guest_name=None, message_id=None,
+                type=ChahuaEventType.HANDOFF_ENQUEUED,
+                data={"queue": [i.to_dict() for i in self._handoff_queue]},
+            ),
+        )
+
     def _compute_trigger(self) -> dict[str, Any]:
         """构造本周期 turns.jsonl 的 ``trigger`` 字段（docs §数据模型）。
 
@@ -990,7 +1009,7 @@ class Orchestrator:
         return 1
 
     def _advance_to_runnable_handoff(
-        self,
+        self, sink: EnvelopeSink,
     ) -> Optional[tuple[HandoffItem, list[str], str]]:
         """从 ``_handoff_queue`` 队首弹掉所有**跑不起来**的项，返回第一个真能产出
         turn 的项 ``(item, 过滤后 winners, scoring_path)``；队列耗尽 → ``None``。
@@ -999,6 +1018,8 @@ class Orchestrator:
         pop + WARN：① 死项（``cost > max_consecutive_ai_turns``，无论计数都跑不动，
         典型成因：入队后用户调低 max）；② panel 欠员（存活 panelist < 2）；
         ③ winner 全失效（delegate / review target 被 ``remove_guest`` 删掉）。
+        丢弃任意项后重发一次 ``HANDOFF_ENQUEUED`` 权威快照，让前端队列预览不残留
+        死项（codex review P2）。
 
         **不**含"此刻预算够不够"的判断——撞 ``_consecutive_ai_turns`` cap（档②）
         的项**能**跑、只是当下不跑，留在队首不弹，由调用方 cap 检查负责。
@@ -1007,32 +1028,45 @@ class Orchestrator:
         否则 lookahead 拿"将被静默 drop 的项"算 ``has_next`` → 误报
         ``turn_end(next='ai')`` → 客户端等一个永不到来的 turn（codex review P2）。
         """
-        while self._handoff_queue:
-            item = self._handoff_queue[0]
-            if self._handoff_cost(item) > self.config.max_consecutive_ai_turns:
-                _log.warning(
-                    "handoff item cost exceeds max_consecutive_ai_turns; "
-                    "dropping: %r", item,
-                )
-                self._handoff_queue.popleft()
-                continue
-            winners, scoring_path = self._resolve_handoff_winners(item)
-            winners = [w for w in winners if w is not None and w in self._guests]
-            if self._panel_underfilled(item, winners):
-                _log.warning(
-                    "panel item underfilled after revalidation; dropping: %r",
-                    item,
-                )
-                self._handoff_queue.popleft()
-                continue
-            if not winners:
-                _log.warning(
-                    "handoff item target unavailable; dropping: %r", item,
-                )
-                self._handoff_queue.popleft()
-                continue
-            return item, winners, scoring_path
-        return None
+        dropped = False
+        try:
+            while self._handoff_queue:
+                item = self._handoff_queue[0]
+                if (
+                    self._handoff_cost(item)
+                    > self.config.max_consecutive_ai_turns
+                ):
+                    _log.warning(
+                        "handoff item cost exceeds max_consecutive_ai_turns; "
+                        "dropping: %r", item,
+                    )
+                    self._handoff_queue.popleft()
+                    dropped = True
+                    continue
+                winners, scoring_path = self._resolve_handoff_winners(item)
+                winners = [
+                    w for w in winners if w is not None and w in self._guests
+                ]
+                if self._panel_underfilled(item, winners):
+                    _log.warning(
+                        "panel item underfilled after revalidation; "
+                        "dropping: %r", item,
+                    )
+                    self._handoff_queue.popleft()
+                    dropped = True
+                    continue
+                if not winners:
+                    _log.warning(
+                        "handoff item target unavailable; dropping: %r", item,
+                    )
+                    self._handoff_queue.popleft()
+                    dropped = True
+                    continue
+                return item, winners, scoring_path
+            return None
+        finally:
+            if dropped:
+                self._emit_handoff_queue_snapshot(sink)
 
     def _resolve_handoff_winners(
         self, item: HandoffItem,
