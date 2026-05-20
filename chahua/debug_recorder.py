@@ -65,8 +65,11 @@ SCORING_PATH_BROADCAST: str = "broadcast"
 SCORING_PATH_HANDOFF_DELEGATE: str = "handoff_delegate"
 """P7.1 显式 delegate 指派路径（drain loop 跑队列）。"""
 SCORING_PATH_HANDOFF_REVIEW: str = "handoff_review"
-"""P7.2 显式 review 请审路径（drain loop 跑队列）。``panel`` 留给 P7.3 加
-``handoff_panel`` 常量。"""
+"""P7.2 显式 review 请审路径（drain loop 跑队列）。"""
+SCORING_PATH_HANDOFF_PANEL: str = "handoff_panel"
+"""P7.3 显式 panel 圆桌路径（drain loop 跑队列）。整个 panel turn（含末位
+summarizer 那一发）的 scoring_path 都是这一条——summarizer 是 turn 的最后一位
+speaker，不是独立 turn（docs/P7.3 §3.6）。"""
 
 VALID_SCORING_PATHS: frozenset[str] = frozenset(
     {
@@ -75,6 +78,7 @@ VALID_SCORING_PATHS: frozenset[str] = frozenset(
         SCORING_PATH_BROADCAST,
         SCORING_PATH_HANDOFF_DELEGATE,
         SCORING_PATH_HANDOFF_REVIEW,
+        SCORING_PATH_HANDOFF_PANEL,
     }
 )
 
