@@ -299,25 +299,42 @@ async def test_panel_mid_turn_cancel_keeps_finished_messages() -> None:
     )
 
 
-def test_resolve_handoff_render_returns_equal_length() -> None:
-    """⑪ _resolve_handoff_render 返回的 winners / winner_blocks 等长。"""
+def test_resolve_winners_and_build_blocks_equal_length() -> None:
+    """⑪ _resolve_handoff_winners + _build_winner_blocks 逐 winner 等长。"""
     orch, _ = _build("C", "D", "E", "F")
     # panel + summarizer
-    winners, path, blocks = orch._resolve_handoff_render(
-        _panel(["C", "D", "E"], summarizer="F"),
-    )
-    assert len(winners) == len(blocks) == 4
+    item = _panel(["C", "D", "E"], summarizer="F")
+    winners, path = orch._resolve_handoff_winners(item)
     assert winners == ["C", "D", "E", "F"]
     assert path == SCORING_PATH_HANDOFF_PANEL
+    blocks = orch._build_winner_blocks(item, winners)
+    assert len(winners) == len(blocks) == 4
     # panel 无 summarizer
-    winners, _, blocks = orch._resolve_handoff_render(_panel(["C", "D"]))
-    assert len(winners) == len(blocks) == 2
+    item = _panel(["C", "D"])
+    winners, _ = orch._resolve_handoff_winners(item)
+    assert len(orch._build_winner_blocks(item, winners)) == len(winners) == 2
     # delegate
-    winners, _, blocks = orch._resolve_handoff_render(
-        HandoffItem(kind=HandoffKind.DELEGATE, target="C"),
-    )
-    assert len(winners) == len(blocks) == 1
-    assert blocks == [None]
+    item = HandoffItem(kind=HandoffKind.DELEGATE, target="C")
+    winners, _ = orch._resolve_handoff_winners(item)
+    assert orch._build_winner_blocks(item, winners) == [None]
+
+
+async def test_removed_panelist_not_listed_in_panel_context() -> None:
+    """codex review P2 回归：queued panel 在 drain 前被 remove_guest 删掉一位
+    panelist，存活 panelist 的 <panel_context> 必须只列存活者、不列被删的茶客。"""
+    orch, _ = _build("C", "D", "E", "F")
+    orch.enqueue_handoff(_panel(["C", "D", "E"], summarizer="F"))
+    # drain 前删掉 E —— 模拟跨 turn 残留项遇上 remove_guest。
+    del orch._guests["E"]
+    await orch.run_pending_handoff(lambda _e: None, task_id=None)
+
+    for name in ("C", "D"):
+        ctx = orch._guests[name].guest.last_ctx or ""
+        assert "<panel_context>" in ctx
+        assert "C、D" in ctx
+        # 被删的 E 不能出现在圆桌成员名单里。
+        assert "C、D、E" not in ctx
+        assert "E" not in ctx.split("参与的茶客是：")[1].split("。")[0]
 
 
 def test_handoff_cost() -> None:

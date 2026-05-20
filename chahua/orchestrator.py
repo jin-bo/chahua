@@ -495,19 +495,11 @@ class Orchestrator:
 
             # kind 三路分流：delegate / review 单目标 cost=1；panel 多目标
             # winners=list(targets)[+summarizer]、cost=N(+1)（docs §4.1）。
-            winners, scoring_path, winner_blocks = self._resolve_handoff_render(item)
-            # winners 与 winner_blocks 必须等长——漏配会让下面 zip 静默截断 speaker。
-            assert len(winners) == len(winner_blocks)
+            winners, scoring_path = self._resolve_handoff_winners(item)
             # 入队时已校验 target / targets 在场；但跨 turn 残留项（cap 撞顶留下的
-            # 队首）可能在用户后续 ``remove_guest`` 后失效。drain 前同步过滤失效
-            # winner（winners 与 winner_blocks 等长，必须同步剔除），避免
-            # ``_let_speak`` 抛 ``KeyError`` 让承运的 user-turn drain 整个 aborts。
-            kept = [
-                (w, b) for w, b in zip(winners, winner_blocks)
-                if w is not None and w in self._guests
-            ]
-            winners = [w for w, _ in kept]
-            winner_blocks = [b for _, b in kept]
+            # 队首）可能在用户后续 ``remove_guest`` 后失效。drain 前过滤失效 winner，
+            # 避免 ``_let_speak`` 抛 ``KeyError`` 让承运的 user-turn drain 整个 aborts。
+            winners = [w for w in winners if w is not None and w in self._guests]
             # panel 过滤后有效 panelist < 2 → 不再是圆桌，丢弃整项（含 summarizer，
             # 它是同 item 字段、不留孤儿，docs §4.4）。
             if self._panel_underfilled(item, winners):
@@ -522,6 +514,10 @@ class Orchestrator:
                     "handoff item target unavailable; dropping: %r", item,
                 )
                 continue
+            # winner_blocks 在过滤之后构造——panel 的 <panel_context> 必须按**存活**
+            # panelist 渲染，否则被移除的茶客会被列进名单（codex review P2）。winners
+            # 与 winner_blocks 由 _build_winner_blocks 逐 winner 构造、天然等长。
+            winner_blocks = self._build_winner_blocks(item, winners)
             turn_id = new_turn_id()
             item_dict = item.to_dict()
             self._recorder.start_turn(
@@ -981,16 +977,18 @@ class Orchestrator:
             "</review_target>"
         )
 
-    def _render_panel_block(self, item: HandoffItem) -> str:
+    def _render_panel_block(self, panelists: list[str]) -> str:
         """P7.3：合成 panel 项的 ``<panel_context>`` 临时块（docs §4.2）。
 
-        列本轮圆桌全体 panelist + 平行发言指引。N 位 panelist **共享同一块**，
-        文案写成位置无关（第一个 / 第 N 个 panelist 读到同一句都通顺）。
-        **不列 summarizer**——它不是 panelist，拿 :data:`_PANEL_SUMMARY_BLOCK`。
+        ``panelists`` 列本轮圆桌全体 panelist + 平行发言指引。N 位 panelist
+        **共享同一块**，文案写成位置无关（第一个 / 第 N 个 panelist 读到同一句都
+        通顺）。**不列 summarizer**——它不是 panelist，拿 :data:`_PANEL_SUMMARY_BLOCK`。
+
+        入参是名字列表（不是 ``HandoffItem``）——调用方在 runtime 过滤后才拼块，
+        保证 ``<panel_context>`` 列的是**存活** panelist（codex review P2）。
         """
-        assert item.targets is not None
         dmap = self._display_map()
-        names = "、".join(dmap.get(t, t) for t in item.targets)
+        names = "、".join(dmap.get(t, t) for t in panelists)
         return (
             "<panel_context>\n"
             f"本轮是一次圆桌平行讨论，参与的茶客是：{names}。\n"
@@ -1032,38 +1030,48 @@ class Orchestrator:
             )
             self._handoff_queue.popleft()
 
-    def _resolve_handoff_render(
+    def _resolve_handoff_winners(
         self, item: HandoffItem,
-    ) -> tuple[list[str], str, list[Optional[list[str]]]]:
-        """按 ``item.kind`` 算 ``(winners, scoring_path, winner_blocks)``（docs §4.1）。
+    ) -> tuple[list[str], str]:
+        """按 ``item.kind`` 算 ``(winners, scoring_path)``（docs §4.1）。
 
-        ``winner_blocks`` 与 ``winners`` **等长对齐**——drain loop 的 speak 循环
-        ``zip`` 两者，逐 winner 取自己的 ``extra_blocks``。delegate / review 单
-        winner 单块；panel 的 panelist 共享 ``<panel_context>``、summarizer 取
-        ``<panel_summary_request>``。纯函数——不 emit、不 await。
+        panel → ``list(targets)[+summarizer]``；delegate / review → ``[target]``。
+        纯函数——不渲染、不 emit、不 await。``winner_blocks`` 由
+        :meth:`_build_winner_blocks` 在 runtime 过滤**之后**单独构造（panel 块要
+        按存活 panelist 渲染，codex review P2）。
         """
         if item.kind is HandoffKind.PANEL:
             assert item.targets is not None
-            panel_block = self._render_panel_block(item)
             winners = list(item.targets)
-            winner_blocks: list[Optional[list[str]]] = [
-                [panel_block] for _ in winners
-            ]
             if item.summarizer is not None:
                 winners.append(item.summarizer)
-                winner_blocks.append([_PANEL_SUMMARY_BLOCK])
-            return winners, SCORING_PATH_HANDOFF_PANEL, winner_blocks
+            return winners, SCORING_PATH_HANDOFF_PANEL
         if item.kind is HandoffKind.REVIEW:
-            return (
-                [item.target],  # type: ignore[list-item]  # 失效项 drain 时过滤
-                SCORING_PATH_HANDOFF_REVIEW,
-                [[self._render_review_block(item)]],
-            )
-        return (
-            [item.target],  # type: ignore[list-item]
-            SCORING_PATH_HANDOFF_DELEGATE,
-            [None],
-        )
+            return [item.target], SCORING_PATH_HANDOFF_REVIEW  # type: ignore[list-item]
+        return [item.target], SCORING_PATH_HANDOFF_DELEGATE  # type: ignore[list-item]
+
+    def _build_winner_blocks(
+        self, item: HandoffItem, winners: list[str],
+    ) -> list[Optional[list[str]]]:
+        """按 ``item.kind`` + **runtime 过滤后**的 ``winners`` 逐 winner 算
+        ``extra_blocks``（docs §4.1）。返回与 ``winners`` 等长——speak 循环 ``zip``
+        两者，逐 winner 取自己的块。
+
+        **必须在过滤之后调**：panel 的 ``<panel_context>`` 按存活 panelist 渲染，
+        否则被 ``remove_guest`` 移除的茶客仍会被列进名单（codex review P2）。
+        panelist 共享一份 ``<panel_context>``、summarizer 取 ``<panel_summary_request>``；
+        delegate 无块、review 单块。
+        """
+        if item.kind is HandoffKind.PANEL:
+            panelists = [w for w in winners if w != item.summarizer]
+            panel_block = self._render_panel_block(panelists)
+            return [
+                [_PANEL_SUMMARY_BLOCK] if w == item.summarizer else [panel_block]
+                for w in winners
+            ]
+        if item.kind is HandoffKind.REVIEW:
+            return [[self._render_review_block(item)]]
+        return [None]
 
     @staticmethod
     def _panel_underfilled(item: HandoffItem, kept_winners: list[str]) -> bool:
