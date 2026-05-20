@@ -45,6 +45,7 @@ import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
+import * as handoffState from "./handoff_state.js";
 import { createTaskPanel } from "./task_panel.js";
 import { createDebugPanel } from "./debug_panel.js";
 import { createSplitter } from "./splitter.js";
@@ -418,6 +419,8 @@ function renderSidebar(roomInfo) {
   proposalCard.reset();
   // 调试抽屉只看实时本会话；切房 / 重连 / 清空 → reset 清 turn 记录。
   debugPanel.reset();
+  // handoff 队列是调度层瞬态（不落盘）—— 切房 / 重连 / 清空都强清，避免旧房队列残留。
+  handoffState.reset();
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
@@ -677,6 +680,17 @@ function handleEnvelope(env) {
       return;
     case EventType.TASK_PROPOSAL:
       proposalCard.onEnvelope(env);
+      return;
+    // P7.1 显式 handoff（docs/P7 §3.3）。三个事件维护本地队列预览；权威状态就是
+    // 队列本身——服务端不落盘，刷新 / 切房在 renderSidebar 里 reset。
+    case EventType.HANDOFF_ENQUEUED:
+      handoffState.applyEnqueued(env.data?.queue ?? []);
+      return;
+    case EventType.HANDOFF_CONSUMED:
+      handoffState.applyConsumed(env.data?.item ?? null);
+      return;
+    case EventType.HANDOFF_CLEARED:
+      handoffState.applyCleared();
       return;
     case EventType.ROOM_EXPORT: {
       const markdown = env.data?.markdown;

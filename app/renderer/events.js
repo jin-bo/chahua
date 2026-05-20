@@ -49,6 +49,14 @@ export const EventType = Object.freeze({
   // 始终存在，最少 ``{}``；单 key 严格三重满足才出现）；``found=false`` 路径
   // ``{found: false}`` —— 被 rotation 清掉 / 协议过期。镜像 chahua/events.py::TURN_DETAIL。
   TURN_DETAIL: "turn_detail",
+  // P7.1 显式 handoff / delegation（docs/P7 §3.3）。队列是调度层瞬态、不进 TASK_INFO；
+  // 前端靠这三个事件维护本地 handoffQueueState「队列预览」，刷新 / 切房即清。
+  //   - HANDOFF_ENQUEUED ``{queue: [item, ...]}`` 权威快照 → 整体替换；
+  //   - HANDOFF_CONSUMED ``{item}`` + 顶层 turn_id → 该项已被消费、从队首移除；
+  //   - HANDOFF_CLEARED  ``{items_dropped: [item, ...]}`` → 队列清空。
+  HANDOFF_ENQUEUED: "handoff_enqueued",
+  HANDOFF_CONSUMED: "handoff_consumed",
+  HANDOFF_CLEARED: "handoff_cleared",
 });
 
 // TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
@@ -123,6 +131,11 @@ export const Inbound = Object.freeze({
   // P6.3.A：按 turn_id 拉历史 turn 详情 + 关联 prompt 文件。payload: {turn_id}。
   // 服务端 regex 校验 ``^turn_[0-9a-f]+$``；未知 / rotation 清掉 → TURN_DETAIL{found=false}。
   FETCH_TURN_DETAIL: "fetch_turn_detail",
+  // P7.1 显式 handoff（docs/P7 §3.2）。HANDOFF_DELEGATE payload {target, reason?}：
+  // reason 是内部备注、不进茶客 prompt。HANDOFF_CLEAR 无 payload —— 全部取消（cancel
+  // 当前 in-flight + 清队列）。入站严格，未知字段服务端 NOTICE error 丢帧。
+  HANDOFF_DELEGATE: "handoff_delegate",
+  HANDOFF_CLEAR: "handoff_clear",
 });
 
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /
