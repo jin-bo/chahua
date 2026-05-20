@@ -32,6 +32,21 @@ const TASK_WRITE_ARTIFACT = "task_write_artifact";
 
 const MAX_TURNS_IN_MEMORY = 50;
 
+// scoring_path 徽标文案 —— scoring / mention / broadcast 沿用既有英文标识；
+// handoff_* 这类对用户不直观的 wire 值给中文短标。data-path 仍存原值供 CSS 配色。
+const SCORING_PATH_LABELS = Object.freeze({
+  handoff_delegate: "指派",
+});
+function scoringPathLabel(path) {
+  return SCORING_PATH_LABELS[path] || path;
+}
+
+// handoff turn 的判定信号 —— scoring_path 以 ``handoff_`` 起头（live turn_start 与
+// 历史 jsonl 都带这个字段，比 trigger.kind 在两条路径上都可用）。
+function isHandoffPath(path) {
+  return typeof path === "string" && path.startsWith("handoff_");
+}
+
 // 跟 .gitignore / docs §不变量同口径：仅 task_write_artifact 派生 artifact 路径。
 // 后续若加新写盘工具按 tool 名扩；不挂 ArtifactDetector。
 //
@@ -420,12 +435,12 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
     ts.className = "debug-history-ts";
     ts.textContent = formatTs(entry.ts_ms);
     li.appendChild(ts);
-    // scoring_path 徽标 —— mention / broadcast / scoring 三档视觉区分。
+    // scoring_path 徽标 —— mention / broadcast / scoring / handoff_delegate 视觉区分。
     if (entry.scoring_path) {
       const path = document.createElement("span");
       path.className = "debug-history-path";
       path.dataset.path = entry.scoring_path;
-      path.textContent = entry.scoring_path;
+      path.textContent = scoringPathLabel(entry.scoring_path);
       li.appendChild(path);
     }
     const w = document.createElement("span");
@@ -619,7 +634,7 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
       const path = document.createElement("span");
       path.className = "debug-turn-path";
       path.dataset.path = turn.scoring_path;
-      path.textContent = turn.scoring_path;
+      path.textContent = scoringPathLabel(turn.scoring_path);
       header.appendChild(path);
     }
 
@@ -655,6 +670,15 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
     }
 
     section.appendChild(header);
+
+    // P7.1：handoff turn 顶部加"由用户指派"提示条，与打分驱动的 turn 一眼区分。
+    // 进 section body（非 header）—— 折叠态随 body 一起收起。
+    if (isHandoffPath(turn.scoring_path)) {
+      const note = document.createElement("div");
+      note.className = "debug-turn-handoff-note";
+      note.textContent = "由用户指派";
+      section.appendChild(note);
+    }
 
     section.appendChild(renderCandidates(turn));
 

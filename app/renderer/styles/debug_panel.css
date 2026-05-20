@@ -71,6 +71,15 @@
   font-size: 10px;
   transition: transform 120ms ease;
 }
+/* P7.1：handoff turn 详情顶部"由用户指派"提示条，与打分 turn 区分。 */
+.debug-turn-handoff-note {
+  margin-bottom: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #5a4520;
+  background: #e3dcc4;
+  border-radius: 4px;
+}
 .debug-turn.debug-turn-collapsed .debug-turn-chevron {
   transform: rotate(-90deg);
 }
@@ -396,6 +405,8 @@
 .debug-turn-path[data-path="mention"] { background: #f0d9b8; color: #80531a; }
 .debug-history-path[data-path="broadcast"],
 .debug-turn-path[data-path="broadcast"] { background: #d4e3ec; color: #2a567c; }
+.debug-history-path[data-path="handoff_delegate"],
+.debug-turn-path[data-path="handoff_delegate"] { background: #e3dcc4; color: #5a4520; }
 .debug-history-winners {
   flex: 1;
   color: #333;
