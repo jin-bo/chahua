@@ -1,8 +1,8 @@
-"""显式 handoff / delegation 数据契约（P7.1 / P7.2，docs/P7-显式 handoff 与 delegation.md §3.1）。
+"""显式 handoff / delegation 数据契约（P7.1 / P7.2 / P7.3，docs/P7-显式 handoff 与 delegation.md §3.1）。
 
 意愿打分（"想接话"自然讨论）之上的**确定性发言指派通道**。P7.1 接 delegate，
-P7.2 加 review（``review_message_id``）；panel 留给 P7.3 阶段加新字段
-（``targets`` / ``panel_group_id``）+ 新 enum 值。
+P7.2 加 review（``review_message_id``）；P7.3 加 panel（圆桌）—— ``targets``
+（N 位 panelist 元组）+ ``summarizer``（可选汇总者）两字段 + ``PANEL`` enum 值。
 
 **承重不变量**（doc §8）：
 
@@ -23,10 +23,16 @@ from .events import now_ms
 
 
 class HandoffKind(str, Enum):
-    """handoff 类型。P7.1 ``delegate``，P7.2 ``review``；``panel`` 留给 P7.3。"""
+    """handoff 类型。P7.1 ``delegate``，P7.2 ``review``，P7.3 ``panel``。"""
 
     DELEGATE = "delegate"
     REVIEW = "review"
+    PANEL = "panel"
+
+
+MAX_PANEL_TARGETS = 4
+"""panel 一项的 panelist 数硬上限（P7.3 起步阶段模块常量，不进 toml，docs §5.5）。
+不含 summarizer —— summarizer 是第 N+1 位，cap 数学单独把它算进 turn 预算（docs §3.3）。"""
 
 
 HANDOFF_ISSUED_BY_USER = "user"
@@ -45,11 +51,21 @@ class HandoffItem:
 
     kind: HandoffKind
     target: Optional[str] = None
+    targets: Optional[tuple[str, ...]] = None
+    """panel 专用：N 位 panelist 名（≥2，docs §3.1）。delegate / review 项恒
+    ``None``。用 ``tuple`` 不用 ``list``——``frozen`` dataclass 只锁字段重绑、不锁
+    内部容器，``list`` 会被外部 caller ``append`` 改掉队列里的 targets。"""
+
+    summarizer: Optional[str] = None
+    """panel 专用：可选的汇总者名（圆桌末位 speaker）。delegate / review 项恒
+    ``None``；panel 项可空可非空。summarizer 是 panel item 自己的字段（不拆成独立
+    入队的第二个 item，docs §5.3），与 panel 同生共死，不会留"孤儿 summarizer"。"""
+
     issued_by: str = HANDOFF_ISSUED_BY_USER
     reason: Optional[str] = None
     review_message_id: Optional[str] = None
-    """review 专用：被审消息的 message_id。delegate 项恒 ``None``；review 项
-    与 ``target`` 同时非空、``reason`` 恒 ``None``（review 无自由文本备注，§2）。
+    """review 专用：被审消息的 message_id。delegate / panel 项恒 ``None``；review
+    项与 ``target`` 同时非空、``reason`` 恒 ``None``（review 无自由文本备注，§2）。
     不做 dataclass 级 kind / 字段互斥校验——构造点只有 inbound handler 一处。"""
 
     created_at_ms: int = field(default_factory=now_ms)
@@ -58,12 +74,13 @@ class HandoffItem:
         """JSON-safe wire 形态。送 envelope / debug record metadata 用。
 
         手写字典与 :meth:`chahua.task.Task.to_jsonl_dict` 同口径——字段顺序固定，
-        ``kind`` 用 ``.value`` 显式序列化。P7.3 加 ``targets`` / ``panel_group_id``
-        字段时一并在此扩。
+        ``kind`` 用 ``.value`` 显式序列化；``targets`` 元组转 ``list`` 给 JSON。
         """
         return {
             "kind": self.kind.value,
             "target": self.target,
+            "targets": list(self.targets) if self.targets is not None else None,
+            "summarizer": self.summarizer,
             "issued_by": self.issued_by,
             "reason": self.reason,
             "review_message_id": self.review_message_id,
