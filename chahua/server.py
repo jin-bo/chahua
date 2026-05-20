@@ -28,7 +28,7 @@ import operator
 import re
 import sys
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Literal, Optional
 
 from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
@@ -46,6 +46,7 @@ from .events import (
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
+from .handoff import HandoffItem, HandoffKind
 from .orchestrator import OrchestratorConfig
 # Re-export 给测试 / 外部调用方（``from chahua.server import _llm_summary`` 路径不变）。
 from .server_room_snapshot import (  # noqa: F401
@@ -121,6 +122,24 @@ INBOUND_CANCEL = "cancel"
 # inbound 口径），turn_id regex 强校验拒穿越（路径片段，``prompts/<turn_id>/*``
 # 后端直接拼字符串）。响应回 TURN_DETAIL envelope。
 INBOUND_FETCH_TURN_DETAIL = "fetch_turn_detail"
+# P7.1.6 显式 handoff inbound（docs/P7 §3.2 / §4.4）。
+# - ``handoff_delegate``：条件性 cancel（in-flight 是 user-turn → drain；
+#   是 handoff drain → 只 append 队尾，drain loop while 自然消费）+ 条件性
+#   启动 wrapper（已有 handoff drain 在跑 → 不启新 task）。
+# - ``handoff_clear``：无差别 cancel + clear（与 cancel 按钮 / add_guest / set_active_task
+#   同口径——"全部取消"是 nuclear 操作，反向评审 v3-#3 简化）。
+INBOUND_HANDOFF_DELEGATE = "handoff_delegate"
+INBOUND_HANDOFF_CLEAR = "handoff_clear"
+
+# Payload 白名单——module-level 与 ``_OPEN_TASK_ALLOWED`` 等 task inbound 常量同
+# 位置（便于 grep，无 ``self.`` lookup 开销）。
+_HANDOFF_DELEGATE_ALLOWED = frozenset({"type", "target", "reason"})
+_HANDOFF_CLEAR_ALLOWED = frozenset({"type"})
+
+# ``_inflight_kind`` 取值——与 ``Literal["user","handoff"]`` 类型签名同口径，
+# 给 callsite 一个有名字面值，避免 6 处 `"user"` / `"handoff"` 散漏改名漂移。
+INFLIGHT_KIND_USER = "user"
+INFLIGHT_KIND_HANDOFF = "handoff"
 
 # ``turn_id`` 形态：与 :func:`chahua.events.new_turn_id` 一致 = ``turn_<10 字节 hex>``。
 # 接受 ``turn_<≥ 1 hex>`` 让未来 ID 字节数变动不需要 inbound 端也跟着改；穿越（``../``）
@@ -202,6 +221,12 @@ class ChahuaServer:
         # 单 client + 单 in-flight 策略下（``user_message`` 在 task 未结束前 drop），
         # 同时只会有一个。
         self._inflight_turn_task: Optional[asyncio.Task[None]] = None
+        # P7.1.6 in-flight 类型标签——与 ``_inflight_turn_task`` 同生命周期，wrapper
+        # finally 同槽清两个。**仅** ``_inbound_handoff_delegate`` 用来判"in-flight
+        # 是否已是 handoff drain"，决定 cancel + 启 wrapper 还是只 append 队尾
+        # （docs §4.4 反向评审 v3-#1：drain 中再 delegate 走 append 不抢占，否则
+        # 队列语义崩——连点 N 次只剩最后一个执行）。
+        self._inflight_kind: Optional[Literal["user", "handoff"]] = None
         # P5.2 inbound handler 四个 slot + 一次性把 wire 路由解析成 bound-method 字典。
         _install_handler_slots(self)
         self._inbound_handlers = _bind_inbound_handlers(self)
@@ -417,6 +442,21 @@ class ChahuaServer:
     def _inflight_alive(self) -> bool:
         return self._inflight_turn_task is not None and not self._inflight_turn_task.done()
 
+    def _set_inflight(
+        self,
+        task: Optional[asyncio.Task[None]],
+        kind: Optional[Literal["user", "handoff"]],
+    ) -> None:
+        """单点设/清 ``(_inflight_turn_task, _inflight_kind)`` 这对耦合状态。
+
+        两字段必须 same-time live or same-time None——否则 ``_inbound_handoff_delegate``
+        里"in-flight 是 user-turn 才 cancel"判定会因 kind 滞后 / task 滞后
+        产生与设计意图相反的行为。assertion 把漂移在写入点炸出来。
+        """
+        assert (task is None) == (kind is None), (task, kind)
+        self._inflight_turn_task = task
+        self._inflight_kind = kind
+
     def _cancel_inflight(self) -> None:
         """通知当前在跑的 turn task 退场，不 await —— cancel 入口要尽快返回让 inbound
         循环继续消费帧。task 完成由 ``_run_turn.finally`` 清 ``_inflight_turn_task``。
@@ -463,9 +503,12 @@ class ChahuaServer:
             不进聊天气泡，切房 / 刷新后从 ``room_history`` 重建时才出现。
         """
         await self._cancel_and_drain_inflight()
-        self._inflight_turn_task = asyncio.create_task(
-            self._run_turn(text, sink, task_id=task_id),
-            name="chahua-synth-turn",
+        self._set_inflight(
+            asyncio.create_task(
+                self._run_turn(text, sink, task_id=task_id),
+                name="chahua-synth-turn",
+            ),
+            INFLIGHT_KIND_USER,
         )
 
     async def _run_turn(
@@ -492,7 +535,24 @@ class ChahuaServer:
         except Exception:
             _log.exception("submit_user_message crashed")
         finally:
-            self._inflight_turn_task = None
+            self._set_inflight(None, None)
+
+    async def _run_handoff_turn(
+        self, sink: EnvelopeSink, *, task_id: Optional[str],
+    ) -> None:
+        """承载一次 handoff drain。结构照搬 :meth:`_run_turn`：cancel-safe + finally
+        同槽清两个，让 cancel / busy 判定与 user-turn 同口径（docs §3.4 反向评审 v3-#3）。
+        """
+        try:
+            await self._session.orchestrator.run_pending_handoff(
+                sink, task_id=task_id,
+            )
+        except asyncio.CancelledError:
+            _log.info("handoff drain cancelled by user")
+        except Exception:
+            _log.exception("handoff drain crashed")
+        finally:
+            self._set_inflight(None, None)
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息到对应 handler。
@@ -650,9 +710,112 @@ class ChahuaServer:
             _log.warning("user_message dropped: previous turn still in flight")
             return
         snapshot_task_id = self.task._snapshot_active_task_id()
-        self._inflight_turn_task = asyncio.create_task(
-            self._run_turn(text, sink, task_id=snapshot_task_id),
-            name="chahua-turn",
+        self._set_inflight(
+            asyncio.create_task(
+                self._run_turn(text, sink, task_id=snapshot_task_id),
+                name="chahua-turn",
+            ),
+            INFLIGHT_KIND_USER,
+        )
+
+    # ── P7.1.6 handoff inbound（docs/P7 §3.2 / §3.4 / §4.4）───────────────
+
+    def _emit_handoff_envelope(
+        self, sink: EnvelopeSink, *, type: ChahuaEventType, data: dict,
+    ) -> None:
+        """连接级 handoff envelope（``turn_id`` / ``message_id`` / ``guest_name``
+        全 None）。``HANDOFF_ENQUEUED`` / ``HANDOFF_CLEARED`` 共用；
+        ``HANDOFF_CONSUMED`` 由 orchestrator 自己 emit（带 turn_id）。
+        """
+        sink(ChahuaEnvelope(
+            room_id=self._session.room.name,
+            turn_id=None, guest_name=None, message_id=None,
+            type=type, data=data,
+        ))
+
+    async def _inbound_handoff_delegate(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """``{"type":"handoff_delegate","target":"<name>","reason":"<optional>"}``。
+
+        条件性 cancel（in-flight 是 user-turn → drain；handoff drain → 不动）+
+        入队 + emit ``HANDOFF_ENQUEUED`` + 条件性启动 wrapper（已有 drain 在跑
+        则不启）。docs §4.4 反向评审 v3-#1。
+        """
+        if not self._reject_unknown_keys(
+            data, _HANDOFF_DELEGATE_ALLOWED,
+            where=INBOUND_HANDOFF_DELEGATE, sink=sink,
+        ):
+            return
+        target = _require_str(data, "target", where=INBOUND_HANDOFF_DELEGATE)
+        if target is None:
+            return
+        reason = data.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_DELEGATE}: reason 必须是 str 或缺省",
+            )
+            return
+        if target not in self._session.orchestrator.guest_names:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_DELEGATE}: target={target!r} 不在场",
+            )
+            return
+
+        # 抢占判定：① user-turn 始终抢；② 已被 cancel / 已 done 的 stale slot 也抢——
+        # ``_cancel_inflight``（``_inbound_cancel`` 走的就是它）只 ``task.cancel()``
+        # 不 await，slot 在 wrapper finally 跑完前仍指着 dying task；下一拍 inbound
+        # 队列若先来一帧 ``handoff_delegate``，``_inflight_kind == "user"`` 判否、
+        # ``_inflight_turn_task is None`` 也判否 → 新入队项无人消费，队列僵死。
+        # ``_cancel_and_drain_inflight`` 自身对 done() 早返、对未 done 的 cancel+await，
+        # 兼容两种 stale 形态。
+        task = self._inflight_turn_task
+        stale = task is not None and (task.done() or task.cancelling())
+        if self._inflight_kind == INFLIGHT_KIND_USER or stale:
+            await self._cancel_and_drain_inflight()
+
+        item = HandoffItem(
+            kind=HandoffKind.DELEGATE, target=target, reason=reason,
+        )
+        snapshot = self._session.orchestrator.enqueue_handoff(item)
+        self._emit_handoff_envelope(
+            sink, type=ChahuaEventType.HANDOFF_ENQUEUED,
+            data={"queue": [i.to_dict() for i in snapshot]},
+        )
+
+        # 已有健康 handoff drain 在跑 → 不启新 task，drain loop while 自然在当前项
+        # 结束后看到队尾新项。stale slot 已在上面被 drain，slot 已 None，会走入这里。
+        if self._inflight_turn_task is None:
+            snapshot_task_id = self.task._snapshot_active_task_id()
+            self._set_inflight(
+                asyncio.create_task(
+                    self._run_handoff_turn(sink, task_id=snapshot_task_id),
+                    name="chahua-handoff-turn",
+                ),
+                INFLIGHT_KIND_HANDOFF,
+            )
+
+    async def _inbound_handoff_clear(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """``{"type":"handoff_clear"}``——无差别 cancel + clear。
+
+        "全部取消"是 nuclear 操作（docs §3.3 反向评审 v3-#3）：cancel 当前
+        in-flight（无论 user-turn 还是 handoff drain，复用 cancel 按钮 / add_guest
+        同口径）+ 清队列剩余 + emit ``HANDOFF_CLEARED``。
+        """
+        if not self._reject_unknown_keys(
+            data, _HANDOFF_CLEAR_ALLOWED,
+            where=INBOUND_HANDOFF_CLEAR, sink=sink,
+        ):
+            return
+        await self._cancel_and_drain_inflight()
+        dropped = self._session.orchestrator.clear_handoff_queue()
+        self._emit_handoff_envelope(
+            sink, type=ChahuaEventType.HANDOFF_CLEARED,
+            data={"items_dropped": [i.to_dict() for i in dropped]},
         )
 
 
@@ -670,6 +833,8 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_CLEAR_ROOM: "_inbound_clear_room",
     INBOUND_USER_MESSAGE: "_inbound_user_message",
     INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
+    INBOUND_HANDOFF_DELEGATE: "_inbound_handoff_delegate",
+    INBOUND_HANDOFF_CLEAR: "_inbound_handoff_clear",
     # admin slot：guest / room / persona / permission。
     INBOUND_ADD_GUEST: "admin._inbound_add_guest",
     INBOUND_REMOVE_GUEST: "admin._inbound_remove_guest",

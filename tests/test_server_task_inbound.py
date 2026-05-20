@@ -41,6 +41,7 @@ def session_and_srv(env_paths):
     srv._session = session  # type: ignore[attr-defined]
     srv._paths = env_paths  # type: ignore[attr-defined]
     srv._inflight_turn_task = None  # type: ignore[attr-defined]
+    srv._inflight_kind = None  # type: ignore[attr-defined]
     # P5.2 inbound handler 切到 slot + 预绑 dispatch 表；object.__new__ 跳 __init__ 后
     # 沿用同一对 helper 装回去，与 ChahuaServer.__init__ 唯一真理源对齐。
     _install_handler_slots(srv)

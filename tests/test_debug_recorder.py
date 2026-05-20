@@ -25,12 +25,14 @@ from chahua._persist import read_jsonl_skip_bad
 from chahua.debug_recorder import (
     NOOP_RECORDER,
     SCORING_PATH_BROADCAST,
+    SCORING_PATH_HANDOFF_DELEGATE,
     SCORING_PATH_MENTION,
     SCORING_PATH_SCORING,
     TOOL_SOURCE_BUILTIN,
     TOOL_SOURCE_MCP,
     TOOL_SOURCE_UNKNOWN,
     TURNS_SCHEMA_VERSION,
+    VALID_SCORING_PATHS,
     TurnRecorder,
     classify_tool_source,
 )
@@ -352,11 +354,13 @@ def test_all_cooldown_path(tmp_path):
     [
         (SCORING_PATH_BROADCAST, ["A", "B"]),
         (SCORING_PATH_MENTION, ["A"]),
+        # handoff_delegate 与 @ 路由同走 threshold=None / ScoreKind.MENTION 口径。
+        (SCORING_PATH_HANDOFF_DELEGATE, ["A"]),
     ],
 )
 def test_mention_and_broadcast_paths(tmp_path, path, winners):
-    """两条 @-路由路径：threshold=None、results kind 全是 ``mention``、scoring_path
-    标签区分单 @ 和 @all。"""
+    """三条确定性路由路径：threshold=None、results kind 全是 ``mention``、
+    scoring_path 标签区分单 @ / @all / handoff_delegate。"""
     rec = TurnRecorder(tmp_path, enabled=True, capture_prompts=False)
     rec.start_turn(
         turn_id="turn_x", task_id=None,
@@ -376,6 +380,33 @@ def test_mention_and_broadcast_paths(tmp_path, path, winners):
     rows = list(read_jsonl_skip_bad(tmp_path / "debug" / "turns.jsonl"))
     assert rows[0]["scoring_path"] == path
     assert rows[0]["scoring"]["winners"] == winners
+
+
+def test_unknown_scoring_path_falls_back_to_scoring(tmp_path):
+    """非白名单 ``scoring_path`` → WARN + 降级为 ``SCORING_PATH_SCORING``。
+    用合成 sentinel 字符串做 probe，不挪用任何"将来真实路径"——否则 P7.2 起
+    `handoff_review` 进白名单会让这条测试为无关原因炸。"""
+    rec = TurnRecorder(tmp_path, enabled=True, capture_prompts=False)
+    rec.start_turn(
+        turn_id="turn_x", task_id=None,
+        trigger={"kind": "user_msg", "ref_seq": 0},
+    )
+    rec.record_scoring(
+        threshold=None, scorables=[], cooled=[],
+        results=[(_make_score("A", 1.0, kind=ScoreKind.MENTION), None)],
+        winners=["A"],
+        scoring_path="__not_a_real_path__",
+    )
+    rec.flush_turn()
+
+    rows = list(read_jsonl_skip_bad(tmp_path / "debug" / "turns.jsonl"))
+    assert rows[0]["scoring_path"] == SCORING_PATH_SCORING
+
+
+def test_handoff_delegate_is_whitelisted():
+    """P7.1.2 白名单回归点：``SCORING_PATH_HANDOFF_DELEGATE`` 必须在
+    :data:`VALID_SCORING_PATHS` 中（否则 :meth:`record_scoring` 会把它默默降级）。"""
+    assert SCORING_PATH_HANDOFF_DELEGATE in VALID_SCORING_PATHS
 
 
 # ── 状态生命周期 ────────────────────────────────────────────────────────────

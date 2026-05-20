@@ -219,6 +219,7 @@ def task_inbound_srv(env_paths, monkeypatch):
     srv._session = session
     srv._paths = env_paths
     srv._inflight_turn_task = None
+    srv._inflight_kind = None
     _install_handler_slots(srv)
     srv._inbound_handlers = _bind_inbound_handlers(srv)
     yield session, srv

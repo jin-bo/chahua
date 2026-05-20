@@ -171,6 +171,7 @@ class _SpyServer(ChahuaServer):
 
     def __init__(self) -> None:  # type: ignore[override]
         self._inflight_turn_task: asyncio.Task | None = None
+        self._inflight_kind: str | None = None
         self.calls: list[tuple[str, dict]] = []
         self.cancel_drain_count = 0
         self.emit_room_info_count = 0

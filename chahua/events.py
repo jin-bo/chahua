@@ -106,6 +106,21 @@ class ChahuaEventType(str, Enum):
     # ``found=false`` 路径 ``{found: false}``（被 rotation 清 / 协议过期）。envelope
     # 顶层 ``turn_id`` 与实时 envelope 同款；其它顶层字段 turn_id 之外为 None。
     TURN_DETAIL = "turn_detail"
+    # P7.1 显式 handoff / delegation（docs/P7-显式 handoff 与 delegation.md §3.3）。
+    # 三者都不挂房间 turn 顶层 ``turn_id`` —— 除了 ``HANDOFF_CONSUMED``：它由
+    # orchestrator 在 drain loop 内 ``_emit_turn(TURN_START)`` 之后 emit，envelope
+    # 顶层 ``turn_id`` 与本轮 turn_start / turn_end 同值（关联取证用）；
+    # ``HANDOFF_ENQUEUED`` / ``HANDOFF_CLEARED`` 由 server inbound handler emit，
+    # 顶层 ``turn_id`` 为 None（队列层瞬态、不属任一 turn）。
+    # data 形状：
+    #   - HANDOFF_ENQUEUED ``{queue: [item.to_dict(), ...]}`` 权威快照，前端
+    #     ``handoffQueueState`` 整体替换；
+    #   - HANDOFF_CONSUMED ``{item: <HandoffItem.to_dict()>}`` 当前消费的项；
+    #   - HANDOFF_CLEARED  ``{items_dropped: [item.to_dict(), ...]}``。
+    # 不进 TASK_INFO（队列是调度层瞬态，刷新即清）；schema_version 不 bump。
+    HANDOFF_ENQUEUED = "handoff_enqueued"
+    HANDOFF_CONSUMED = "handoff_consumed"
+    HANDOFF_CLEARED = "handoff_cleared"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

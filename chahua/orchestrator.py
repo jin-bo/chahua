@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -39,6 +40,7 @@ from .cursor import GuestCursor
 from .debug_recorder import (
     NOOP_RECORDER,
     SCORING_PATH_BROADCAST,
+    SCORING_PATH_HANDOFF_DELEGATE,
     SCORING_PATH_MENTION,
     SCORING_PATH_SCORING,
     PickDebugMeta,
@@ -55,6 +57,7 @@ from .events import (
     new_turn_id,
 )
 from .guest import TeaGuest
+from .handoff import HandoffItem
 from .mentions import BROADCAST_TOKENS, iter_at_positions, matches_at
 from .orchestrator_config import OrchestratorConfig
 from .room import Message, Room
@@ -149,6 +152,11 @@ class Orchestrator:
             room=self.room, tasks_store=tasks_store,
         )
 
+        # P7.1 显式 handoff 队列：FIFO，新指派 append 队尾，drain loop 取队首。
+        # 内存瞬态——crash/重启即丢，用户重指即可；落盘的复杂度（与 transcript
+        # 顺序一致性 / cancel 时机）不值（docs/P7 §3.1）。``reset_room`` 同清。
+        self._handoff_queue: deque[HandoffItem] = deque()
+
     # ── 注册 / 信息 ────────────────────────────────────────────────────
 
     def register(self, guest: TeaGuest, persona_md: str) -> None:
@@ -216,6 +224,28 @@ class Orchestrator:
         if self._summary_task is not None and not self._summary_task.done():
             self._summary_task.cancel()
         self._summary_task = None
+        # P7.1 handoff 队列也属于房间瞬态：用户清房后保留旧指派会让"清空"语义被
+        # 破坏（下一句还是 clear 前的 delegate 目标）。与 transcript / cursor /
+        # summarizer 同口径。
+        self._handoff_queue.clear()
+
+    # ── handoff 队列（P7.1，docs/P7 §3.4）────────────────────────────────
+
+    def enqueue_handoff(self, item: HandoffItem) -> list[HandoffItem]:
+        """append 到队尾；**不**启动执行 / 不 emit envelope。
+
+        envelope emit 职责由 server inbound handler 负责（P7.1.6 加）：handler
+        拿到本方法返回的队列快照后 emit ``HANDOFF_ENQUEUED``；orchestrator 持
+        sink 是 P7 反向评审 v3-#4 明确避免的越权耦合。
+        """
+        self._handoff_queue.append(item)
+        return list(self._handoff_queue)
+
+    def clear_handoff_queue(self) -> list[HandoffItem]:
+        """清空队列；返回被丢项给 server emit ``HANDOFF_CLEARED``。"""
+        dropped = list(self._handoff_queue)
+        self._handoff_queue.clear()
+        return dropped
 
     # ── 主入口 ─────────────────────────────────────────────────────────
 
@@ -260,6 +290,13 @@ class Orchestrator:
         self._rounds_without_user_or_mention = 0
         self._tick_cooldown()
         self._kick_summarize()
+        # P7.1: 先 drain 残留 handoff 队列（FIFO）。若上次 drain 因 ``max_consecutive_ai_turns``
+        # cap 撞顶留下队首，"下次用户触发"应当恢复消费——发普通消息也是用户触发，
+        # 不能让 leftover delegate 被无限跳过（docs §3.4 "下次用户触发"）。``run_pending_handoff``
+        # 入口会再 reset 计数一次，与本函数 4 行前的 reset 是 no-op；drain 用完的 cap 名额
+        # 由 ``_consecutive_ai_turns`` 透传给 ``_run_ai_chain``，总 AI 工作量仍受单一 cap 约束。
+        # 空队列时 ``run_pending_handoff`` 早 return，零开销。
+        await self.run_pending_handoff(sink, task_id=active_task_id)
         await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
 
     # ── AI 链 ─────────────────────────────────────────────────────────
@@ -369,8 +406,7 @@ class Orchestrator:
                     self._consecutive_ai_turns += 1
                     self._rounds_without_user_or_mention += 1
             except asyncio.CancelledError:
-                self._emit_cancel_fixup(sink, turn_id=turn_id)
-                self._recorder.flush_turn()
+                self._cancel_fixup_and_flush(sink, turn_id=turn_id)
                 raise
 
             next_state = (
@@ -397,6 +433,113 @@ class Orchestrator:
             self._tick_cooldown()
             # P5.4 自动归集：扫 active task 的 artifacts/，emit 新文件的 hint + task_info。
             self._kick_detect_new_artifacts(sink, active_task_id)
+
+    # ── handoff drain（P7.1.5，docs/P7 §3.4）─────────────────────────────
+
+    async def run_pending_handoff(
+        self, sink: EnvelopeSink, *, task_id: Optional[str],
+    ) -> None:
+        """专职消费 handoff 队列；与 :meth:`_run_ai_chain` **严格分流，不互相回落**。
+
+        队列空 / 下一项 cap 撞顶 → emit ``turn_end(next='user')`` 后 return，
+        **不回落到 scoring**——这是"delegate 仅本轮独占，下次用户触发才恢复打分"
+        的工程基础（docs §4.3 / §8 不变量）。
+
+        **入口清零计数一次**：handoff 是用户显式触发但不走 ``submit_user_message``，
+        上一轮 AI 到上限时不清零 while 会立刻挡掉 → handoff 永不执行。只清一次，
+        drain loop 内不再清。
+        """
+        if not self._handoff_queue:
+            return
+        self._consecutive_ai_turns = 0
+        self._rounds_without_user_or_mention = 0
+
+        while self._handoff_queue:
+            # peek 队首算 cost；超 cap 不 pop 直接 break——队首留到下次用户触发。
+            # P7.3 panel 时 cost = len(item.targets)。
+            item = self._handoff_queue[0]
+            cost = 1
+            if (
+                self._consecutive_ai_turns + cost
+                > self.config.max_consecutive_ai_turns
+            ):
+                break
+            self._handoff_queue.popleft()
+            # 入队时已校验 target 非空 + 在场（``_inbound_handoff_delegate``）；
+            # 但跨 turn 残留项（cap 撞顶留下的队首）可能在用户后续 ``remove_guest``
+            # 后失效。drain 前再校验一次，避免 ``_let_speak`` 抛 ``KeyError`` 让承运的
+            # user-turn drain 整个 aborts（codex review 回归点）。``target is None``
+            # 兜底防内部测试 / refactor 绕过 inbound 校验入队。
+            if item.target is None or item.target not in self._guests:
+                _log.warning(
+                    "handoff item target %r unavailable; dropping: %r",
+                    item.target, item,
+                )
+                continue
+            winners = [item.target]
+
+            scoring_path = SCORING_PATH_HANDOFF_DELEGATE
+            turn_id = new_turn_id()
+            item_dict = item.to_dict()
+            self._recorder.start_turn(
+                turn_id=turn_id, task_id=task_id,
+                trigger={"kind": "handoff", "handoff_item": item_dict},
+            )
+            # ``ScoreKind.MENTION`` 让 handoff 与 @ 路由在 inner cap / 调试抽屉
+            # 渲染上同口径（确定性单点 / 跳过打分 / 绕 cap）；``scoring_path`` 是
+            # 真正区分维度。
+            score_results = [
+                ScoreResult(
+                    guest_name=name, score=1.0,
+                    kind=ScoreKind.MENTION, raw=scoring_path,
+                )
+                for name in winners
+            ]
+            self._recorder.record_scoring(
+                threshold=None, scorables=[], cooled=[],
+                results=[(r, None) for r in score_results],
+                winners=winners,
+                scoring_path=scoring_path,
+            )
+            self._emit_turn(
+                sink, turn_id=turn_id, type=ChahuaEventType.TURN_START,
+                data={
+                    "scores": [_score_to_dict(r) for r in score_results],
+                    "scoring_path": scoring_path,
+                },
+            )
+            self._emit_handoff_consumed(sink, turn_id=turn_id, item_dict=item_dict)
+
+            try:
+                for name in winners:
+                    await self._let_speak(
+                        name, turn_id=turn_id, sink=sink, task_id=task_id,
+                    )
+                    self._consecutive_ai_turns += 1
+            except asyncio.CancelledError:
+                self._cancel_fixup_and_flush(sink, turn_id=turn_id)
+                raise
+
+            # 末尾顺序对齐 _run_ai_chain（docs §8 不变量）：peek→turn_end→flush→hooks。
+            if self._handoff_queue:
+                next_cost = 1
+                has_next = (
+                    self._consecutive_ai_turns + next_cost
+                    <= self.config.max_consecutive_ai_turns
+                )
+            else:
+                has_next = False
+            next_state = "ai" if has_next else "user"
+            self._emit_turn(
+                sink, turn_id=turn_id, type=ChahuaEventType.TURN_END,
+                data={"next": next_state},
+            )
+            self._recorder.flush_turn()
+            self._kick_summarize()
+            self._tick_cooldown()
+            self._kick_detect_new_artifacts(sink, task_id)
+            if not has_next:
+                return
 
     async def _pick_next_speaker(
         self,
@@ -674,6 +817,32 @@ class Orchestrator:
             type=ChahuaEventType.TURN_END,
             data={"next": "user"},
             status=STATUS_CANCELLED,
+        )
+
+    def _cancel_fixup_and_flush(
+        self, sink: EnvelopeSink, *, turn_id: str,
+    ) -> None:
+        """speak 阶段 cancel 共用 fixup：补 turn_end(cancelled) + flush 半截
+        turns.jsonl 行（``_run_ai_chain`` / ``run_pending_handoff`` 两条 drain
+        路径同步走，避免两处各写一遍漂移）。
+        """
+        self._emit_cancel_fixup(sink, turn_id=turn_id)
+        self._recorder.flush_turn()
+
+    def _emit_handoff_consumed(
+        self, sink: EnvelopeSink, *, turn_id: str, item_dict: dict,
+    ) -> None:
+        """``HANDOFF_CONSUMED`` envelope：顶层 ``turn_id`` 与本轮 turn_start / turn_end
+        同值（关联取证），``data={"item": <HandoffItem.to_dict()>}``。
+        """
+        emit_to_sink(
+            sink,
+            ChahuaEnvelope(
+                room_id=self.room.name, turn_id=turn_id,
+                guest_name=None, message_id=None,
+                type=ChahuaEventType.HANDOFF_CONSUMED,
+                data={"item": item_dict},
+            ),
         )
 
     def _compute_trigger(self) -> dict[str, Any]:
