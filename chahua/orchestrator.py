@@ -41,6 +41,7 @@ from .debug_recorder import (
     NOOP_RECORDER,
     SCORING_PATH_BROADCAST,
     SCORING_PATH_HANDOFF_DELEGATE,
+    SCORING_PATH_HANDOFF_REVIEW,
     SCORING_PATH_MENTION,
     SCORING_PATH_SCORING,
     PickDebugMeta,
@@ -57,10 +58,10 @@ from .events import (
     new_turn_id,
 )
 from .guest import TeaGuest
-from .handoff import HandoffItem
+from .handoff import HandoffItem, HandoffKind
 from .mentions import BROADCAST_TOKENS, iter_at_positions, matches_at
 from .orchestrator_config import OrchestratorConfig
-from .room import Message, Room
+from .room import Message, Room, format_messages
 from .scoring import IntentScorer, ScoreKind, ScoreResult
 from .summarizer import Summarizer, TaskSummaries
 from .task_rendering import score_to_dict as _score_to_dict, wrap_current_task as _wrap_current_task
@@ -74,6 +75,13 @@ _log = logging.getLogger(__name__)
 # ``from chahua.orchestrator import OrchestratorConfig``，定义已搬到 :mod:`.orchestrator_config`
 # 以避免与 :class:`ContextRenderer` 循环依赖。
 __all__ = ["Orchestrator", "OrchestratorConfig"]
+
+
+# P7.2 review：``<review_target>`` 块内的审阅指引文案。被审消息原文由
+# ``format_messages`` 包装后内联在指引之上（docs §4.2）。
+_REVIEW_INSTRUCTION = (
+    "请给出你的审阅意见：可以是「通过」「打回」或具体修改建议，并说明理由。"
+)
 
 
 # ── 茶客注册项 ───────────────────────────────────────────────────────────────
@@ -478,7 +486,14 @@ class Orchestrator:
                 continue
             winners = [item.target]
 
-            scoring_path = SCORING_PATH_HANDOFF_DELEGATE
+            # review / delegate 在调度层同构（单目标 / cost=1 / 跳过打分 / 本轮独占）；
+            # kind 分支只覆盖 scoring_path + extra_blocks 两个值，控制流不动（docs §4.1）。
+            if item.kind is HandoffKind.REVIEW:
+                scoring_path = SCORING_PATH_HANDOFF_REVIEW
+                extra_blocks: Optional[list[str]] = [self._render_review_block(item)]
+            else:
+                scoring_path = SCORING_PATH_HANDOFF_DELEGATE
+                extra_blocks = None
             turn_id = new_turn_id()
             item_dict = item.to_dict()
             self._recorder.start_turn(
@@ -514,6 +529,7 @@ class Orchestrator:
                 for name in winners:
                     await self._let_speak(
                         name, turn_id=turn_id, sink=sink, task_id=task_id,
+                        extra_blocks=extra_blocks,
                     )
                     self._consecutive_ai_turns += 1
             except asyncio.CancelledError:
@@ -767,9 +783,12 @@ class Orchestrator:
         turn_id: str,
         sink: EnvelopeSink,
         task_id: Optional[str] = None,
+        extra_blocks: Optional[list[str]] = None,
     ) -> None:
         entry = self._guests[guest_name]
-        ctx = self._build_context_for(guest_name, task_id=task_id)
+        ctx = self._build_context_for(
+            guest_name, task_id=task_id, extra_blocks=extra_blocks,
+        )
         # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
         # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
         msg = await entry.guest.speak(
@@ -879,12 +898,17 @@ class Orchestrator:
             self._renderer.invalidate_display_cache()
 
     def _build_context_for(
-        self, guest_name: str, *, task_id: Optional[str] = None
+        self,
+        guest_name: str,
+        *,
+        task_id: Optional[str] = None,
+        extra_blocks: Optional[list[str]] = None,
     ) -> str:
         """转发到 :meth:`ContextRenderer.build_context_for`。"""
         self._sync_renderer()
         return self._renderer.build_context_for(
-            guest_name, self.cursor.get(guest_name), task_id=task_id
+            guest_name, self.cursor.get(guest_name),
+            task_id=task_id, extra_blocks=extra_blocks,
         )
 
     def _maybe_render_scoring_task_block(
@@ -897,6 +921,31 @@ class Orchestrator:
         """转发到 :meth:`ContextRenderer.display_map`。"""
         self._sync_renderer()
         return self._renderer.display_map()
+
+    def _render_review_block(self, item: HandoffItem) -> str:
+        """P7.2：合成 review 项的 ``<review_target>`` 临时块（docs §4.2）。
+
+        被审消息走 :func:`format_messages` 渲染——与茶客平时在 ``<recent_messages>`` /
+        打分 transcript 看到的 ``<message>`` 包装一致（CLAUDE.md ``format_messages``
+        不变量）。块只含被审消息原文 + 审阅指引，**不附任务产物清单**。
+
+        ``message_by_id`` 保证命中：inbound 已校验 message_id 存在，``clear_room`` /
+        ``reset_room`` 会清 ``_handoff_queue``——review 项不可能跨"消息消失"存活
+        （docs §4.1 不变量）。查不到即 bug，``assert`` 兜底。
+        """
+        assert item.review_message_id is not None
+        msg = self.room.message_by_id(item.review_message_id)
+        assert msg is not None, (
+            f"review 项 {item.review_message_id!r} 的被审消息缺失——违反 docs §4.1 不变量"
+        )
+        message_xml = format_messages([msg], self._display_map())
+        return (
+            "<review_target>\n"
+            "请你审阅下面这条发言：\n\n"
+            f"{message_xml}\n\n"
+            f"{_REVIEW_INSTRUCTION}\n"
+            "</review_target>"
+        )
 
     def _scoring_transcript(self) -> tuple[str, list[Message]]:
         """转发到 :meth:`ContextRenderer.scoring_transcript`。"""

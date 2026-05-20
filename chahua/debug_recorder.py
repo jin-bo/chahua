@@ -63,8 +63,10 @@ SCORING_PATH_MENTION: str = "mention"
 SCORING_PATH_BROADCAST: str = "broadcast"
 """``@all`` / ``@所有人``（results 中所有 guest 都是 ``kind="mention"``）。"""
 SCORING_PATH_HANDOFF_DELEGATE: str = "handoff_delegate"
-"""P7.1 显式 delegate 指派路径（drain loop 跑队列）。``review`` / ``panel``
-留给 P7.2 / P7.3 阶段加 ``handoff_review`` / ``handoff_panel`` 常量。"""
+"""P7.1 显式 delegate 指派路径（drain loop 跑队列）。"""
+SCORING_PATH_HANDOFF_REVIEW: str = "handoff_review"
+"""P7.2 显式 review 请审路径（drain loop 跑队列）。``panel`` 留给 P7.3 加
+``handoff_panel`` 常量。"""
 
 VALID_SCORING_PATHS: frozenset[str] = frozenset(
     {
@@ -72,6 +74,7 @@ VALID_SCORING_PATHS: frozenset[str] = frozenset(
         SCORING_PATH_MENTION,
         SCORING_PATH_BROADCAST,
         SCORING_PATH_HANDOFF_DELEGATE,
+        SCORING_PATH_HANDOFF_REVIEW,
     }
 )
 

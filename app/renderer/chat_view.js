@@ -139,6 +139,24 @@ export function attachCopyButton(bubble, getText) {
   bubble.appendChild(btn);
 }
 
+// 「请审…」按钮 —— hover 气泡时浮现在右下角（与 .bubble-copy 右上角错开）。仅当消息
+// 已落 transcript（messageId 非空）才挂：用户本地 echo 气泡没有 message_id、请审无锚点
+// （docs/P7.2 §5.3）。点击交给注入的 onRequestReview —— renderer 弹茶客选择菜单后发
+// handoff_review inbound。
+export function attachReviewButton(bubble, messageId, onRequestReview) {
+  if (!messageId) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "bubble-review";
+  btn.title = "加入审阅队列";
+  btn.textContent = "请审…";
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    onRequestReview(messageId, btn);
+  });
+  bubble.appendChild(btn);
+}
+
 // 静态文本渲染 + 挂复制按钮。流式路径不走这里 —— 它要自挂闭包版复制按钮才能动态
 // 读 accumulated 缓冲。
 export function renderGuestText({ textEl, bubble }, text) {

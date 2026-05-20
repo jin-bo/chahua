@@ -36,6 +36,7 @@ const MAX_TURNS_IN_MEMORY = 50;
 // handoff_* 这类对用户不直观的 wire 值给中文短标。data-path 仍存原值供 CSS 配色。
 const SCORING_PATH_LABELS = Object.freeze({
   handoff_delegate: "指派",
+  handoff_review: "请审",
 });
 function scoringPathLabel(path) {
   return SCORING_PATH_LABELS[path] || path;
@@ -671,12 +672,13 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
 
     section.appendChild(header);
 
-    // P7.1：handoff turn 顶部加"由用户指派"提示条，与打分驱动的 turn 一眼区分。
+    // P7.1 / P7.2：handoff turn 顶部加"由用户指派 / 请审"提示条，与打分驱动的 turn
+    // 一眼区分。文案随 scoring_path 派生（delegate→指派 / review→请审）。
     // 进 section body（非 header）—— 折叠态随 body 一起收起。
     if (isHandoffPath(turn.scoring_path)) {
       const note = document.createElement("div");
       note.className = "debug-turn-handoff-note";
-      note.textContent = "由用户指派";
+      note.textContent = "由用户" + scoringPathLabel(turn.scoring_path);
       section.appendChild(note);
     }
 

@@ -17,9 +17,30 @@ def test_round_trip_minimal_delegate() -> None:
         "target": "A",
         "issued_by": HANDOFF_ISSUED_BY_USER,
         "reason": None,
+        "review_message_id": None,
         "created_at_ms": item.created_at_ms,
     }
     assert d["created_at_ms"] > 0
+
+
+def test_round_trip_review() -> None:
+    """P7.2：review 项 round-trip —— target + review_message_id 非空、reason 恒 None。"""
+    item = HandoffItem(
+        kind=HandoffKind.REVIEW, target="B", review_message_id="msg_abc",
+    )
+    d = item.to_dict()
+    assert d == {
+        "kind": "review",
+        "target": "B",
+        "issued_by": HANDOFF_ISSUED_BY_USER,
+        "reason": None,
+        "review_message_id": "msg_abc",
+        "created_at_ms": item.created_at_ms,
+    }
+
+
+def test_delegate_review_message_id_defaults_none() -> None:
+    assert HandoffItem(kind=HandoffKind.DELEGATE, target="A").review_message_id is None
 
 
 def test_reason_is_serialized() -> None:
@@ -39,8 +60,8 @@ def test_handoff_item_is_frozen() -> None:
 
 def test_handoff_kind_enum_rejects_unknown_value() -> None:
     """非法 kind 字符串进 ``HandoffKind`` → ``ValueError`` —— inbound handler
-    解析 wire 字段时靠这条保护。``review`` / ``panel`` 留给 P7.2 / P7.3 加。"""
-    for bad in ("review", "panel", "nope"):
+    解析 wire 字段时靠这条保护。``panel`` 留给 P7.3 加。"""
+    for bad in ("panel", "nope"):
         with pytest.raises(ValueError):
             HandoffKind(bad)
 
@@ -48,3 +69,5 @@ def test_handoff_kind_enum_rejects_unknown_value() -> None:
 def test_handoff_kind_value_is_str() -> None:
     assert HandoffKind.DELEGATE.value == "delegate"
     assert HandoffKind.DELEGATE == "delegate"
+    assert HandoffKind.REVIEW.value == "review"
+    assert HandoffKind.REVIEW == "review"

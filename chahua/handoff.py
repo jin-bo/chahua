@@ -1,8 +1,8 @@
-"""显式 handoff / delegation 数据契约（P7.1，docs/P7-显式 handoff 与 delegation.md §3.1）。
+"""显式 handoff / delegation 数据契约（P7.1 / P7.2，docs/P7-显式 handoff 与 delegation.md §3.1）。
 
-意愿打分（"想接话"自然讨论）之上的**确定性发言指派通道**。P7.1 只接 delegate
-一档；review / panel 留给 P7.2 / P7.3 阶段加新字段（``review_message_id`` /
-``targets`` / ``panel_group_id``）+ 新 enum 值。
+意愿打分（"想接话"自然讨论）之上的**确定性发言指派通道**。P7.1 接 delegate，
+P7.2 加 review（``review_message_id``）；panel 留给 P7.3 阶段加新字段
+（``targets`` / ``panel_group_id``）+ 新 enum 值。
 
 **承重不变量**（doc §8）：
 
@@ -23,9 +23,10 @@ from .events import now_ms
 
 
 class HandoffKind(str, Enum):
-    """handoff 类型。P7.1 仅 ``delegate``；``review`` / ``panel`` 阶段加。"""
+    """handoff 类型。P7.1 ``delegate``，P7.2 ``review``；``panel`` 留给 P7.3。"""
 
     DELEGATE = "delegate"
+    REVIEW = "review"
 
 
 HANDOFF_ISSUED_BY_USER = "user"
@@ -46,19 +47,25 @@ class HandoffItem:
     target: Optional[str] = None
     issued_by: str = HANDOFF_ISSUED_BY_USER
     reason: Optional[str] = None
+    review_message_id: Optional[str] = None
+    """review 专用：被审消息的 message_id。delegate 项恒 ``None``；review 项
+    与 ``target`` 同时非空、``reason`` 恒 ``None``（review 无自由文本备注，§2）。
+    不做 dataclass 级 kind / 字段互斥校验——构造点只有 inbound handler 一处。"""
+
     created_at_ms: int = field(default_factory=now_ms)
 
     def to_dict(self) -> dict:
         """JSON-safe wire 形态。送 envelope / debug record metadata 用。
 
         手写字典与 :meth:`chahua.task.Task.to_jsonl_dict` 同口径——字段顺序固定，
-        ``kind`` 用 ``.value`` 显式序列化。P7.2 / P7.3 加 ``review_message_id`` /
-        ``targets`` / ``panel_group_id`` 字段时一并在此扩。
+        ``kind`` 用 ``.value`` 显式序列化。P7.3 加 ``targets`` / ``panel_group_id``
+        字段时一并在此扩。
         """
         return {
             "kind": self.kind.value,
             "target": self.target,
             "issued_by": self.issued_by,
             "reason": self.reason,
+            "review_message_id": self.review_message_id,
             "created_at_ms": self.created_at_ms,
         }

@@ -131,10 +131,14 @@ export const Inbound = Object.freeze({
   // P6.3.A：按 turn_id 拉历史 turn 详情 + 关联 prompt 文件。payload: {turn_id}。
   // 服务端 regex 校验 ``^turn_[0-9a-f]+$``；未知 / rotation 清掉 → TURN_DETAIL{found=false}。
   FETCH_TURN_DETAIL: "fetch_turn_detail",
-  // P7.1 显式 handoff（docs/P7 §3.2）。HANDOFF_DELEGATE payload {target, reason?}：
-  // reason 是内部备注、不进茶客 prompt。HANDOFF_CLEAR 无 payload —— 全部取消（cancel
-  // 当前 in-flight + 清队列）。入站严格，未知字段服务端 NOTICE error 丢帧。
+  // P7.1 / P7.2 显式 handoff（docs/P7 §3.2 / docs/P7.2 §3.2）。
+  //   - HANDOFF_DELEGATE {target, reason?}：reason 是内部备注、不进茶客 prompt。
+  //   - HANDOFF_REVIEW {target, message_id}：请某茶客审阅指定历史消息；无 reason
+  //     字段——语义锚就是 message_id。
+  //   - HANDOFF_CLEAR 无 payload —— 全部取消（cancel 当前 in-flight + 清队列）。
+  // 入站严格，未知字段服务端 NOTICE error 丢帧。
   HANDOFF_DELEGATE: "handoff_delegate",
+  HANDOFF_REVIEW: "handoff_review",
   HANDOFF_CLEAR: "handoff_clear",
 });
 

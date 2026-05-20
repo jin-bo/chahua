@@ -80,10 +80,17 @@ class ContextRenderer:
         last_seen: int,
         *,
         task_id: Optional[str] = None,
+        extra_blocks: Optional[list[str]] = None,
     ) -> str:
         """组 prompt 上下文。``task_id`` 是 Orchestrator 入口的 snapshot 值（不读当前
         store.active），P5.3.2 起注入到 task block；不存在 / 终结态由
         :meth:`maybe_render_task_block` 过滤后返 ``None``。
+
+        ``extra_blocks``（P7.2）：调用方现场合成的临时块（如 ``<review_target>``），
+        按列表顺序原样注入到 ``<speak_instruction>`` 之前；onboarding / incremental
+        两条路径同步生效。渲染器纯转发——不认识块语义、不重排。与永久块
+        （``<current_task>`` / ``<order_hint>``）是两个独立机制：后者由 ``_render_*``
+        内部按 ``task_id`` 决定，不走 ``extra_blocks``。
         """
         increment = self.room.messages_since(last_seen)
         use_onboarding = (
@@ -93,8 +100,14 @@ class ContextRenderer:
             task_id, compact=not use_onboarding
         )
         if use_onboarding:
-            return self._render_onboarding(guest_name, increment, task_block=task_block)
-        return self._render_incremental(guest_name, increment, task_block=task_block)
+            return self._render_onboarding(
+                guest_name, increment,
+                task_block=task_block, extra_blocks=extra_blocks,
+            )
+        return self._render_incremental(
+            guest_name, increment,
+            task_block=task_block, extra_blocks=extra_blocks,
+        )
 
     # ── task block 取数 + 渲染 ─────────────────────────────────────────
 
@@ -196,6 +209,7 @@ class ContextRenderer:
         increment: list[Message],
         *,
         task_block: Optional[tuple[str, str]] = None,
+        extra_blocks: Optional[list[str]] = None,
     ) -> str:
         """首次 / 长间隔回归路径：5+ 个 XML 块拼成 user message。
 
@@ -264,6 +278,8 @@ class ContextRenderer:
                 "</recent_messages>"
             )
 
+        if extra_blocks:
+            blocks.extend(extra_blocks)
         blocks.append(self._speak_instruction_block(guest_name))
 
         return "\n\n".join(blocks) + "\n"
@@ -274,6 +290,7 @@ class ContextRenderer:
         increment: list[Message],
         *,
         task_block: Optional[tuple[str, str]] = None,
+        extra_blocks: Optional[list[str]] = None,
     ) -> str:
         """短间隔回归路径：``<room_update>`` + 可选 ``<current_task>`` + ``<order_hint>`` + ``<speak_instruction>``。
 
@@ -293,6 +310,8 @@ class ContextRenderer:
         if task_block:
             blocks.append(wrap_current_task(task_block))
             blocks.append(_SPEAK_ORDER_HINT_BLOCK)
+        if extra_blocks:
+            blocks.extend(extra_blocks)
         blocks.append(self._speak_instruction_block(guest_name))
         return "\n\n".join(blocks) + "\n"
 

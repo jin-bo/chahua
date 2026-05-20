@@ -30,6 +30,10 @@ rooms/**/debug/
 agentao.log
 agentao.log.*
 
+# Claude Code 本机运行时状态（scheduled_tasks.lock 含 sessionId / pid / 进程起始时间），
+# per-machine 不入仓——否则别的 checkout 会继承陈旧锁 + 本地会话元数据。
+.claude/
+
 # 头像源图（高清原图）。压缩版（128px ~30KB）在 chahua/personas/<name>.png，
 # 跟 persona .md 一起 commit；原图保留在本地作为可重新压缩的来源。
 docs/personas/*.png

@@ -242,6 +242,31 @@
 .bubble-user .bubble-copy { background: rgba(232, 244, 232, 0.92); }
 .bubble-user .bubble-copy:hover { background: #fff; }
 
+/* P7.2「请审…」按钮 —— 与 .bubble-copy 同款 hover 浮现，定位在右下角避开右上角的
+   复制按钮。仅挂在带 message_id 的气泡上（attachReviewButton 内部守卫）。 */
+.bubble-review {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: inherit;
+  color: #888;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #d0c8b4;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.bubble:hover .bubble-review,
+.bubble-review:focus { opacity: 1; }
+.bubble-review:hover { background: #fff; color: #333; }
+.bubble-user .bubble-review { background: rgba(232, 244, 232, 0.92); }
+.bubble-user .bubble-review:hover { background: #fff; }
+
 /* status tail（[中断] / [出错] / [连接断开]）—— textEl sibling，markdown 之外，
    半透明灰把它从主消息内容里"退一步"。 */
 .bubble .status-tail {

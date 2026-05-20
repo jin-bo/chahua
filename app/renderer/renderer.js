@@ -264,6 +264,26 @@ function showHandoffPopover(anchor, guestName) {
   handoffPopover?.show(anchor, guestName);
 }
 
+// P7.2「请审…」—— 点消息气泡的请审按钮触发。复用 action popover 当茶客选择菜单：
+// 每位茶客一项（含被审消息作者自己——自审合法、不屏蔽），选中即发 handoff_review。
+// anchor 是请审按钮本身；message_id 由 chat_stream 经 attachReviewButton 透传上来。
+function requestReview(messageId, anchorBtn) {
+  if (!connected) return;
+  if (guests.length === 0) {
+    setStatus("error", "房间里没有茶客 —— 无法请审");
+    return;
+  }
+  showActionPopover(anchorBtn, "请审这条 —— 交给", guests.map((g) => ({
+    label: g.name,
+    onClick: () => {
+      // 菜单是异步的——用户从弹出菜单里选茶客时连接可能已断，落点再查一次。
+      if (!connected) return;
+      send({ type: Inbound.HANDOFF_REVIEW, target: g.name, message_id: messageId });
+      setStatus("", `已请「${g.name}」审阅这条发言`);
+    },
+  })));
+}
+
 // ── 消息上的任务 chip + filter 视图（P5.2.10）─────────────────────────────
 //
 // chip 状态随 taskState 变 —— task_panel 没把消息 chip 文案当模块状态存（DOM 即真
@@ -420,6 +440,7 @@ const {
   makeUserAvatar,
   stickToBottom,
   afterAppendMessage,
+  onRequestReview: requestReview,
 });
 
 // ── sidebar 装配（room_info）────────────────────────────────────────

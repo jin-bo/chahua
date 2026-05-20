@@ -11,6 +11,7 @@
 import { Status } from "./events.js";
 import {
   attachCopyButton,
+  attachReviewButton,
   isSelectionInside,
   removeStreamingCursor,
   renderGuestText,
@@ -28,6 +29,7 @@ export function createChatStream({
   makeUserAvatar,
   stickToBottom,
   afterAppendMessage,
+  onRequestReview,
 }) {
   // 流式 in-flight 状态：message_id → { textEl, li, bubble, accumulated }。
   // 由本模块封装；外部只通过 :func:`closeInFlightOnDisconnect` 一键清空。
@@ -38,7 +40,7 @@ export function createChatStream({
   // 整段重渲；cursor 与状态尾走 sibling 节点，避开 innerHTML 替换的擦除。
   //
   // 打分不挂在气泡里 —— 沿 sidebar 茶客名右侧显示（renderer.applyScoresToSidebar）。
-  function makeGuestRow(speaker, { streaming = false, messageId = null, taskId = null } = {}) {
+  function makeGuestRow(speaker, { streaming = false, messageId = null, taskId = null, review = true } = {}) {
     const li = document.createElement("li");
     li.className = "msg";
     if (messageId) li.dataset.messageId = messageId;
@@ -63,6 +65,11 @@ export function createChatStream({
       bubble.appendChild(cursor);
     }
     li.appendChild(bubble);
+    // streaming 期间 message_id 已知，但 server 尚未把消息 append 进 transcript ——
+    // 此刻挂「请审…」会让用户在长流式里点出 `_inbound_handoff_review` 的 ID 不存在
+    // 错误。流式气泡的请审按钮延后到 endStreamingMessage（仅 OK 时消息落盘）。
+    // `review=false` 让 cancelled/error 气泡也不挂 —— 那些 message_id 同样不进 transcript。
+    if (!streaming && review) attachReviewButton(bubble, messageId, onRequestReview);
     return { li, textEl, bubble };
   }
 
@@ -81,6 +88,7 @@ export function createChatStream({
     t.textContent = text;
     bubble.appendChild(t);
     attachCopyButton(bubble, () => text);
+    attachReviewButton(bubble, messageId, onRequestReview);
     li.appendChild(bubble);
     li.appendChild(makeUserAvatar("msg-avatar"));
     return li;
@@ -176,7 +184,8 @@ export function createChatStream({
         return;
       }
       const partial = env.data?.partial_text ?? "";
-      const row = makeGuestRow(speaker, { messageId: env.message_id, taskId });
+      // cancelled/error 的 message_id 不进 transcript —— 不挂请审按钮。
+      const row = makeGuestRow(speaker, { messageId: env.message_id, taskId, review: false });
       renderGuestText(row, partial);
       row.li.classList.add("error");
       setStatusTail(row.bubble, statusTail(env));
@@ -189,6 +198,11 @@ export function createChatStream({
     inFlight.delete(env.message_id);
     stickToBottom(() => {
       removeStreamingCursor(m.bubble);
+      // 仅 OK 时消息已落 transcript，请审按钮此刻才有合法锚点（见 makeGuestRow）；
+      // cancelled/error 的 message_id 不进 transcript，挂了点击必被 server 拒。
+      if (env.status === Status.OK) {
+        attachReviewButton(m.bubble, env.message_id, onRequestReview);
+      }
       if (env.status !== Status.OK) {
         m.li.classList.add("error");
         setStatusTail(m.bubble, statusTail(env));

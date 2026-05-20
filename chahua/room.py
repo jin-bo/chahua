@@ -225,6 +225,18 @@ class Room:
         """最后一条消息；空房间返回 None。"""
         return self._messages[-1] if self._messages else None
 
+    def message_by_id(self, message_id: str) -> Optional[Message]:
+        """按 ``message_id`` 线性查找；未命中返回 ``None``。
+
+        P7.2 review（请审）用户手点低频动作，O(n) 扫一遍 transcript 远低于"维护
+        ``_by_message_id`` dict 在 append / clear / load 三处同步"的冗余状态成本
+        （CLAUDE.md "能 derive 就不缓存" 口径）。
+        """
+        for m in self._messages:
+            if m.message_id == message_id:
+                return m
+        return None
+
     @property
     def latest_seq(self) -> int:
         """最后一条消息的 seq；空房间返回 0。"""

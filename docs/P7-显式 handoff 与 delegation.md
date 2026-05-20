@@ -789,7 +789,7 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 | 阶段 | 内容 | 依赖 | 说明 |
 |---|---|---|---|
 | **P7.1** | **delegate only**：内存队列；`enqueue_handoff` + `run_pending_handoff`；server `_inbound_handoff_delegate`；扩展 `scoring_path` enum；UI 茶客侧栏 ⇨ 按钮 + 队列预览；cancel 同步 | 无 | **不碰** task.owner / AI propose / `[panel]` toml |
-| **P7.2** | review：UI 消息气泡"请审…"按钮触发（自带 `message_id`，`scope=message` 唯一档）；`extra_blocks` 参数 + `<review_target>` 块（onboarding/incremental 两条路径都接） | P7.1 | **不开** `last` / `task` / slash `@msg_id`；右键复制 message_id 仅调试用 |
+| **P7.2** | review：UI 消息气泡"请审…"按钮触发（自带 `message_id`，`scope=message` 唯一档）；`extra_blocks` 参数 + `<review_target>` 块（onboarding/incremental 两条路径都接）。**详细设计见 [`P7.2-请审 review.md`](P7.2-请审%20review.md)** | P7.1 | **不开** `last` / `task` / slash `@msg_id`；右键复制 message_id 仅调试用 |
 | **P7.3** | panel：HandoffItem 持 `targets` 元组（`to_dict` 转 list） 一项跑一个 turn；串行 + `<panel_context>` 注入；`MAX_PANEL_TARGETS = 4` **硬编码常量**；summarizer 作为下一个 delegate 入队；UI 圆桌模式 | P7.1 | **不开** `[panel]` toml / `default_summarizer` / `parallel_prompt_hint` 开关 |
 | **P7.4** | AI propose handoff（`task_propose_handoff` 工具 + `TASK_PROPOSAL` kind="handoff" + 前端卡片 kind 分支） | P7.1–7.3 | 最后开；基础动作稳了再放大 |
 | **P7.5（可选）** | delegate 联动 `task.owner`（勾选"同时设为负责人" + scoring owner bonus） | P7.1 + task | 独立小项，与 P7.1 解耦可后补 |
@@ -1031,3 +1031,4 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 **P7.1 完结条件**：上面 12 个 commit 全部合入 + E2E walkthrough 通过 + CLAUDE.md 加 4 条不变量。
 做完 P7.1 才动 P7.2 review，不抢跑（P7.2 改动面在 `<review_target>` 块注入 + UI 气泡按钮，
 与 P7.1 解耦但**复用** drain loop + wrapper —— P7.1 的承重墙稳了才能让 P7.2 加 kind 不出乱）。
+

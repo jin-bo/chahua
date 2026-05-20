@@ -26,6 +26,7 @@ from chahua.debug_recorder import (
     NOOP_RECORDER,
     SCORING_PATH_BROADCAST,
     SCORING_PATH_HANDOFF_DELEGATE,
+    SCORING_PATH_HANDOFF_REVIEW,
     SCORING_PATH_MENTION,
     SCORING_PATH_SCORING,
     TOOL_SOURCE_BUILTIN,
@@ -354,13 +355,14 @@ def test_all_cooldown_path(tmp_path):
     [
         (SCORING_PATH_BROADCAST, ["A", "B"]),
         (SCORING_PATH_MENTION, ["A"]),
-        # handoff_delegate 与 @ 路由同走 threshold=None / ScoreKind.MENTION 口径。
+        # handoff_delegate / handoff_review 与 @ 路由同走 threshold=None / MENTION 口径。
         (SCORING_PATH_HANDOFF_DELEGATE, ["A"]),
+        (SCORING_PATH_HANDOFF_REVIEW, ["A"]),
     ],
 )
 def test_mention_and_broadcast_paths(tmp_path, path, winners):
-    """三条确定性路由路径：threshold=None、results kind 全是 ``mention``、
-    scoring_path 标签区分单 @ / @all / handoff_delegate。"""
+    """确定性路由路径：threshold=None、results kind 全是 ``mention``、
+    scoring_path 标签区分单 @ / @all / handoff_delegate / handoff_review。"""
     rec = TurnRecorder(tmp_path, enabled=True, capture_prompts=False)
     rec.start_turn(
         turn_id="turn_x", task_id=None,
@@ -403,10 +405,11 @@ def test_unknown_scoring_path_falls_back_to_scoring(tmp_path):
     assert rows[0]["scoring_path"] == SCORING_PATH_SCORING
 
 
-def test_handoff_delegate_is_whitelisted():
-    """P7.1.2 白名单回归点：``SCORING_PATH_HANDOFF_DELEGATE`` 必须在
-    :data:`VALID_SCORING_PATHS` 中（否则 :meth:`record_scoring` 会把它默默降级）。"""
+def test_handoff_paths_are_whitelisted():
+    """P7.1.2 / P7.2.2 白名单回归点：``handoff_delegate`` / ``handoff_review``
+    必须在 :data:`VALID_SCORING_PATHS` 中（否则 :meth:`record_scoring` 会默默降级）。"""
     assert SCORING_PATH_HANDOFF_DELEGATE in VALID_SCORING_PATHS
+    assert SCORING_PATH_HANDOFF_REVIEW in VALID_SCORING_PATHS
 
 
 # ── 状态生命周期 ────────────────────────────────────────────────────────────

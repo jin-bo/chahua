@@ -8,6 +8,13 @@
 
 import { Inbound } from "./events.js";
 
+// 队列项 kind → 预览后缀。镜像 chahua/handoff.py::HandoffKind 取值；未知 kind
+// （老前端遇新枚举）落空串、只显茶客名，不报错。
+const KIND_SUFFIX = Object.freeze({
+  delegate: "（指派）",
+  review: "（请审）",
+});
+
 export function createHandoffQueueBar({ barEl, send, isConnected }) {
   function render(queue) {
     barEl.replaceChildren();
@@ -33,8 +40,10 @@ export function createHandoffQueueBar({ barEl, send, isConnected }) {
       }
       const target = document.createElement("span");
       target.className = "handoff-queue-target";
-      target.textContent = (item && item.target) || "?";
+      const name = (item && item.target) || "?";
+      target.textContent = name + ((item && KIND_SUFFIX[item.kind]) || "");
       // reason 是内部备注：仅 hover title 显示，不进茶客 prompt、不铺在条上。
+      // review 项无 reason 字段，自然不挂 title。
       if (item && item.reason) target.title = `理由：${item.reason}`;
       chain.appendChild(target);
     });

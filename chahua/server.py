@@ -122,18 +122,22 @@ INBOUND_CANCEL = "cancel"
 # inbound 口径），turn_id regex 强校验拒穿越（路径片段，``prompts/<turn_id>/*``
 # 后端直接拼字符串）。响应回 TURN_DETAIL envelope。
 INBOUND_FETCH_TURN_DETAIL = "fetch_turn_detail"
-# P7.1.6 显式 handoff inbound（docs/P7 §3.2 / §4.4）。
+# P7.1.6 / P7.2.6 显式 handoff inbound（docs/P7 §3.2 / §4.4，docs/P7.2 §3.2）。
 # - ``handoff_delegate``：条件性 cancel（in-flight 是 user-turn → drain；
 #   是 handoff drain → 只 append 队尾，drain loop while 自然消费）+ 条件性
 #   启动 wrapper（已有 handoff drain 在跑 → 不启新 task）。
+# - ``handoff_review``：校验完字段后与 delegate 共用
+#   ``_enqueue_handoff_and_maybe_start``（抢占 / 入队 / 启动单点维护）。
 # - ``handoff_clear``：无差别 cancel + clear（与 cancel 按钮 / add_guest / set_active_task
 #   同口径——"全部取消"是 nuclear 操作，反向评审 v3-#3 简化）。
 INBOUND_HANDOFF_DELEGATE = "handoff_delegate"
+INBOUND_HANDOFF_REVIEW = "handoff_review"
 INBOUND_HANDOFF_CLEAR = "handoff_clear"
 
 # Payload 白名单——module-level 与 ``_OPEN_TASK_ALLOWED`` 等 task inbound 常量同
 # 位置（便于 grep，无 ``self.`` lookup 开销）。
 _HANDOFF_DELEGATE_ALLOWED = frozenset({"type", "target", "reason"})
+_HANDOFF_REVIEW_ALLOWED = frozenset({"type", "target", "message_id"})
 _HANDOFF_CLEAR_ALLOWED = frozenset({"type"})
 
 # ``_inflight_kind`` 取值——与 ``Literal["user","handoff"]`` 类型签名同口径，
@@ -764,29 +768,40 @@ class ChahuaServer:
             )
             return
 
-        # 抢占判定：① user-turn 始终抢；② 已被 cancel / 已 done 的 stale slot 也抢——
-        # ``_cancel_inflight``（``_inbound_cancel`` 走的就是它）只 ``task.cancel()``
-        # 不 await，slot 在 wrapper finally 跑完前仍指着 dying task；下一拍 inbound
-        # 队列若先来一帧 ``handoff_delegate``，``_inflight_kind == "user"`` 判否、
-        # ``_inflight_turn_task is None`` 也判否 → 新入队项无人消费，队列僵死。
-        # ``_cancel_and_drain_inflight`` 自身对 done() 早返、对未 done 的 cancel+await，
-        # 兼容两种 stale 形态。
+        item = HandoffItem(
+            kind=HandoffKind.DELEGATE, target=target, reason=reason,
+        )
+        await self._enqueue_handoff_and_maybe_start(item, sink)
+
+    async def _enqueue_handoff_and_maybe_start(
+        self, item: HandoffItem, sink: EnvelopeSink,
+    ) -> None:
+        """handoff inbound 的共享尾段：抢占 in-flight → 入队 → emit
+        ``HANDOFF_ENQUEUED`` → 条件性启动 drain wrapper。delegate / review
+        （/ P7.3 panel）各 handler 校验完自己的字段、构造好 ``HandoffItem`` 后
+        都走这里——承重逻辑单点维护（docs/P7 §4.4 反向评审 v3-#1）。
+
+        抢占判定：① user-turn 始终抢；② 已被 cancel / 已 done 的 stale slot 也抢——
+        ``_cancel_inflight``（``_inbound_cancel`` 走的就是它）只 ``task.cancel()``
+        不 await，slot 在 wrapper finally 跑完前仍指着 dying task；下一拍 inbound
+        若先来一帧 handoff，``_inflight_kind == "user"`` 判否、``_inflight_turn_task
+        is None`` 也判否 → 新入队项无人消费，队列僵死。``_cancel_and_drain_inflight``
+        自身对 done() 早返、对未 done 的 cancel+await，兼容两种 stale 形态。
+
+        已有健康 handoff drain 在跑 → 不启新 task，drain loop while 自然在当前项
+        结束后看到队尾新项；stale slot 已在上面被 drain，slot 已 None 会启新 task。
+        """
         task = self._inflight_turn_task
         stale = task is not None and (task.done() or task.cancelling())
         if self._inflight_kind == INFLIGHT_KIND_USER or stale:
             await self._cancel_and_drain_inflight()
 
-        item = HandoffItem(
-            kind=HandoffKind.DELEGATE, target=target, reason=reason,
-        )
         snapshot = self._session.orchestrator.enqueue_handoff(item)
         self._emit_handoff_envelope(
             sink, type=ChahuaEventType.HANDOFF_ENQUEUED,
             data={"queue": [i.to_dict() for i in snapshot]},
         )
 
-        # 已有健康 handoff drain 在跑 → 不启新 task，drain loop while 自然在当前项
-        # 结束后看到队尾新项。stale slot 已在上面被 drain，slot 已 None，会走入这里。
         if self._inflight_turn_task is None:
             snapshot_task_id = self.task._snapshot_active_task_id()
             self._set_inflight(
@@ -796,6 +811,58 @@ class ChahuaServer:
                 ),
                 INFLIGHT_KIND_HANDOFF,
             )
+
+    async def _inbound_handoff_review(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """``{"type":"handoff_review","target":"<name>","message_id":"<msg>"}``。
+
+        review（请审）：B 下一轮被指派审阅某条已落 transcript 的发言。校验完字段后
+        与 delegate 共用 :meth:`_enqueue_handoff_and_maybe_start`（抢占 / 入队 / 启动）。
+
+        三道校验（任一失败 → NOTICE error + 不入队）：target 非空 str / target 在场 /
+        message_id 非空 str 且 ``room.message_by_id`` 命中（拒 stale / 伪造 id，
+        同时是 docs/P7.2 §4.1"drain 时被审消息保证存在"不变量的工程基础）。
+        """
+        if not self._reject_unknown_keys(
+            data, _HANDOFF_REVIEW_ALLOWED,
+            where=INBOUND_HANDOFF_REVIEW, sink=sink,
+        ):
+            return
+        # target / message_id 非法都走 NOTICE error（不复用只 WARN 的 _require_str）——
+        # docs/P7.2 §3.2 三道校验"任一失败 → NOTICE error"，静默丢帧会让坏 payload
+        # "看起来什么都没发生"。
+        target = data.get("target")
+        if not isinstance(target, str) or not target:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_REVIEW}: target 必须是非空 str",
+            )
+            return
+        if target not in self._session.orchestrator.guest_names:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_REVIEW}: target={target!r} 不在场",
+            )
+            return
+        message_id = data.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_REVIEW}: message_id 必须是非空 str",
+            )
+            return
+        if self._session.room.message_by_id(message_id) is None:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_REVIEW}: message_id={message_id!r} 不存在",
+            )
+            return
+
+        item = HandoffItem(
+            kind=HandoffKind.REVIEW, target=target, review_message_id=message_id,
+        )
+        await self._enqueue_handoff_and_maybe_start(item, sink)
 
     async def _inbound_handoff_clear(
         self, data: dict, sink: EnvelopeSink,
@@ -834,6 +901,7 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_USER_MESSAGE: "_inbound_user_message",
     INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
     INBOUND_HANDOFF_DELEGATE: "_inbound_handoff_delegate",
+    INBOUND_HANDOFF_REVIEW: "_inbound_handoff_review",
     INBOUND_HANDOFF_CLEAR: "_inbound_handoff_clear",
     # admin slot：guest / room / persona / permission。
     INBOUND_ADD_GUEST: "admin._inbound_add_guest",
