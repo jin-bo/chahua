@@ -37,6 +37,7 @@ const MAX_TURNS_IN_MEMORY = 50;
 const SCORING_PATH_LABELS = Object.freeze({
   handoff_delegate: "指派",
   handoff_review: "请审",
+  handoff_panel: "圆桌",
 });
 function scoringPathLabel(path) {
   return SCORING_PATH_LABELS[path] || path;
@@ -672,13 +673,16 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
 
     section.appendChild(header);
 
-    // P7.1 / P7.2：handoff turn 顶部加"由用户指派 / 请审"提示条，与打分驱动的 turn
-    // 一眼区分。文案随 scoring_path 派生（delegate→指派 / review→请审）。
+    // P7.1 / P7.2 / P7.3：handoff turn 顶部加"由用户指派 / 请审 / 发起圆桌"提示条，
+    // 与打分驱动的 turn 一眼区分。delegate / review 的 label 是动词短语（指派 /
+    // 请审），panel 的 label 是名词（圆桌）—— 提示条单独给它补「发起」。
     // 进 section body（非 header）—— 折叠态随 body 一起收起。
     if (isHandoffPath(turn.scoring_path)) {
       const note = document.createElement("div");
       note.className = "debug-turn-handoff-note";
-      note.textContent = "由用户" + scoringPathLabel(turn.scoring_path);
+      note.textContent = turn.scoring_path === "handoff_panel"
+        ? "由用户发起圆桌"
+        : "由用户" + scoringPathLabel(turn.scoring_path);
       section.appendChild(note);
     }
 

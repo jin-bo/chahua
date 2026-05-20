@@ -15,7 +15,17 @@ import {
   positionPopoverByAnchor,
 } from "./ui_popover.js";
 
-export function createPanelPopover({ send, setStatus, isConnected }) {
+// 镜像 chahua/handoff.py::MAX_PANEL_TARGETS。
+export const MAX_PANEL_TARGETS = 4;
+
+// panel 一项的 panelist 数上限 —— 镜像服务端 §3.3 cap 数学
+// min(MAX_PANEL_TARGETS, max_consecutive_ai_turns - 有无 summarizer)。
+// 客户端预校验少一次往返；服务端五道校验仍是权威。
+export function panelTargetCap(maxAiTurns, hasSummarizer) {
+  return Math.min(MAX_PANEL_TARGETS, maxAiTurns - (hasSummarizer ? 1 : 0));
+}
+
+export function createPanelPopover({ send, setStatus, isConnected, getMaxAiTurns }) {
   let isOpen = false;
   let detachDismiss = null;
 
@@ -86,9 +96,26 @@ export function createPanelPopover({ send, setStatus, isConnected }) {
     confirm.textContent = "发起";
     confirm.addEventListener("click", (ev) => {
       ev.stopPropagation();
+      if (confirm.disabled) return;
       submit(panelists, summSelect.value, onSubmitted);
     });
     pop.appendChild(confirm);
+
+    // cap 预校验 —— 选 summarizer 会让 has_summ=1、cap 收紧，故随下拉变化重算。
+    function refreshConfirm() {
+      const n = panelists.length;
+      const cap = panelTargetCap(getMaxAiTurns(), Boolean(summSelect.value));
+      let reason = "";
+      if (n < 2) reason = "至少需要 2 位茶客";
+      else if (n > cap) {
+        reason = `圆桌人数 ${n} 超出上限 ${cap}（受 max_consecutive_ai_turns `
+          + `与上限 ${MAX_PANEL_TARGETS} 约束）——请减少茶客或去掉汇总者`;
+      }
+      confirm.disabled = Boolean(reason);
+      confirm.title = reason;
+    }
+    summSelect.addEventListener("change", refreshConfirm);
+    refreshConfirm();
 
     document.body.appendChild(pop);
     positionPopoverByAnchor(pop, anchor);

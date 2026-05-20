@@ -44,7 +44,7 @@ import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
 import { createHandoffPopover } from "./handoff_popover.js";
-import { createPanelPopover } from "./panel_popover.js";
+import { createPanelPopover, panelTargetCap } from "./panel_popover.js";
 import { createHandoffQueueBar } from "./handoff_queue_bar.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
@@ -156,6 +156,9 @@ let userDisplayName = "我";
 let userAvatarDataUri = null;
 // 可用 persona 候选（room_info 来时装）—— "添加茶客" / "新建房间"的 picker 用。
 let personasAvailable = []; // [{persona, name, avatar_data_uri}, ...]
+// 房间生效的 max_consecutive_ai_turns（room_info.orchestrator 来时装）—— 圆桌
+// cap 预校验用；缺省 4 与 config.py 默认一致。
+let maxAiTurns = 4;
 
 // 茶客头像 —— 按名字在 guests 数组里 find；茶客 ≤ 个位数，线性查比维护并行 Map 简单
 // （且任何 guests 变更都自动跟上）。
@@ -595,9 +598,14 @@ function renderPanelLaunch() {
   btn.type = "button";
   btn.className = "panel-launch-btn";
   btn.textContent = `发起圆桌（${n}）`;
+  // 上限按"未选 summarizer"乐观估；选了 summarizer 后 popover 里再按 has_summ 收紧。
+  const cap = panelTargetCap(maxAiTurns, false);
   if (n < 2) {
     btn.disabled = true;
     btn.title = "至少勾选 2 位茶客";
+  } else if (n > cap) {
+    btn.disabled = true;
+    btn.title = `圆桌人数 ${n} 超出上限 ${cap}（受 max_consecutive_ai_turns=${maxAiTurns} 约束）`;
   }
   btn.addEventListener("click", () => {
     if (!connected || btn.disabled) return;
@@ -678,6 +686,7 @@ function renderSidebar(roomInfo) {
   renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
+  maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 4;
   renderGuests();
   renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
   // room_info 到达 → composer 解锁；之前 onopen 不再 enable，避免 userDisplayName
@@ -1151,6 +1160,7 @@ panelPopover = createPanelPopover({
   send,
   setStatus,
   isConnected: () => connected,
+  getMaxAiTurns: () => maxAiTurns,
 });
 
 // composer 上方的 handoff 队列预览小条 —— 订阅 handoff_state，队列变即重渲。

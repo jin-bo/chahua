@@ -406,7 +406,9 @@
 .debug-history-path[data-path="broadcast"],
 .debug-turn-path[data-path="broadcast"] { background: #d4e3ec; color: #2a567c; }
 .debug-history-path[data-path="handoff_delegate"],
-.debug-turn-path[data-path="handoff_delegate"] { background: #e3dcc4; color: #5a4520; }
+.debug-turn-path[data-path="handoff_delegate"],
+.debug-history-path[data-path="handoff_panel"],
+.debug-turn-path[data-path="handoff_panel"] { background: #e3dcc4; color: #5a4520; }
 .debug-history-winners {
   flex: 1;
   color: #333;
