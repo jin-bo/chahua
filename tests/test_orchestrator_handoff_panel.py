@@ -195,6 +195,29 @@ async def test_dead_panel_item_cost_exceeds_max_is_dropped() -> None:
     )
 
 
+async def test_dead_panel_does_not_block_later_runnable_item() -> None:
+    """codex review P2 回归：valid 项后面跟一个死 panel、死 panel 后面还有
+    runnable 项时，turn 末尾 lookahead 必须先清死项——否则死项让 has_next
+    误判提前 return，把 runnable 项挡到下次用户触发。
+
+    队列 [delegate A, panel(C,D,E) cost=3, delegate B]，max_ai=2：A 跑完后
+    死 panel（cost 3 > 2）应被清掉，B 照常跑。"""
+    orch, _ = _build("A", "C", "D", "E", "B", max_ai=2)
+    orch.enqueue_handoff(HandoffItem(kind=HandoffKind.DELEGATE, target="A"))
+    orch.enqueue_handoff(_panel(["C", "D", "E"]))  # cost 3 > max 2 → 死项
+    orch.enqueue_handoff(HandoffItem(kind=HandoffKind.DELEGATE, target="B"))
+    captured: list[ChahuaEnvelope] = []
+    await orch.run_pending_handoff(captured.append, task_id=None)
+
+    # A 和 B 都跑了、死 panel 被清、队列空。
+    spoken = [
+        e.guest_name for e in captured
+        if e.type is ChahuaEventType.MESSAGE_END
+    ]
+    assert spoken == ["A", "B"]
+    assert len(orch._handoff_queue) == 0
+
+
 async def test_underfilled_panel_dropped_no_orphan_summarizer() -> None:
     """⑦ panelist 过滤到 1 人 → 整项丢弃（含 summarizer，队列里不留孤儿）。"""
     orch, _ = _build("C", "F")  # D / E 未注册 → 过滤后只剩 C

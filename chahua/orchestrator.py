@@ -477,21 +477,14 @@ class Orchestrator:
         self._rounds_without_user_or_mention = 0
 
         while self._handoff_queue:
+            # 档① 死项就地清（docs §4.1.1）：cost > max 的项无论计数如何都跑不动，
+            # _drop_dead_handoff_items pop+drop+WARN，**不挡后面 runnable 项**。
+            self._drop_dead_handoff_items()
+            if not self._handoff_queue:
+                break
             item = self._handoff_queue[0]
             cost = self._handoff_cost(item)
-            # 两档 cap 检查（docs §4.1.1），次序不能反：
-            # ① cost 本身超 max → 此项永远跑不动（死项，典型成因：入队后用户调低
-            #    max）→ pop + drop + WARN。禁止 break——死项会永久挡住队首 + 挡死
-            #    后续所有队列项，"下次用户触发"也救不了。
-            if cost > self.config.max_consecutive_ai_turns:
-                _log.warning(
-                    "handoff item cost %d exceeds max_consecutive_ai_turns=%d; "
-                    "dropping: %r", cost, self.config.max_consecutive_ai_turns,
-                    item,
-                )
-                self._handoff_queue.popleft()
-                continue
-            # ② 没超 max 本身、只是此刻 _consecutive_ai_turns 占了预算 → break、
+            # 档② 没超 max 本身、只是此刻 _consecutive_ai_turns 占了预算 → break、
             #    留队首，下次用户触发 + drain 入口清零后能跑。
             if (
                 self._consecutive_ai_turns + cost
@@ -575,6 +568,9 @@ class Orchestrator:
                 raise
 
             # 末尾顺序对齐 _run_ai_chain（docs §8 不变量）：peek→turn_end→flush→hooks。
+            # lookahead 前先清死项——否则队首死项会让 has_next 误判"无下一项"提前
+            # return，把后面 runnable 项挡到下次用户触发（codex review P2）。
+            self._drop_dead_handoff_items()
             if self._handoff_queue:
                 next_cost = self._handoff_cost(self._handoff_queue[0])
                 has_next = (
@@ -1013,6 +1009,28 @@ class Orchestrator:
             assert item.targets is not None
             return len(item.targets) + (item.summarizer is not None)
         return 1
+
+    def _drop_dead_handoff_items(self) -> None:
+        """从 ``_handoff_queue`` 队首弹掉所有"死项"（档①，docs §4.1.1）。
+
+        ``cost > max_consecutive_ai_turns`` 的项无论 ``_consecutive_ai_turns``
+        多少都跑不动（典型成因：入队后用户调低 max）→ pop + drop + WARN。
+
+        drain loop 两处调：① while 顶（死项不挡队首）；② turn 末尾 lookahead 前
+        —— 否则队首死项会让 ``has_next`` 误判"无下一项"提前 return，把后面
+        runnable 项挡到下次用户触发（codex review P2）。**禁止 break 死项**：会
+        永久挡住队首 + 挡死后续队列项，"下次用户触发"也救不了。
+        """
+        while self._handoff_queue:
+            item = self._handoff_queue[0]
+            cost = self._handoff_cost(item)
+            if cost <= self.config.max_consecutive_ai_turns:
+                return
+            _log.warning(
+                "handoff item cost %d exceeds max_consecutive_ai_turns=%d; "
+                "dropping: %r", cost, self.config.max_consecutive_ai_turns, item,
+            )
+            self._handoff_queue.popleft()
 
     def _resolve_handoff_render(
         self, item: HandoffItem,
