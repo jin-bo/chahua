@@ -46,7 +46,7 @@ from .events import (
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
-from .handoff import HandoffItem, HandoffKind
+from .handoff import MAX_PANEL_TARGETS, HandoffItem, HandoffKind
 from .orchestrator import OrchestratorConfig
 # Re-export 给测试 / 外部调用方（``from chahua.server import _llm_summary`` 路径不变）。
 from .server_room_snapshot import (  # noqa: F401
@@ -128,16 +128,20 @@ INBOUND_FETCH_TURN_DETAIL = "fetch_turn_detail"
 #   启动 wrapper（已有 handoff drain 在跑 → 不启新 task）。
 # - ``handoff_review``：校验完字段后与 delegate 共用
 #   ``_enqueue_handoff_and_maybe_start``（抢占 / 入队 / 启动单点维护）。
+# - ``handoff_panel``（P7.3）：圆桌——多 panelist + 可选 summarizer，五道校验 +
+#   cap 数学；仍是单 item 入队，走同一个 ``_enqueue_handoff_and_maybe_start``。
 # - ``handoff_clear``：无差别 cancel + clear（与 cancel 按钮 / add_guest / set_active_task
 #   同口径——"全部取消"是 nuclear 操作，反向评审 v3-#3 简化）。
 INBOUND_HANDOFF_DELEGATE = "handoff_delegate"
 INBOUND_HANDOFF_REVIEW = "handoff_review"
+INBOUND_HANDOFF_PANEL = "handoff_panel"
 INBOUND_HANDOFF_CLEAR = "handoff_clear"
 
 # Payload 白名单——module-level 与 ``_OPEN_TASK_ALLOWED`` 等 task inbound 常量同
 # 位置（便于 grep，无 ``self.`` lookup 开销）。
 _HANDOFF_DELEGATE_ALLOWED = frozenset({"type", "target", "reason"})
 _HANDOFF_REVIEW_ALLOWED = frozenset({"type", "target", "message_id"})
+_HANDOFF_PANEL_ALLOWED = frozenset({"type", "targets", "summarizer"})
 _HANDOFF_CLEAR_ALLOWED = frozenset({"type"})
 
 # ``_inflight_kind`` 取值——与 ``Literal["user","handoff"]`` 类型签名同口径，
@@ -864,6 +868,86 @@ class ChahuaServer:
         )
         await self._enqueue_handoff_and_maybe_start(item, sink)
 
+    async def _inbound_handoff_panel(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """``{"type":"handoff_panel","targets":[...],"summarizer":"<name>"?}``。
+
+        圆桌（P7.3）：N 位 panelist + 可选 summarizer 在同一个 turn 串行各发一次。
+        五道校验（任一失败 → NOTICE error + 不入队，docs/P7.3 §3.3）：targets 是
+        ``list[非空 str]`` / ``len ≥ 2`` / 无重复且全在场 / summarizer（若有）在场
+        且不在 targets / cap 数学（panel turn 的 N(+1) 轮 ≤
+        ``max_consecutive_ai_turns``）。校验通过后构造**一个** ``HandoffItem``，与
+        delegate / review 共用 :meth:`_enqueue_handoff_and_maybe_start`。
+        """
+        if not self._reject_unknown_keys(
+            data, _HANDOFF_PANEL_ALLOWED,
+            where=INBOUND_HANDOFF_PANEL, sink=sink,
+        ):
+            return
+
+        def _err(text: str) -> None:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_HANDOFF_PANEL}: {text}",
+            )
+
+        orch = self._session.orchestrator
+        guest_names = orch.guest_names
+        # ① targets 是 list[非空 str]。
+        targets = data.get("targets")
+        if not isinstance(targets, list) or not all(
+            isinstance(t, str) and t for t in targets
+        ):
+            _err("targets 必须是非空字符串的列表")
+            return
+        # ② panel 至少 2 人（单人圆桌语义为零、等价 delegate，应当用 /delegate）。
+        if len(targets) < 2:
+            _err("圆桌至少需要 2 位茶客")
+            return
+        # ③ 无重复 + 全在场。
+        if len(set(targets)) != len(targets):
+            _err("targets 含重复茶客")
+            return
+        absent = [t for t in targets if t not in guest_names]
+        if absent:
+            _err(f"targets 含不在场茶客：{absent}")
+            return
+        # ④ summarizer（若有）非空 str、在场、不在 targets——summarizer 汇总的是
+        #    **别人**的圆桌发言，自指会让 <panel_summary_request> 语义混乱。
+        summarizer = data.get("summarizer")
+        if summarizer is not None:
+            if not isinstance(summarizer, str) or not summarizer:
+                _err("summarizer 必须是非空 str 或缺省")
+                return
+            if summarizer not in guest_names:
+                _err(f"summarizer={summarizer!r} 不在场")
+                return
+            if summarizer in targets:
+                _err("summarizer 不能同时是 panelist")
+                return
+        # ⑤ cap 数学：panel turn 的 cost=N(+1) 必须 ≤ max_consecutive_ai_turns，
+        #    叠加 MAX_PANEL_TARGETS token 上限，取小。这是"能不能跑"的静态判断；
+        #    "此刻跑不跑得动"由 drain while-entry cap 检查负责（docs §3.3）。
+        has_summ = 1 if summarizer else 0
+        max_ai = orch.config.max_consecutive_ai_turns
+        cap = min(MAX_PANEL_TARGETS, max_ai - has_summ)
+        if len(targets) > cap:
+            _err(
+                f"圆桌人数 {len(targets)} 超出上限 {cap}（受 "
+                f"max_consecutive_ai_turns={max_ai} 与 "
+                f"MAX_PANEL_TARGETS={MAX_PANEL_TARGETS} 约束）；"
+                "请减少茶客或去掉汇总者"
+            )
+            return
+
+        item = HandoffItem(
+            kind=HandoffKind.PANEL,
+            targets=tuple(targets),
+            summarizer=summarizer,
+        )
+        await self._enqueue_handoff_and_maybe_start(item, sink)
+
     async def _inbound_handoff_clear(
         self, data: dict, sink: EnvelopeSink,
     ) -> None:
@@ -902,6 +986,7 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
     INBOUND_HANDOFF_DELEGATE: "_inbound_handoff_delegate",
     INBOUND_HANDOFF_REVIEW: "_inbound_handoff_review",
+    INBOUND_HANDOFF_PANEL: "_inbound_handoff_panel",
     INBOUND_HANDOFF_CLEAR: "_inbound_handoff_clear",
     # admin slot：guest / room / persona / permission。
     INBOUND_ADD_GUEST: "admin._inbound_add_guest",
