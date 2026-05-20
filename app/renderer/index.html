@@ -32,10 +32,13 @@
       <div class="sidebar-section">
         <div class="sidebar-title">
           <span>茶客</span>
+          <button id="panel-mode-toggle" type="button" class="sidebar-add" title="圆桌模式：多选茶客发起一场平行讨论" disabled>🔄</button>
           <button id="import-persona" type="button" class="sidebar-add" title="导入新 persona（本地目录 / GitHub）" disabled>↓</button>
           <button id="add-guest" type="button" class="sidebar-add" title="添加茶客" disabled>+</button>
         </div>
         <ul id="guests"></ul>
+        <!-- P7.3 圆桌多选模式下浮现「发起圆桌(N)」按钮；非圆桌模式 hidden 不占位。 -->
+        <div id="panel-launch" class="panel-launch" hidden></div>
       </div>
       <div class="sidebar-section">
         <div class="sidebar-title">

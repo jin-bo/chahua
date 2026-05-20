@@ -15,6 +15,19 @@ const KIND_SUFFIX = Object.freeze({
   review: "（请审）",
 });
 
+// 队列项 → 预览文案。delegate / review 是单 target；panel 是自描述单项
+// （docs/P7.3 §6.2），列 targets + 可选 summarizer，不做相邻分组。
+function itemPreviewText(item) {
+  if (!item) return "?";
+  if (item.kind === "panel") {
+    const targets = Array.isArray(item.targets) ? item.targets : [];
+    let text = `🔄 圆桌：${targets.join("、") || "?"}`;
+    if (item.summarizer) text += ` → 汇总:${item.summarizer}`;
+    return text;
+  }
+  return (item.target || "?") + (KIND_SUFFIX[item.kind] || "");
+}
+
 export function createHandoffQueueBar({ barEl, send, isConnected }) {
   function render(queue) {
     barEl.replaceChildren();
@@ -40,10 +53,9 @@ export function createHandoffQueueBar({ barEl, send, isConnected }) {
       }
       const target = document.createElement("span");
       target.className = "handoff-queue-target";
-      const name = (item && item.target) || "?";
-      target.textContent = name + ((item && KIND_SUFFIX[item.kind]) || "");
+      target.textContent = itemPreviewText(item);
       // reason 是内部备注：仅 hover title 显示，不进茶客 prompt、不铺在条上。
-      // review 项无 reason 字段，自然不挂 title。
+      // review / panel 项无 reason 字段，自然不挂 title。
       if (item && item.reason) target.title = `理由：${item.reason}`;
       chain.appendChild(target);
     });
