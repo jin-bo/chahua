@@ -477,12 +477,13 @@ class Orchestrator:
         self._rounds_without_user_or_mention = 0
 
         while self._handoff_queue:
-            # 档① 死项就地清（docs §4.1.1）：cost > max 的项无论计数如何都跑不动，
-            # _drop_dead_handoff_items pop+drop+WARN，**不挡后面 runnable 项**。
-            self._drop_dead_handoff_items()
-            if not self._handoff_queue:
+            # 把跑不起来的队首项（死项 / panel 欠员 / winner 全失效）就地清掉，
+            # 返回第一个真能产出 turn 的项 + 过滤后 winners + scoring_path
+            # （docs §4.1.1 / §4.4）。
+            head = self._advance_to_runnable_handoff()
+            if head is None:
                 break
-            item = self._handoff_queue[0]
+            item, winners, scoring_path = head
             cost = self._handoff_cost(item)
             # 档② 没超 max 本身、只是此刻 _consecutive_ai_turns 占了预算 → break、
             #    留队首，下次用户触发 + drain 入口清零后能跑。
@@ -493,27 +494,6 @@ class Orchestrator:
                 break
             self._handoff_queue.popleft()
 
-            # kind 三路分流：delegate / review 单目标 cost=1；panel 多目标
-            # winners=list(targets)[+summarizer]、cost=N(+1)（docs §4.1）。
-            winners, scoring_path = self._resolve_handoff_winners(item)
-            # 入队时已校验 target / targets 在场；但跨 turn 残留项（cap 撞顶留下的
-            # 队首）可能在用户后续 ``remove_guest`` 后失效。drain 前过滤失效 winner，
-            # 避免 ``_let_speak`` 抛 ``KeyError`` 让承运的 user-turn drain 整个 aborts。
-            winners = [w for w in winners if w is not None and w in self._guests]
-            # panel 过滤后有效 panelist < 2 → 不再是圆桌，丢弃整项（含 summarizer，
-            # 它是同 item 字段、不留孤儿，docs §4.4）。
-            if self._panel_underfilled(item, winners):
-                _log.warning(
-                    "panel item underfilled after revalidation; dropping: %r",
-                    item,
-                )
-                continue
-            # delegate / review 单 target 失效。
-            if not winners:
-                _log.warning(
-                    "handoff item target unavailable; dropping: %r", item,
-                )
-                continue
             # winner_blocks 在过滤之后构造——panel 的 <panel_context> 必须按**存活**
             # panelist 渲染，否则被移除的茶客会被列进名单（codex review P2）。winners
             # 与 winner_blocks 由 _build_winner_blocks 逐 winner 构造、天然等长。
@@ -564,11 +544,12 @@ class Orchestrator:
                 raise
 
             # 末尾顺序对齐 _run_ai_chain（docs §8 不变量）：peek→turn_end→flush→hooks。
-            # lookahead 前先清死项——否则队首死项会让 has_next 误判"无下一项"提前
-            # return，把后面 runnable 项挡到下次用户触发（codex review P2）。
-            self._drop_dead_handoff_items()
-            if self._handoff_queue:
-                next_cost = self._handoff_cost(self._handoff_queue[0])
+            # lookahead 必须走与 drain 主体同一个 _advance_to_runnable_handoff——
+            # 否则死项 / 欠员 panel 会让 has_next 误判成"下一轮 AI"，但该项下一轮被
+            # 静默 drop、永远不产 turn，客户端卡在 turn_end(next='ai')（codex review P2）。
+            next_runnable = self._advance_to_runnable_handoff()
+            if next_runnable is not None:
+                next_cost = self._handoff_cost(next_runnable[0])
                 has_next = (
                     self._consecutive_ai_turns + next_cost
                     <= self.config.max_consecutive_ai_turns
@@ -1008,27 +989,50 @@ class Orchestrator:
             return len(item.targets) + (item.summarizer is not None)
         return 1
 
-    def _drop_dead_handoff_items(self) -> None:
-        """从 ``_handoff_queue`` 队首弹掉所有"死项"（档①，docs §4.1.1）。
+    def _advance_to_runnable_handoff(
+        self,
+    ) -> Optional[tuple[HandoffItem, list[str], str]]:
+        """从 ``_handoff_queue`` 队首弹掉所有**跑不起来**的项，返回第一个真能产出
+        turn 的项 ``(item, 过滤后 winners, scoring_path)``；队列耗尽 → ``None``。
 
-        ``cost > max_consecutive_ai_turns`` 的项无论 ``_consecutive_ai_turns``
-        多少都跑不动（典型成因：入队后用户调低 max）→ pop + drop + WARN。
+        "跑不起来"= runtime 重校验后必被 drop 的三类（docs §4.1.1 / §4.4），
+        pop + WARN：① 死项（``cost > max_consecutive_ai_turns``，无论计数都跑不动，
+        典型成因：入队后用户调低 max）；② panel 欠员（存活 panelist < 2）；
+        ③ winner 全失效（delegate / review target 被 ``remove_guest`` 删掉）。
 
-        drain loop 两处调：① while 顶（死项不挡队首）；② turn 末尾 lookahead 前
-        —— 否则队首死项会让 ``has_next`` 误判"无下一项"提前 return，把后面
-        runnable 项挡到下次用户触发（codex review P2）。**禁止 break 死项**：会
-        永久挡住队首 + 挡死后续队列项，"下次用户触发"也救不了。
+        **不**含"此刻预算够不够"的判断——撞 ``_consecutive_ai_turns`` cap（档②）
+        的项**能**跑、只是当下不跑，留在队首不弹，由调用方 cap 检查负责。
+
+        drain loop 主体与 turn 末尾 ``has_next`` lookahead **共用**这一个 helper：
+        否则 lookahead 拿"将被静默 drop 的项"算 ``has_next`` → 误报
+        ``turn_end(next='ai')`` → 客户端等一个永不到来的 turn（codex review P2）。
         """
         while self._handoff_queue:
             item = self._handoff_queue[0]
-            cost = self._handoff_cost(item)
-            if cost <= self.config.max_consecutive_ai_turns:
-                return
-            _log.warning(
-                "handoff item cost %d exceeds max_consecutive_ai_turns=%d; "
-                "dropping: %r", cost, self.config.max_consecutive_ai_turns, item,
-            )
-            self._handoff_queue.popleft()
+            if self._handoff_cost(item) > self.config.max_consecutive_ai_turns:
+                _log.warning(
+                    "handoff item cost exceeds max_consecutive_ai_turns; "
+                    "dropping: %r", item,
+                )
+                self._handoff_queue.popleft()
+                continue
+            winners, scoring_path = self._resolve_handoff_winners(item)
+            winners = [w for w in winners if w is not None and w in self._guests]
+            if self._panel_underfilled(item, winners):
+                _log.warning(
+                    "panel item underfilled after revalidation; dropping: %r",
+                    item,
+                )
+                self._handoff_queue.popleft()
+                continue
+            if not winners:
+                _log.warning(
+                    "handoff item target unavailable; dropping: %r", item,
+                )
+                self._handoff_queue.popleft()
+                continue
+            return item, winners, scoring_path
+        return None
 
     def _resolve_handoff_winners(
         self, item: HandoffItem,

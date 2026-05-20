@@ -218,6 +218,31 @@ async def test_dead_panel_does_not_block_later_runnable_item() -> None:
     assert len(orch._handoff_queue) == 0
 
 
+async def test_underfilled_next_panel_not_advertised_as_next_ai() -> None:
+    """codex review P2 回归：valid 项后面跟一个会被判欠员丢弃的 panel 时，
+    turn 末尾 lookahead 不能把它误算成"下一轮 AI"——否则 turn_end(next='ai')
+    发出后该 panel 被静默 drop、再无 turn，客户端卡死。
+
+    队列 [delegate A, panel(C,D,E)]，drain 前删 D/E → panel 存活 panelist 只剩
+    C（< 2）必被判欠员丢弃。A 跑完的 turn_end 必须是 next='user'。"""
+    orch, _ = _build("A", "C", "D", "E", max_ai=4)
+    orch.enqueue_handoff(HandoffItem(kind=HandoffKind.DELEGATE, target="A"))
+    orch.enqueue_handoff(_panel(["C", "D", "E"]))
+    del orch._guests["D"]
+    del orch._guests["E"]
+    captured: list[ChahuaEnvelope] = []
+    await orch.run_pending_handoff(captured.append, task_id=None)
+
+    turn_starts = [e for e in captured if e.type is ChahuaEventType.TURN_START]
+    turn_ends = [e for e in captured if e.type is ChahuaEventType.TURN_END]
+    # 只有 A 一个 turn；欠员 panel 不产 turn。
+    assert len(turn_starts) == 1
+    assert len(turn_ends) == 1
+    # A 的 turn_end 必须 next='user'（不是误报的 'ai'）。
+    assert turn_ends[0].data["next"] == "user"
+    assert len(orch._handoff_queue) == 0
+
+
 async def test_underfilled_panel_dropped_no_orphan_summarizer() -> None:
     """⑦ panelist 过滤到 1 人 → 整项丢弃（含 summarizer，队列里不留孤儿）。"""
     orch, _ = _build("C", "F")  # D / E 未注册 → 过滤后只剩 C
