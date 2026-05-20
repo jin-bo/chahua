@@ -145,6 +145,14 @@ export const Inbound = Object.freeze({
   HANDOFF_CLEAR: "handoff_clear",
 });
 
+// 镜像 chahua/handoff.py::HandoffKind —— handoff 队列项的 ``kind`` wire 值。
+// 队列预览据此分流渲染；新加 kind 时两边同步。
+export const HandoffKind = Object.freeze({
+  DELEGATE: "delegate",
+  REVIEW: "review",
+  PANEL: "panel",
+});
+
 // 默认权限模式，镜像 chahua/permissions.py::DEFAULT_MODE。前端"添加茶客" /
 // "新建房间"提交时给的兜底值，以及"是否显示 V 标"的判定基准（≠ DEFAULT 才显示）。
 export const DEFAULT_PERMISSION = "read-only";

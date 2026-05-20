@@ -1408,10 +1408,11 @@ function clearCurrentRoom() {
   setStatus("", `清空「${roomName}」…`);
 }
 
-// 跨 popover 互斥：开 action 前先关 permission / handoff。
+// 跨 popover 互斥：开 action 前先关 permission / handoff / panel。
 function showActionPopover(anchor, title, items) {
   closePermissionPopover();
   closeHandoffPopover();
+  closePanelPopover();
   openActionPopover(anchor, title, items);
 }
 

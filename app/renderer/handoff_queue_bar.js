@@ -6,20 +6,19 @@
 // 空队列 → 整条 hidden 不占位。队列项的 reason 是内部备注 → hover 出 title 提示，
 // 不直接铺在条上（与"备注不发给茶客"语义对齐，条上只放调度信息）。
 
-import { Inbound } from "./events.js";
+import { Inbound, HandoffKind } from "./events.js";
 
-// 队列项 kind → 预览后缀。镜像 chahua/handoff.py::HandoffKind 取值；未知 kind
-// （老前端遇新枚举）落空串、只显茶客名，不报错。
+// 队列项 kind → 预览后缀。未知 kind（老前端遇新枚举）落空串、只显茶客名，不报错。
 const KIND_SUFFIX = Object.freeze({
-  delegate: "（指派）",
-  review: "（请审）",
+  [HandoffKind.DELEGATE]: "（指派）",
+  [HandoffKind.REVIEW]: "（请审）",
 });
 
 // 队列项 → 预览文案。delegate / review 是单 target；panel 是自描述单项
 // （docs/P7.3 §6.2），列 targets + 可选 summarizer，不做相邻分组。
 function itemPreviewText(item) {
   if (!item) return "?";
-  if (item.kind === "panel") {
+  if (item.kind === HandoffKind.PANEL) {
     const targets = Array.isArray(item.targets) ? item.targets : [];
     let text = `🔄 圆桌：${targets.join("、") || "?"}`;
     if (item.summarizer) text += ` → 汇总:${item.summarizer}`;
