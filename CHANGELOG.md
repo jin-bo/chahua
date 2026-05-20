@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Added
+- **P7.1 显式 handoff / delegation —— delegate 调度**（2026-05-19，详见 [`docs/P7-显式 handoff 与 delegation.md`](docs/P7-显式%20handoff%20与%20delegation.md)）：在意愿打分（"想接话"自然讨论）之上加一条**确定性发言指派通道**——用户点茶客侧栏的 ⇨ 按钮即"下一句你（A）说"。P7.1 只接 `delegate` 一档（`review` / `panel` 留 P7.2 / P7.3）；12 个 commit 分 3 个 PR，708 测试全过。
+  - **数据契约 + 内存队列**（PR1，P7.1.1~7）。新建 `chahua/handoff.py`：`HandoffItem` frozen dataclass + `HandoffKind` enum（仅 `delegate`）+ `to_dict()`。`Orchestrator` 加 `_handoff_queue: deque[HandoffItem]` 内存字段 + `enqueue_handoff` / `clear_handoff_queue` 纯方法（无 sink、不 emit）。**队列不落盘**（与 in-flight `_current` 同瞬态语义，crash/重启即丢），`reset_room` / 切房路径一并清掉。`events.py` 加 3 个 envelope 类型 `HANDOFF_ENQUEUED` / `HANDOFF_CONSUMED` / `HANDOFF_CLEARED`（`schema_version` 不动）；`debug_recorder.py` 扩 `VALID_SCORING_PATHS` 加 `SCORING_PATH_HANDOFF_DELEGATE`。
+  - **`run_pending_handoff` drain loop（承重墙）**。专消费 handoff 队列，与 `_run_ai_chain` **严格分流、不互相回落**：队列空 / 下一项 cap 撞顶就 emit `turn_end(next="user")` 后 return，**不回落 scoring**——这是"delegate 仅本轮独占、之后等用户"的工程基础。入口清零计数一次；每轮 turn 末尾 5 步顺序严格对齐 `_run_ai_chain`（peek → 一次性 emit `turn_end` → `flush_turn` → `_kick_summarize`/`_tick_cooldown`/`_kick_detect_new_artifacts` → `if not has_next: return`）。cap 检查按 item cost 算（delegate 恒 1，panel 留 P7.3）；撞顶不 pop、队首留到下次用户触发。
+  - **server inbound + wrapper**。`_inbound_handoff_delegate` / `_inbound_handoff_clear` handler（payload 严格白名单，未知字段 / target 不在场 → NOTICE error）。server 持 `_inflight_kind ∈ {"user","handoff",None}` 与 `_inflight_turn_task` 同槽（单点 `_set_inflight`）；delegate 入队前 cancel 是**条件性**的：in-flight 是 user-turn → 抢占，是 handoff drain → 只 append 队尾（否则连点 N 次只剩最后一项执行），无 in-flight → 不动。handoff drain 必经 `_run_handoff_turn` wrapper（照搬 `_run_turn`：swallow `CancelledError` + finally 同槽清两字段）。`handoff_clear` 始终无差别 `_cancel_and_drain_inflight` + 清队列 + emit `handoff_cleared{items_dropped}`。
+  - **前端 UI**（PR2，P7.1.8~11）。`events.js` 加常量；`renderer.js` 维护本地 `handoffQueueState`（切房 / 刷新 reset）。茶客侧栏 ⇨ hover 按钮 → delegate popover（可选内部备注 textarea）；composer 上方队列预览小条显示"➡️ 下一句：A → B → C" + ✕ 全部取消；调试抽屉 turn 行复用 `scoring_path` 渲 "[指派] {winner}" 徽标、详情面板 `trigger.kind="handoff"` 加"由用户指派"提示条。**handoff drain 跑期间 ⇨ 按钮不 disable**（drain 中 delegate 应 append 队尾），只在 ws 断开 / target 不在场 / 提交中三种情况 disable。
+  - **`reason` 是内部备注**：`HandoffItem.reason` 只进 debug record `trigger.handoff_item` + 队列预览 hover，**永远不进茶客 prompt**；UI 文案明示"不发给茶客"。`@提及` 与 `/delegate` 都是用户单点路由但语义不同：`@A` 完后回 scoring，`/delegate A` 完后不回落（等用户），`@` 不入队列。
+
 ## [0.1.1] - 2026-05-19
 
 详见 [`docs/releases/v0.1.1.md`](docs/releases/v0.1.1.md)。
