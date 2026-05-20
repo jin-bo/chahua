@@ -43,6 +43,7 @@ import { createSettings } from "./settings.js";
 import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
+import { createHandoffPopover } from "./handoff_popover.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import * as handoffState from "./handoff_state.js";
@@ -245,6 +246,15 @@ function showPermissionPopover(anchor, g) {
   permissionPopover?.show(anchor, g);
 }
 
+// 「交给…」delegate popover（点茶客卡片的 ⇨ 按钮）—— 见 ./handoff_popover.js。
+let handoffPopover = null;
+function closeHandoffPopover() {
+  handoffPopover?.close();
+}
+function showHandoffPopover(anchor, guestName) {
+  handoffPopover?.show(anchor, guestName);
+}
+
 // ── 消息上的任务 chip + filter 视图（P5.2.10）─────────────────────────────
 //
 // chip 状态随 taskState 变 —— task_panel 没把消息 chip 文案当模块状态存（DOM 即真
@@ -424,6 +434,7 @@ function renderSidebar(roomInfo) {
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
+  closeHandoffPopover();
   setStatus("ok", `已连接 ${wsUrl}`);
   roomNameEl.textContent = roomInfo.room_name || "—";
   roomTopicEl.textContent = roomInfo.topic || "";
@@ -476,6 +487,19 @@ function renderSidebar(roomInfo) {
     score.className = "guest-score";
     li.appendChild(score);
     scoreSpansByName.set(g.name, score);
+    // ⇨ 交给：hover 才显的 delegate 入口。点击弹 popover 收备注后发 handoff_delegate；
+    // drain 跑期间不 disable —— 此时 delegate 应 append 到队尾、不抢占。
+    const delegate = document.createElement("button");
+    delegate.type = "button";
+    delegate.className = "guest-delegate";
+    delegate.textContent = "⇨";
+    delegate.title = `把下一句指派给 ${g.name}（加入队列）`;
+    delegate.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (!connected) return;
+      showHandoffPopover(delegate, g.name);
+    });
+    li.appendChild(delegate);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "row-remove";
@@ -947,6 +971,12 @@ permissionPopover = createPermissionPopover({
   setStatus,
   isConnected: () => connected,
   openGuestSettings: (g) => guestSettings.open(g),
+});
+
+handoffPopover = createHandoffPopover({
+  send,
+  setStatus,
+  isConnected: () => connected,
 });
 
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
