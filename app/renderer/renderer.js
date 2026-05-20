@@ -838,6 +838,11 @@ function connect() {
     connected = false;
     setInputEnabled(false);
     closeInFlightOnDisconnect();
+    // handoff 队列预览是 per-connection 瞬态：断线期间漏收的 handoff_consumed /
+    // handoff_cleared 不会补发，服务端也可能已重启换了空队列 —— 留着旧预览会误导，
+    // 且点 ✕ 会发 handoff_clear 误取消正在跑的 turn。断线即清，与"刷新即清"同口径；
+    // 重连后 renderSidebar 房间 id 不变不会再清，靠这里兜底。
+    handoffState.reset();
     // 拒绝所有等 echo 的上传，让 change handler 的 finally 清 isUploading + 启用附件按钮。
     upload.dropPending(`ws closed (${ev.code})`);
     // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
