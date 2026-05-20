@@ -270,12 +270,12 @@ async def test_update_task_patch_status_non_terminal_ok(session_and_srv):
         {
             "type": INBOUND_UPDATE_TASK,
             "task_id": t.id,
-            "patch": {"status": "in_progress"},
+            "patch": {"status": "doing"},
         },
         lambda env: captured.append(env.to_dict()),
     )
     assert _by_type(captured, ChahuaEventType.NOTICE.value) == []
-    assert session.tasks_store.get_task(t.id).status == "in_progress"
+    assert session.tasks_store.get_task(t.id).status == "doing"
 
 
 async def test_update_task_empty_title_rejected(session_and_srv):
@@ -586,7 +586,7 @@ async def test_close_task_invalid_status_rejected(session_and_srv):
     t = session.tasks_store.open_task(title="t", goal="g")
     captured: list[dict] = []
     await srv._handle_inbound(
-        {"type": INBOUND_CLOSE_TASK, "task_id": t.id, "status": "in_progress"},
+        {"type": INBOUND_CLOSE_TASK, "task_id": t.id, "status": "doing"},
         lambda env: captured.append(env.to_dict()),
     )
     notices = _by_type(captured, ChahuaEventType.NOTICE.value)

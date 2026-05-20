@@ -11,9 +11,9 @@ P5.1 把房间从"纯聊天"升级为"带任务的工作容器"的最小数据�
 - 入站校验：**白名单严格**，未知键直接 raise / NOTICE error —— 在 :mod:`chahua.server`
   那一层（P5.1.7）负责，不在本模块。
 
-P5.1 仅允许 ``status="open"`` —— ``in_progress`` / ``blocked`` / ``done`` / ``abandoned``
-保留状态字面值但不在 MVP 通过 ``update_task`` 改（见 §4.3 / §7.1）。这里**允许**所有
-五种状态字面被加载（旧 task.json 用过 / P5.2 起会用），但 P5.1 写盘只产 ``"open"``。
+任务状态共 7 态：``open`` / ``ready`` / ``doing`` / ``blocked`` / ``review`` / ``done``
+/ ``abandoned``，其中 ``done`` / ``abandoned`` 为终结态。新建任务落 ``open``。加载时
+status 不在合法集 → 降级为 ``blocked``（不做跨版本字面值迁移）。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from .events import new_id, now_ms
 _log = logging.getLogger(__name__)
 
 
-TaskStatus = Literal["open", "in_progress", "blocked", "done", "abandoned"]
+TaskStatus = Literal["open", "ready", "doing", "blocked", "review", "done", "abandoned"]
 _VALID_STATUSES: frozenset[str] = frozenset(typing.get_args(TaskStatus))
 
 # 单点常量 —— 避免 "open" / "user" 字面值散落多处。
@@ -50,8 +50,10 @@ TASK_UNTITLED = "(无标题)"
 
 TASK_STATUS_DISPLAY: dict[TaskStatus, str] = {
     "open": "未开始",
-    "in_progress": "进行中",
+    "ready": "已就绪",
+    "doing": "进行中",
     "blocked": "被阻塞",
+    "review": "评审中",
     "done": "已完成",
     "abandoned": "已放弃",
 }
@@ -112,7 +114,7 @@ class Task:
     created_at_ms: int
     updated_at_ms: int
     closed_at_ms: Optional[int] = None
-    """``status in ("done", "abandoned")`` 才有值；P5.1 不会到这步。"""
+    """``status in ("done", "abandoned")`` 才有值。"""
 
     def to_jsonl_dict(self) -> dict:
         """落盘形态。字段顺序固定方便人眼扫；``closed_at_ms`` 为 ``None`` 时仍写 ``null``。"""
@@ -131,7 +133,7 @@ class Task:
     def from_jsonl(cls, obj: dict) -> Optional["Task"]:
         """从 task.json 重建。未知字段 warn 后忽略；必需字段缺 / 类型错 → ``None`` + WARN（该条跳过）。
 
-        ``status`` 不在 :data:`_VALID_STATUSES` 时降级到 ``"open"`` + WARN —— 同样的
+        ``status`` 不在 :data:`_VALID_STATUSES` 时降级到 ``"blocked"`` + WARN ——
         "宽容加载"口径，不为单字段不合法让整个任务消失。
         """
         try:
@@ -146,9 +148,9 @@ class Task:
             return None
         if status_raw not in _VALID_STATUSES:
             _log.warning(
-                "task %s: status=%r 不在合法集，降级为 'open'", tid, status_raw
+                "task %s: status=%r 不在合法集，降级为 'blocked'", tid, status_raw
             )
-            status: TaskStatus = "open"
+            status: TaskStatus = "blocked"
         else:
             status = status_raw  # type: ignore[assignment]
         owner_raw = obj.get("owner")

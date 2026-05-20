@@ -6,7 +6,7 @@ diff 上次扫到的文件名集合，emit ``task_artifact_added`` hint + 一帧
 保留 ``_seen_artifacts`` / ``_kick_detect_new_artifacts`` 转发属性维持测试入口稳定。
 
 设计要点：
-- 初始化只 seed open / in_progress / blocked 任务的 artifacts —— closed task 永远不会
+- 初始化只 seed 非终结态任务的 artifacts —— closed task 永远不会
   被 :meth:`detect` 读到（前置过滤），seed 进来纯浪费 readdir 还堆 dict。
 - 用户走 UI ``attach_artifact`` 上传时 seen 缓存不同步更新 —— 下次 :meth:`detect` 扫到那些
   文件会重复 emit hint；接受（前端以 ``task_info`` 为权威，hint 仅可选 toast，重复无感），

@@ -30,7 +30,7 @@ P5.2 起在每个 task 目录下追写 ``events.jsonl``（task 级状态 / 字�
 关键约束（docs §7.1 / §7.2）：
 
 - **同一时刻至多 1 个 active**：``open_task`` 创建后自动设为 active，旧 active 留作
-  ``status="open"`` 进历史列表。P5.2 起允许多任务共存；P5.1 的 :class:`TaskExistsError`
+  非终结态进历史列表。P5.2 起允许多任务共存；P5.1 的 :class:`TaskExistsError`
   保留为类型给老调用方 ``except`` 用，但 ``open_task`` **永不再抛**。
 - **加载时双向修复**：
     ① state.json 指向不存在 task → 清回 None；
@@ -64,7 +64,9 @@ from .task import Decision, Task, TaskStatus
 # 两组都是 public —— :mod:`chahua.server_inbound_task` 直接 import 用做 inbound 白名单，
 # 避免字面值在两层重复（在 P5.2 重构里已经踩过一次"忘改一边"的坑）。
 CLOSED_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
-NON_TERMINAL_STATUSES: frozenset[str] = frozenset({"open", "in_progress", "blocked"})
+NON_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"open", "ready", "doing", "blocked", "review"}
+)
 
 # events.jsonl `kind` 字段 —— 模块顶 single source（测试 + _append_event 都 import）。
 EVENT_KIND_BECAME_ACTIVE = "became_active"
@@ -446,7 +448,7 @@ class TasksStore:
     ) -> Task:
         """创建新任务并设为 active。
 
-        P5.2 起允许多任务共存：新建任务自动成为 active，旧 active 留作 ``status="open"``
+        P5.2 起允许多任务共存：新建任务自动成为 active，旧 active 留作非终结态
         进历史列表（docs §7.2）。P5.1 的 :class:`TaskExistsError` 不再抛。
         """
         task = Task.new(title=title, goal=goal, owner=owner, task_id=task_id)
@@ -517,7 +519,7 @@ class TasksStore:
         """
         if status not in CLOSED_STATUSES:
             raise ValueError(
-                f"close_task: status={status!r} 不是终结态；in_progress / blocked 走 update_task"
+                f"close_task: status={status!r} 不是终结态；非终结态走 update_task"
             )
         task = self._tasks.get(task_id)
         if task is None:
@@ -555,8 +557,9 @@ class TasksStore:
         - ``title`` / ``goal`` / ``status`` 传 ``None`` = "不改"。
         - ``owner`` 沿 inbound patch 语义可显式置 None（清归属），所以用 sentinel
           ``_OWNER_UNSET`` 区分"不改"与"置 None"。调用方应传 str / None 或 不传。
-        - ``status`` 仅接受非终结态 ``{open, in_progress, blocked}``；``done`` / ``abandoned``
-          必须走 :meth:`close_task`（保证 ``closed_at_ms`` 落盘）。无效 status → ``ValueError``。
+        - ``status`` 仅接受非终结态 ``{open, ready, doing, blocked, review}``；``done``
+          / ``abandoned`` 必须走 :meth:`close_task`（保证 ``closed_at_ms`` 落盘）。无效
+          status → ``ValueError``。
         - 把 closed 任务的 status 改回非终结态（"重开"）→ 清 ``closed_at_ms``。
 
         每个改变的字段落一行 ``events.jsonl``：
@@ -583,7 +586,7 @@ class TasksStore:
         if status is not None and status != task.status:
             changes.append(("status", task.status, status))
             patch["status"] = status
-            # 重开闭合任务（done/abandoned → in_progress 等）：清 closed_at_ms。
+            # 重开闭合任务（done/abandoned → doing 等）：清 closed_at_ms。
             if task.status in CLOSED_STATUSES:
                 patch["closed_at_ms"] = None
         if not changes:

@@ -4,7 +4,7 @@
 - 合法 round-trip
 - 未知字段 warn 后忽略
 - 必需字段缺失 / 类型错 → None + WARN（不抛）
-- status 非法 → 降级到 "open"
+- status 非法 → 降级到 "blocked"
 """
 
 from __future__ import annotations
@@ -46,13 +46,13 @@ def test_task_missing_required_returns_none(caplog):
     assert any("malformed" in r.message for r in caplog.records)
 
 
-def test_task_invalid_status_falls_back_to_open(caplog):
+def test_task_invalid_status_falls_back_to_blocked(caplog):
     t = Task.new(title="t", goal="g")
     obj = t.to_jsonl_dict()
     obj["status"] = "wat"
     back = Task.from_jsonl(obj)
     assert back is not None
-    assert back.status == "open"
+    assert back.status == "blocked"
     assert any("不在合法集" in r.message for r in caplog.records)
 
 

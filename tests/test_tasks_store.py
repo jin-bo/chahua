@@ -323,7 +323,7 @@ def test_close_task_rejects_non_terminal_status(tmp_path: Path):
     store = TasksStore(room_dir=tmp_path)
     t = store.open_task(title="t", goal="g")
     with pytest.raises(ValueError):
-        store.close_task(t.id, status="in_progress")  # type: ignore[arg-type]
+        store.close_task(t.id, status="doing")  # type: ignore[arg-type]
 
 
 def test_close_task_not_found(tmp_path: Path):
@@ -372,12 +372,12 @@ def test_update_task_omitted_owner_is_noop(tmp_path: Path):
 def test_update_task_changes_status_non_terminal(tmp_path: Path):
     store = TasksStore(room_dir=tmp_path)
     t = store.open_task(title="t", goal="g")
-    updated = store.update_task(t.id, status="in_progress")
-    assert updated.status == "in_progress"
+    updated = store.update_task(t.id, status="doing")
+    assert updated.status == "doing"
     fc = [e for e in store.list_events(t.id) if e["kind"] == "field_changed"]
     assert fc[0]["field"] == "status"
     assert fc[0]["before"] == "open"
-    assert fc[0]["after"] == "in_progress"
+    assert fc[0]["after"] == "doing"
 
 
 def test_update_task_rejects_terminal_status(tmp_path: Path):
@@ -391,12 +391,12 @@ def test_update_task_rejects_terminal_status(tmp_path: Path):
 
 
 def test_update_task_reopen_clears_closed_at(tmp_path: Path):
-    """关闭后再 update_task(status=in_progress) → status 回非终结态 + closed_at_ms 清。"""
+    """关闭后再 update_task(status=doing) → status 回非终结态 + closed_at_ms 清。"""
     store = TasksStore(room_dir=tmp_path)
     t = store.open_task(title="t", goal="g")
     store.close_task(t.id, status="done")
-    reopened = store.update_task(t.id, status="in_progress")
-    assert reopened.status == "in_progress"
+    reopened = store.update_task(t.id, status="doing")
+    assert reopened.status == "doing"
     assert reopened.closed_at_ms is None
 
 
@@ -414,7 +414,7 @@ def test_update_task_multi_field_logs_each(tmp_path: Path):
     """同一次 update 改 title + status → 落两行 field_changed。"""
     store = TasksStore(room_dir=tmp_path)
     t = store.open_task(title="t", goal="g")
-    store.update_task(t.id, title="t2", status="in_progress")
+    store.update_task(t.id, title="t2", status="doing")
     fc = [e for e in store.list_events(t.id) if e["kind"] == "field_changed"]
     fields = {e["field"] for e in fc}
     assert fields == {"title", "status"}

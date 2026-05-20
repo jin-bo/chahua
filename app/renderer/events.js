@@ -153,8 +153,10 @@ export const ScoreKind = Object.freeze({
 // 顺序与 task.py 的 Literal 顺序一致；新加状态时两边同步。
 export const TASK_STATUS_OPTIONS = Object.freeze([
   Object.freeze({ value: "open", label: "未开始" }),
-  Object.freeze({ value: "in_progress", label: "进行中" }),
+  Object.freeze({ value: "ready", label: "已就绪" }),
+  Object.freeze({ value: "doing", label: "进行中" }),
   Object.freeze({ value: "blocked", label: "被阻塞" }),
+  Object.freeze({ value: "review", label: "评审中" }),
   Object.freeze({ value: "done", label: "已完成" }),
   Object.freeze({ value: "abandoned", label: "已放弃" }),
 ]);

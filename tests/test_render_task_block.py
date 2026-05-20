@@ -61,7 +61,7 @@ def _artifact(name: str, size: int = 2300, mtime_ms: int = 1715850000000) -> dic
 
 
 def test_full_block_all_fields_present():
-    task = _task(owner="汪小姐", status="in_progress")
+    task = _task(owner="汪小姐", status="doing")
     body, status_display = _render_task_block(
         task,
         decisions=[_decision("用 Electron")],
