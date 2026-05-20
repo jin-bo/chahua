@@ -41,6 +41,7 @@ from .debug_recorder import (
     NOOP_RECORDER,
     SCORING_PATH_BROADCAST,
     SCORING_PATH_HANDOFF_DELEGATE,
+    SCORING_PATH_HANDOFF_PANEL,
     SCORING_PATH_HANDOFF_REVIEW,
     SCORING_PATH_MENTION,
     SCORING_PATH_SCORING,
@@ -81,6 +82,19 @@ __all__ = ["Orchestrator", "OrchestratorConfig"]
 # ``format_messages`` 包装后内联在指引之上（docs §4.2）。
 _REVIEW_INSTRUCTION = (
     "请给出你的审阅意见：可以是「通过」「打回」或具体修改建议，并说明理由。"
+)
+
+# P7.3 panel：``<panel_summary_request>`` 块——summarizer 专属，模块常量（不含
+# per-item 数据）。summarizer 是 panel turn 的末位 speaker，N 位 panelist 的发言
+# 已串行 append 进 transcript、紧贴这一发之前，summarizer 的 ``<recent_messages>``
+# 自然包含——块只需告诉它"刚结束一轮圆桌、请汇总"（docs/P7.3 §4.3）。
+_PANEL_SUMMARY_BLOCK = (
+    "<panel_summary_request>\n"
+    "房间刚结束一轮圆桌平行讨论——多位茶客各自发表了一条独立观点。\n"
+    "请你把最近这几条圆桌发言汇总成一条简洁的综述：提炼共识、点出分歧、"
+    "列出仍待决定的问题。\n"
+    "不要逐条复述，要给出结构化的归纳。\n"
+    "</panel_summary_request>"
 )
 
 
@@ -463,37 +477,58 @@ class Orchestrator:
         self._rounds_without_user_or_mention = 0
 
         while self._handoff_queue:
-            # peek 队首算 cost；超 cap 不 pop 直接 break——队首留到下次用户触发。
-            # P7.3 panel 时 cost = len(item.targets)。
             item = self._handoff_queue[0]
-            cost = 1
+            cost = self._handoff_cost(item)
+            # 两档 cap 检查（docs §4.1.1），次序不能反：
+            # ① cost 本身超 max → 此项永远跑不动（死项，典型成因：入队后用户调低
+            #    max）→ pop + drop + WARN。禁止 break——死项会永久挡住队首 + 挡死
+            #    后续所有队列项，"下次用户触发"也救不了。
+            if cost > self.config.max_consecutive_ai_turns:
+                _log.warning(
+                    "handoff item cost %d exceeds max_consecutive_ai_turns=%d; "
+                    "dropping: %r", cost, self.config.max_consecutive_ai_turns,
+                    item,
+                )
+                self._handoff_queue.popleft()
+                continue
+            # ② 没超 max 本身、只是此刻 _consecutive_ai_turns 占了预算 → break、
+            #    留队首，下次用户触发 + drain 入口清零后能跑。
             if (
                 self._consecutive_ai_turns + cost
                 > self.config.max_consecutive_ai_turns
             ):
                 break
             self._handoff_queue.popleft()
-            # 入队时已校验 target 非空 + 在场（``_inbound_handoff_delegate``）；
-            # 但跨 turn 残留项（cap 撞顶留下的队首）可能在用户后续 ``remove_guest``
-            # 后失效。drain 前再校验一次，避免 ``_let_speak`` 抛 ``KeyError`` 让承运的
-            # user-turn drain 整个 aborts（codex review 回归点）。``target is None``
-            # 兜底防内部测试 / refactor 绕过 inbound 校验入队。
-            if item.target is None or item.target not in self._guests:
+
+            # kind 三路分流：delegate / review 单目标 cost=1；panel 多目标
+            # winners=list(targets)[+summarizer]、cost=N(+1)（docs §4.1）。
+            winners, scoring_path, winner_blocks = self._resolve_handoff_render(item)
+            # winners 与 winner_blocks 必须等长——漏配会让下面 zip 静默截断 speaker。
+            assert len(winners) == len(winner_blocks)
+            # 入队时已校验 target / targets 在场；但跨 turn 残留项（cap 撞顶留下的
+            # 队首）可能在用户后续 ``remove_guest`` 后失效。drain 前同步过滤失效
+            # winner（winners 与 winner_blocks 等长，必须同步剔除），避免
+            # ``_let_speak`` 抛 ``KeyError`` 让承运的 user-turn drain 整个 aborts。
+            kept = [
+                (w, b) for w, b in zip(winners, winner_blocks)
+                if w is not None and w in self._guests
+            ]
+            winners = [w for w, _ in kept]
+            winner_blocks = [b for _, b in kept]
+            # panel 过滤后有效 panelist < 2 → 不再是圆桌，丢弃整项（含 summarizer，
+            # 它是同 item 字段、不留孤儿，docs §4.4）。
+            if self._panel_underfilled(item, winners):
                 _log.warning(
-                    "handoff item target %r unavailable; dropping: %r",
-                    item.target, item,
+                    "panel item underfilled after revalidation; dropping: %r",
+                    item,
                 )
                 continue
-            winners = [item.target]
-
-            # review / delegate 在调度层同构（单目标 / cost=1 / 跳过打分 / 本轮独占）；
-            # kind 分支只覆盖 scoring_path + extra_blocks 两个值，控制流不动（docs §4.1）。
-            if item.kind is HandoffKind.REVIEW:
-                scoring_path = SCORING_PATH_HANDOFF_REVIEW
-                extra_blocks: Optional[list[str]] = [self._render_review_block(item)]
-            else:
-                scoring_path = SCORING_PATH_HANDOFF_DELEGATE
-                extra_blocks = None
+            # delegate / review 单 target 失效。
+            if not winners:
+                _log.warning(
+                    "handoff item target unavailable; dropping: %r", item,
+                )
+                continue
             turn_id = new_turn_id()
             item_dict = item.to_dict()
             self._recorder.start_turn(
@@ -526,10 +561,13 @@ class Orchestrator:
             self._emit_handoff_consumed(sink, turn_id=turn_id, item_dict=item_dict)
 
             try:
-                for name in winners:
+                # panel = N(+1) 次串行 speak；每位 winner 取自己等长对齐的
+                # extra_blocks（panelist 共享 <panel_context>、summarizer 拿
+                # <panel_summary_request>；delegate / review 单元素与 P7.2 同）。
+                for name, blocks in zip(winners, winner_blocks):
                     await self._let_speak(
                         name, turn_id=turn_id, sink=sink, task_id=task_id,
-                        extra_blocks=extra_blocks,
+                        extra_blocks=blocks,
                     )
                     self._consecutive_ai_turns += 1
             except asyncio.CancelledError:
@@ -538,7 +576,7 @@ class Orchestrator:
 
             # 末尾顺序对齐 _run_ai_chain（docs §8 不变量）：peek→turn_end→flush→hooks。
             if self._handoff_queue:
-                next_cost = 1
+                next_cost = self._handoff_cost(self._handoff_queue[0])
                 has_next = (
                     self._consecutive_ai_turns + next_cost
                     <= self.config.max_consecutive_ai_turns
@@ -946,6 +984,77 @@ class Orchestrator:
             f"{_REVIEW_INSTRUCTION}\n"
             "</review_target>"
         )
+
+    def _render_panel_block(self, item: HandoffItem) -> str:
+        """P7.3：合成 panel 项的 ``<panel_context>`` 临时块（docs §4.2）。
+
+        列本轮圆桌全体 panelist + 平行发言指引。N 位 panelist **共享同一块**，
+        文案写成位置无关（第一个 / 第 N 个 panelist 读到同一句都通顺）。
+        **不列 summarizer**——它不是 panelist，拿 :data:`_PANEL_SUMMARY_BLOCK`。
+        """
+        assert item.targets is not None
+        dmap = self._display_map()
+        names = "、".join(dmap.get(t, t) for t in item.targets)
+        return (
+            "<panel_context>\n"
+            f"本轮是一次圆桌平行讨论，参与的茶客是：{names}。\n"
+            "请你独立给出自己的观点，不必附和、也不必复述其他茶客已经说过的内容；\n"
+            "如果你与前面发言的茶客看法不同，直接说出分歧。这是一次平行表态，"
+            "不是接龙。\n"
+            "</panel_context>"
+        )
+
+    @staticmethod
+    def _handoff_cost(item: HandoffItem) -> int:
+        """一个 handoff item 占的 turn 内 speak 轮数（docs §4.1）。delegate /
+        review 恒 1；panel = panelist 数 + 有无 summarizer。声明值——不因 §4.4
+        runtime 过滤而变，while-entry cap 检查据此偏保守可接受。"""
+        if item.kind is HandoffKind.PANEL:
+            assert item.targets is not None
+            return len(item.targets) + (item.summarizer is not None)
+        return 1
+
+    def _resolve_handoff_render(
+        self, item: HandoffItem,
+    ) -> tuple[list[str], str, list[Optional[list[str]]]]:
+        """按 ``item.kind`` 算 ``(winners, scoring_path, winner_blocks)``（docs §4.1）。
+
+        ``winner_blocks`` 与 ``winners`` **等长对齐**——drain loop 的 speak 循环
+        ``zip`` 两者，逐 winner 取自己的 ``extra_blocks``。delegate / review 单
+        winner 单块；panel 的 panelist 共享 ``<panel_context>``、summarizer 取
+        ``<panel_summary_request>``。纯函数——不 emit、不 await。
+        """
+        if item.kind is HandoffKind.PANEL:
+            assert item.targets is not None
+            panel_block = self._render_panel_block(item)
+            winners = list(item.targets)
+            winner_blocks: list[Optional[list[str]]] = [
+                [panel_block] for _ in winners
+            ]
+            if item.summarizer is not None:
+                winners.append(item.summarizer)
+                winner_blocks.append([_PANEL_SUMMARY_BLOCK])
+            return winners, SCORING_PATH_HANDOFF_PANEL, winner_blocks
+        if item.kind is HandoffKind.REVIEW:
+            return (
+                [item.target],  # type: ignore[list-item]  # 失效项 drain 时过滤
+                SCORING_PATH_HANDOFF_REVIEW,
+                [[self._render_review_block(item)]],
+            )
+        return (
+            [item.target],  # type: ignore[list-item]
+            SCORING_PATH_HANDOFF_DELEGATE,
+            [None],
+        )
+
+    @staticmethod
+    def _panel_underfilled(item: HandoffItem, kept_winners: list[str]) -> bool:
+        """panel 项 runtime 过滤后有效 panelist（不含 summarizer）< 2 → 判欠员
+        （docs §4.4）。非 panel 项恒 ``False``。"""
+        if item.kind is not HandoffKind.PANEL:
+            return False
+        kept_panelists = [w for w in kept_winners if w != item.summarizer]
+        return len(kept_panelists) < 2
 
     def _scoring_transcript(self) -> tuple[str, list[Message]]:
         """转发到 :meth:`ContextRenderer.scoring_transcript`。"""

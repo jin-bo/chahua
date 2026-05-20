@@ -107,10 +107,27 @@ async def test_single_delegate_happy_path() -> None:
 
 
 async def test_cap_reached_does_not_pop_queue_head() -> None:
-    """队首 cap 撞顶时**不 pop**——留到下次用户触发；本 drain 不 emit turn_start。"""
+    """档 ②：预算被前面的 turn 占满后，后续队首**不 pop**——留到下次用户触发
+    （docs/P7.3 §4.1.1）。max_ai=1：第一项 A 跑完 consecutive=1，第二项 B 撞 cap。"""
+    orch, _ = _build("A", "B", max_ai=1)
+    orch.enqueue_handoff(_delegate("A"))
+    orch.enqueue_handoff(_delegate("B"))
+    captured: list[ChahuaEnvelope] = []
+    await orch.run_pending_handoff(captured.append, task_id=None)
+
+    # A 跑了一个 turn、B 留在队首
+    turn_starts = [e for e in captured if e.type is ChahuaEventType.TURN_START]
+    assert len(turn_starts) == 1
+    assert len(orch._handoff_queue) == 1
+    assert orch._handoff_queue[0].target == "B"
+
+
+async def test_dead_item_cost_exceeds_max_is_dropped() -> None:
+    """档 ①：``cost > max_consecutive_ai_turns`` 的死项 → pop + drop + WARN，
+    **不 break**——否则永久挡住队首 + 挡死后续队列项（docs/P7.3 §4.1.1）。"""
     orch, _ = _build("A", max_ai=1)
     orch.enqueue_handoff(_delegate("A"))
-    # 入口清零后再设 max_ai=0，让 cost(1) 立刻撞顶。
+    # 入口清零后再设 max_ai=0，让 cost(1) 命中档 ①（死项）。
     orch.config = OrchestratorConfig(
         max_consecutive_ai_turns=0,
         max_speakers_per_pick=1,
@@ -120,9 +137,9 @@ async def test_cap_reached_does_not_pop_queue_head() -> None:
     captured: list[ChahuaEnvelope] = []
     await orch.run_pending_handoff(captured.append, task_id=None)
 
-    # 队首仍在
-    assert len(orch._handoff_queue) == 1
-    # 也没 emit 任何 turn 级 envelope
+    # 死项被丢弃、队列空
+    assert len(orch._handoff_queue) == 0
+    # 没 emit 任何 turn 级 envelope（死项不跑）
     assert not any(
         e.type in (ChahuaEventType.TURN_START, ChahuaEventType.TURN_END)
         for e in captured
