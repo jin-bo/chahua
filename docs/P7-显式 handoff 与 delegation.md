@@ -93,31 +93,42 @@ AI propose：茶客调 task_propose_handoff(kind="review", target="B", message_i
 AI propose：暂不开放（见 §4.1）—— 茶客自己拉圆桌的成本/收益不对称
 ```
 
-- **效果**：所有指定茶客在**同一逻辑轮次**内**串行**各发一次（绕开"单 turn 1~2 个 speak"上限），
-  完成后**自动**让 summarizer 茶客发一条 consolidate；无 summarizer 则等用户。
-- **数据结构口径**：panel 是**一个** HandoffItem（持 `targets: tuple[str, ...]`，`to_dict()` 转 list 给 envelope；见 §3.1），不拆 N 项 ——
-  对应 orchestrator 的一个 turn / 一个 `turn_start` / `winners=targets`，与 P6 现有 turn 语义对齐。
+> **v1 → v2 修订（2026-05-20 评审，落地见 [`P7.3-圆桌 panel.md`](P7.3-圆桌%20panel.md) §5.3）**：
+> 本节早期把 summarizer 设计成**独立入队的第二个 `HandoffItem`**（`kind=delegate`），靠
+> `panel_group_id` 与 panel item 关联、inbound 原子入队两项。评审指出这条路线让「panel +
+> summarizer 同一次 drain 跑完」的承诺不成立（cap 数学算不进跨 turn 已消耗的轮数）、会留
+> 「孤儿 summarizer」（panelist 被删到 < 2 时 panel item 被丢但 summarizer 项滞留）、且把
+> `panel_group_id` 从展示字段升格成调度语义字段。**v2 把 summarizer 收进 panel item 自身**
+> （`HandoffItem.summarizer` 字段）、让它在**同一个 turn** 内作为最后一位 speaker。下文已按
+> v2 重写；`panel_group_id` 字段删除。
+
+- **效果**：N 位指定茶客 + 可选 summarizer F 在**同一个 turn** 内**串行**各发一次（绕开
+  "单 turn 1~2 个 speak"上限）——N 位先依次给平行观点，F 最后发一条 consolidate；
+  无 summarizer 则 N 位说完即等用户。
+- **数据结构口径**：panel 是**一个**自描述 `HandoffItem`，持 `targets: tuple[str, ...]`
+  （N 位 panelist，≥2）+ `summarizer: Optional[str]`（可选汇总者）两字段（`to_dict()`
+  把 `targets` 元组转 list 给 envelope；见 §3.1），不拆 N 项 —— 对应 orchestrator 的一个
+  turn / 一个 `turn_start` / `winners=list(targets)[+summarizer]`，与 P6 现有 turn 语义对齐。
   拆 N 项 → 变成 N 个 pick 周期 / N 个 turn / debug 抽屉显示 N 条独立 turn，"圆桌讨论"
   语义就崩了。
-- **summarizer 入队由 inbound handler 一次性做**（评审反馈 v4-#2）：接收 `handoff_panel`
-  inbound 时，handler **原子性入队两项**：①panel item + ②summarizer delegate item，
-  两项共享 `panel_group_id`。**不允许** orchestrator 在 panel 完成后再"生成"
-  summarizer item ——`HandoffItem` 不保存 summarizer 字段，orchestrator 跑完 panel
-  后不知道给谁入队；让 orchestrator 持 `summarizer` 状态会污染队列的"自描述"语义，
-  与既有"queue 全部信息在 items 里"口径冲突。
+- **summarizer 是 panel item 自己的字段、跑在同一个 turn 里**（v2 收敛）：inbound handler
+  校验通过后构造**一个** `HandoffItem(kind=panel, targets=..., summarizer=...)`，drain loop
+  pop 出后 `winners = list(targets) + ([summarizer] if summarizer else [])`，summarizer 是
+  `winners[-1]`、在同一 `turn_id` 下作为末位 speaker。**不允许**把 summarizer 拆成独立入队的
+  第二个 `HandoffItem`、**不引入** `panel_group_id`——一个自描述 item、一个 turn、一次 cap
+  决策，这正是 v1 三个连带问题（cap 承诺破产 / 孤儿 summarizer / `panel_group_id` 过度耦合）
+  同时消失的关键。
 - **关键决策：串行执行 + UI 标注"并行讨论中"**，不真并行 emit —— 见 §4.2。
-- **token 成本上限**：P7.3 起步阶段**硬编码** `MAX_PANEL_TARGETS = 4`（写在常量，不进 toml）；
-  当用户开始 hit 上限时，再加 `[panel]` toml 段（见 §7 阶段化）。
-- **panel + summarizer 与 `max_consecutive_ai_turns` 的关系**（评审反馈 #1）：
-  panel 一项 N 个 targets 跑一个 turn，summarizer 是**下一个** delegate 项跑**另一个** turn ——
-  也就是说 panel+summarizer 一共消耗 `N + 1` 轮 `_consecutive_ai_turns` 配额。
-  默认 `max_consecutive_ai_turns = 4` 时，4 人 panel 把预算用完，summarizer 会被推迟（等下一次
-  用户触发） / 实质不跑，与"自动汇总"承诺冲突。
-  **修法（不加新配置）**：handoff_panel inbound 校验时按
-  `effective_max = MAX_PANEL_TARGETS if summarizer is None else max_consecutive_ai_turns - 1`，
-  最终 cap = `min(MAX_PANEL_TARGETS, effective_max)`；超出 → NOTICE error + 丢帧（提示用户
-  减少 targets 或去掉 summarizer）。`max_consecutive_ai_turns ≤ 1` 时禁用 panel+summarizer 组合
-  （此时根本跑不下"N 人 + 汇总"）。
+- **token 成本上限**：P7.3 起步阶段**硬编码** `MAX_PANEL_TARGETS = 4`（写在 `handoff.py`
+  常量，不进 toml）；当用户开始 hit 上限时，再加 `[panel]` toml 段（见 §7 阶段化）。
+- **panel + summarizer 与 `max_consecutive_ai_turns` 的关系**：panel + summarizer 是
+  **同一个 item、同一个 turn**，`cost = len(targets) + (summarizer 有无)`。inbound 校验按
+  `cap = min(MAX_PANEL_TARGETS, max_consecutive_ai_turns - has_summarizer)`，
+  `len(targets) > cap` → NOTICE error + 丢帧（提示减少 targets 或去掉汇总者）；
+  `max_consecutive_ai_turns ≤ 1` 且带 summarizer 时 `cap ≤ 0`、panel+summarizer 组合天然
+  禁用。drain while-entry cap 检查再拿 **live** 的 `_consecutive_ai_turns` 与 `cost` 比——
+  撞 cap 则整项不 pop、留队首等下次用户触发；不撞则整轮跑（含汇总）。**没有「panel 跑了
+  summarizer 被推迟」的中间态**——它们在同一个 `for` 循环里，物理上不可分。
 
 ---
 
@@ -139,18 +150,20 @@ class HandoffItem:
     kind: Literal["delegate", "review", "panel"]   # P7.1 实际只接 "delegate"
     # delegate / review: 单一目标
     target: Optional[str] = None
-    # panel: 多目标；一项对应一个 turn / 一次 pick 返回 winners=list(targets)。
+    # panel: 多目标；一项对应一个 turn / 一次 pick 返回 winners=list(targets)[+summarizer]。
     # **用 tuple 不用 list**（评审反馈 v7-#4）：dataclass(frozen=True) 只锁字段重绑
     # 不锁内部容器；如果用 list 即使 frozen 也能被外部 caller 改掉队列里的 targets。
     # to_dict() 时再转 list 给 envelope。
     targets: Optional[tuple[str, ...]] = None
+    # panel 专用：可选汇总者名（圆桌末位 speaker）。delegate / review 项恒 None。
+    # **summarizer 是 panel item 自己的字段**（v2 收敛，2026-05-20 评审）——不拆成独立
+    # 入队的第二个 HandoffItem、不引入 panel_group_id；summarizer 跑在与 panelist
+    # **同一个 turn** 里、是 winners[-1]，与 panel 同生共死，不会留"孤儿 summarizer"。
+    summarizer: Optional[str] = None
     issued_by: str = "user"        # "user" 或茶客名（propose 采纳后实际仍是 user）
     reason: Optional[str] = None   # 触发说明，进 debug record metadata
     review_message_id: Optional[str] = None   # review 专用（P7.2 只支持 message scope）
     created_at_ms: int = 0
-    # panel 完成后自动入队的 summarizer delegate 是**另一个** HandoffItem，
-    # 不作为本项字段；保留下面这个仅用于前端"队列预览"分组显示：
-    panel_group_id: Optional[str] = None      # panel 与其 summarizer 共享一个 group_id
 
     def to_dict(self) -> dict:
         """送 envelope 用；targets 元组转 list 让前端 / json 兼容。"""
@@ -226,7 +239,7 @@ class Orchestrator:
 
 | 事件 type | 何时 emit | data 关键字段 |
 |---|---|---|
-| `handoff_enqueued` | 队列入项后 | `queue: [i.to_dict() for i in snapshot]` —— **权威快照**（dataclass 序列化后的 dict 列表）；前端 `handoffQueueState` **整体替换**而非按单项增量拼。可选 `item: i.to_dict()` 标注本次新入项供 UI 高亮，但状态不能靠它推（panel inbound 一次入两项时 `item` 语义不清 —— 建议默认只发 `queue`，需要高亮另开字段） |
+| `handoff_enqueued` | 队列入项后 | `queue: [i.to_dict() for i in snapshot]` —— **权威快照**（dataclass 序列化后的 dict 列表）；前端 `handoffQueueState` **整体替换**而非按单项增量拼。panel 是单 item 入队（v2 收敛后 summarizer 收进 item 字段、不再"一次入两项"），队列预览单项渲染 |
 | `handoff_consumed` | `turn_start` 后、首个 speaker 执行前 | `item: i.to_dict()`（dataclass → dict）。**`turn_id` 走 envelope 顶层**（评审反馈 v8-#2：与 `turn_start` / `turn_end` 同口径，不在 data 里重复塞一份），关联取证靠顶层字段 |
 | `handoff_cleared` | `handoff_clear` inbound handler 末尾（无差别 `_cancel_and_drain_inflight` 之后，反向评审 v3-#3 简化） | `items_dropped: [i.to_dict() for i in dropped]` —— 与 `handoff_enqueued.queue` 同口径，dataclass 必须 `to_dict()` 后入 envelope。**只列被丢的队列项**；若 in-flight 被 cancel 则 cancel 路径自己 emit `turn_end status=cancelled` + `message_end status=cancelled`，不重复 emit 进 `items_dropped` |
 | `TASK_PROPOSAL`（已有） | 茶客 propose handoff 时 | `kind: "handoff"` + `payload: {kind:"delegate"|..., target...}` |
@@ -298,8 +311,8 @@ async def run_pending_handoff(self, sink, *, task_id: Optional[str]) -> None:
         # **不 emit envelope**；真正的 turn_start envelope 由 `_emit_turn(TURN_START)` 发。
         turn_id = new_turn_id()
         # trigger 整把 `item` 字典塞进去（评审反馈 v6-#2）：reason / target / issued_by /
-        # panel_group_id 等随现有 trigger dict 落盘 debug；turns_index 仍只投影 trigger.kind，
-        # 不扩 recorder API。
+        # summarizer / panel targets 等随现有 trigger dict 落盘 debug；turns_index 仍只
+        # 投影 trigger.kind，不扩 recorder API。
         self._recorder.start_turn(
             turn_id=turn_id, task_id=task_id,
             trigger={"kind": "handoff", "handoff_item": item.to_dict()},
@@ -483,21 +496,17 @@ def _emit_handoff_envelope(
     ))
 
 async def _inbound_handoff_panel(self, payload, sink):
-    # 同上 1/2/4/5 步骤；**第 3 步特殊**（评审反馈 v4-#2）：
-    # **原子性入队两项**：panel item + 可选 summarizer delegate item，共享 panel_group_id。
-    # 不让 orchestrator 在 panel 跑完后再"生成"summarizer——HandoffItem 不存 summarizer
-    # 字段，跑完 panel 后 orchestrator 无从得知。
-    group_id = new_panel_group_id()
+    # 同上 1/2/4/5 步骤；**第 3 步：单 item 入队**（v2 收敛，2026-05-20 评审）：
+    # summarizer 是 panel item 自己的字段、跑在同一个 turn 里（winners[-1]），
+    # **不**拆成独立入队的第二个 HandoffItem、**不引入** panel_group_id。
     # payload 里 targets 是 list[str]，HandoffItem.targets 形为 tuple[str, ...]
     # （§3.1 frozen dataclass 不可挂可变引用）—— inbound 这层做转换，不需要 helper
-    panel_item = HandoffItem(kind="panel", targets=tuple(targets), panel_group_id=group_id)
+    panel_item = HandoffItem(kind="panel", targets=tuple(targets),
+                             summarizer=summarizer)  # summarizer 可为 None
     # 队列变更只走 Orchestrator 公有方法 —— 严禁 inbound 直接读
     # self._session.orchestrator._handoff_queue（私有字段、口径会被边路绕过）。
-    # snapshot 取最后一次 enqueue_handoff 的返回值即为入队后全队。
+    # snapshot 取 enqueue_handoff 的返回值即为入队后全队。
     snapshot = self._session.orchestrator.enqueue_handoff(panel_item)
-    if summarizer:  # 可选
-        summ_item = HandoffItem(kind="delegate", target=summarizer, panel_group_id=group_id)
-        snapshot = self._session.orchestrator.enqueue_handoff(summ_item)
     self._emit_handoff_envelope(sink, type=ChahuaEventType.HANDOFF_ENQUEUED,
                                 data={"queue": [i.to_dict() for i in snapshot], ...})
     # ... 启动 wrapper（第 5 步）
@@ -549,8 +558,9 @@ vs `ai_chain`。handoff 进入 `run_pending_handoff` 时已清零，会被误判
 `trigger={"kind": "handoff"}` 给 `start_turn`（见上方伪代码），不依赖 `_compute_trigger`。
 
 **panel 一项跑一个 turn**：winners 在 drain loop 内直接从 `HandoffItem` 取，**不走打分**
-（不调 `_pick_next_speaker`）；panel 一项的 N 个 targets 在同一 turn 内串行 speak，turn
-结束后下一项（通常是 summarizer delegate）走下一次 while 迭代。
+（不调 `_pick_next_speaker`）；panel 一项的 `winners = list(targets) + ([summarizer] if
+summarizer else [])` 在同一 `turn_id` 下串行 speak `N(+1)` 次，summarizer 是 `winners[-1]`
+（同一个 turn 的末位 speaker，不是独立队列项）。turn 结束后下一项走下一次 while 迭代。
 
 ### 3.5 toml 配置
 
@@ -771,8 +781,8 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 
 - 队列：内存瞬态（§3.1）。
 - debug 落盘：**复用现有** `scoring_path` 字段扩 enum（§3.1 / `debug_recorder.py::VALID_SCORING_PATHS`），
-  不新增字段。可选 `handoff_item` 子字段（kind/target(s)/issued_by/panel_group_id）随取证一并落，
-  未知字段忽略口径吃下。
+  不新增字段。可选 `handoff_item` 子字段（kind/target(s)/summarizer/issued_by/reason）随取证
+  一并落，未知字段忽略口径吃下。
 - toml：P7.3 起 `MAX_PANEL_TARGETS = 4` 是模块常量，不进 toml（§3.5）。
 
 未来若需要 `[panel]` toml，走 P4 `[room.llm]` 同口径 four-touch checklist
@@ -790,7 +800,7 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 |---|---|---|---|
 | **P7.1** | **delegate only**：内存队列；`enqueue_handoff` + `run_pending_handoff`；server `_inbound_handoff_delegate`；扩展 `scoring_path` enum；UI 茶客侧栏 ⇨ 按钮 + 队列预览；cancel 同步 | 无 | **不碰** task.owner / AI propose / `[panel]` toml |
 | **P7.2** | review：UI 消息气泡"请审…"按钮触发（自带 `message_id`，`scope=message` 唯一档）；`extra_blocks` 参数 + `<review_target>` 块（onboarding/incremental 两条路径都接）。**详细设计见 [`P7.2-请审 review.md`](P7.2-请审%20review.md)** | P7.1 | **不开** `last` / `task` / slash `@msg_id`；右键复制 message_id 仅调试用 |
-| **P7.3** | panel：HandoffItem 持 `targets` 元组（`to_dict` 转 list） 一项跑一个 turn；串行 + `<panel_context>` 注入；`MAX_PANEL_TARGETS = 4` **硬编码常量**；summarizer 作为下一个 delegate 入队；UI 圆桌模式 | P7.1 | **不开** `[panel]` toml / `default_summarizer` / `parallel_prompt_hint` 开关 |
+| **P7.3** | panel：HandoffItem 持 `targets` 元组 + `summarizer` 字段（`to_dict` 转 list）一项跑一个 turn；串行 + `<panel_context>` / `<panel_summary_request>` 注入；`MAX_PANEL_TARGETS = 4` **硬编码常量**；summarizer 收进 panel item 字段、同 turn 末位 speaker（v2 收敛）；UI 圆桌模式 | P7.1 | **不开** `[panel]` toml / `default_summarizer` / `parallel_prompt_hint` 开关；**不**拆双 item / 不引入 `panel_group_id` |
 | **P7.4** | AI propose handoff（`task_propose_handoff` 工具 + `TASK_PROPOSAL` kind="handoff" + 前端卡片 kind 分支） | P7.1–7.3 | 最后开；基础动作稳了再放大 |
 | **P7.5（可选）** | delegate 联动 `task.owner`（勾选"同时设为负责人" + scoring owner bonus） | P7.1 + task | 独立小项，与 P7.1 解耦可后补 |
 | **`[panel]` toml** | 不属于任何阶段；用户开始 hit 上限 / 需要预设 summarizer 时再加 | P7.3 | 走 P4 four-touch checklist |
@@ -834,10 +844,10 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 - **`handoff_consumed` 必须在 `turn_start` 之后 emit**（§3.4，评审反馈 #1）：`turn_id` 走
   envelope **顶层**（与 turn_start / turn_end 同口径），而顶层 `turn_id` 在 `_emit_turn(TURN_START)`
   之前不存在；不能在 popleft 时 emit。`data` 只放 `item`，不在 data 里重复塞 `turn_id`。
-- **panel + summarizer 总轮数受 `max_consecutive_ai_turns` 约束**（§2.3，评审反馈 #1）：
-  `effective_targets ≤ min(MAX_PANEL_TARGETS, max_consecutive_ai_turns - 1)`（有 summarizer 时）
-  / `min(MAX_PANEL_TARGETS, max_consecutive_ai_turns)`（无 summarizer）；超出 → inbound
-  NOTICE error。`max_consecutive_ai_turns ≤ 1` 时禁用 panel+summarizer 组合。
+- **panel + summarizer 总轮数受 `max_consecutive_ai_turns` 约束**（§2.3）：panel + summarizer
+  是同一个 item、同一个 turn，`cost = len(targets) + (summarizer 有无)`；inbound 校验
+  `len(targets) ≤ min(MAX_PANEL_TARGETS, max_consecutive_ai_turns - has_summarizer)`，超出
+  → NOTICE error。`max_consecutive_ai_turns ≤ 1` 且带 summarizer 时禁用 panel+summarizer 组合。
 - **envelope emit 职责拆分**（§3.4 / §3.3，评审反馈 #4 + v3-#4）：`enqueue_handoff` 不带 sink、
   不 emit；`handoff_enqueued` / `handoff_cleared` 由 **server inbound handler** emit；
   `handoff_consumed` 由 **orchestrator** 在 `run_pending_handoff` drain loop 内
@@ -848,9 +858,12 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
   `TurnRecorder.start_turn` / `record_scoring` 只写 in-flight 落盘；handoff drain loop 必须
   按既有 `_run_ai_chain` 顺序走：`new_turn_id → recorder.start_turn → recorder.record_scoring
   → _emit_turn(TURN_START) → emit handoff_consumed → speak winners`。
-- **cap 检查按 item cost 算，不是 cap=1**（§3.4，评审反馈 v3-#2）：panel 一项 = N 次 speak，
-  pop 前算 `cost = len(targets) if panel else 1`；`_consecutive_ai_turns + cost > max` 时
-  **不 pop、直接收尾返回**，队首留到下次用户触发。否则 panel 在 drain 中段执行会越过上限。
+- **cap 检查按 item cost 算，不是 cap=1**（§3.4，评审反馈 v3-#2）：panel 一项 = N(+1) 次
+  speak，pop 前算 `cost = len(targets) + (summarizer 有无) if panel else 1`；
+  `_consecutive_ai_turns + cost > max` 时**不 pop、直接收尾返回**，队首留到下次用户触发。
+  否则 panel 在 drain 中段执行会越过上限。落地另加一档「死项」检查：`cost > max` 本身（典型
+  成因：入队后用户调低 `max`）→ **pop + drop + WARN**（不能 break，否则永久挡死队首），
+  见 [`P7.3-圆桌 panel.md`](P7.3-圆桌%20panel.md) §4.1.1。
 - **server 必经 `_run_handoff_turn` wrapper**（§3.4，评审反馈 v3-#3）：不直接
   `create_task(self._session.orchestrator.run_pending_handoff(...))`。wrapper 结构照搬 `_run_turn`：cancel-safe
   + finally 清 `_inflight_turn_task`。否则"Task exception was never retrieved" WARN +
@@ -858,11 +871,14 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 - **wrapper swallow CancelledError、不 re-raise**（§3.4，评审反馈 v4-#1）：与 `_run_turn`
   同口径。cancel 补偿（`turn_end(cancelled)` + `flush_turn()`，状态走 `messages[].status`）由
   `run_pending_handoff` 内 speak 段 try/except 负责，wrapper 只做日志 + 清 task 槽。
-- **panel 的 summarizer 由 inbound handler 原子入队**（§2.3 / §3.4，评审反馈 v4-#2）：
-  接收 `handoff_panel` 时一次性入队 panel item + 可选 summarizer delegate item，共享
-  `panel_group_id`。**不允许** orchestrator 在 panel 跑完后再"生成"summarizer item ——
-  `HandoffItem` 不存 summarizer 字段，orchestrator 跑完后无从得知；让 orchestrator 持
-  `summarizer` 状态会污染队列的"自描述"语义。
+- **panel 的 summarizer 是 panel item 自己的字段、跑在同一个 turn 里**（§2.3 / §3.1，v2 收敛
+  2026-05-20 评审）：`handoff_panel` inbound **单 item 入队** `HandoffItem(kind=panel,
+  targets=..., summarizer=...)`，drain loop `winners = list(targets)[+summarizer]`，summarizer
+  是 `winners[-1]`。**不允许**把 summarizer 拆成独立入队的第二个 `HandoffItem`、**不引入**
+  `panel_group_id`——v1 双 item 路线让「panel + summarizer 同一次 drain 跑完」承诺破产、会留
+  「孤儿 summarizer」、把 `panel_group_id` 从展示字段升格成调度语义字段（评审三连否决，详见
+  [`P7.3-圆桌 panel.md`](P7.3-圆桌%20panel.md) §5.3）。一个自描述 item / 一个 turn / 一次 cap
+  决策。
 - **`ScoreResult.kind` 复用 `ScoreKind.MENTION`**（§3.1，评审反馈 #5）；handoff 在
   `raw="handoff_delegate"` / `"handoff_review"` / `"handoff_panel"` 维度区分，真正归类
   走 `scoring_path` enum。不新增 `ScoreKind` 值，绕过 inner cap 的现有逻辑自然成立。
@@ -1006,7 +1022,7 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 | **P7.1.2** | `chahua/debug_recorder.py` 扩 `VALID_SCORING_PATHS` enum：**P7.1 只加 `SCORING_PATH_HANDOFF_DELEGATE`**（`_HANDOFF_REVIEW` / `_HANDOFF_PANEL` 留给 P7.2 / P7.3 阶段加 —— 反向评审 #6 部分采纳；这两条常量 P7.1 没有 callsite 消费）；白名单 frozenset 同步加一条 | 无 | 单测：`record_scoring(scoring_path="handoff_delegate")` 不挂；非法 path 仍降级为 `SCORING_PATH_SCORING` | `57040fb` |
 | **P7.1.3** | `chahua/events.py` 加 3 个新 `ChahuaEventType`：`HANDOFF_ENQUEUED` / `HANDOFF_CONSUMED` / `HANDOFF_CLEARED`；`schema_version` 不动。**不加 `new_handoff_id()` helper**（评审反馈 v5-#3：当前协议只有 `handoff_clear` 全清、无单项取消、`HandoffItem` 也无 id 字段——过度设计；队列预览按数组顺序维护即可，未来真做单项取消再加） | 无 | grep：value 字符串与 §3.3 envelope 表对齐 | `57040fb` |
 | **P7.1.4** | `chahua/orchestrator.py` 加 `self._handoff_queue: deque[HandoffItem]` 内存字段；新增 `enqueue_handoff(item)` 返回 snapshot / `clear_handoff_queue()` 返回被丢项 list —— **纯方法，无 sink、无 emit**。reset_room / 切房路径需把队列清掉（与 in-flight 同口径） | P7.1.1 | 单测：① enqueue → snapshot 一致；② clear → 返回值含被丢项；③ reset_room 后队列空 | `57040fb` |
-| **P7.1.5 (承重墙)** | `chahua/orchestrator.py` 加 `run_pending_handoff(sink, *, task_id)` drain loop（§3.4 伪代码）：入口清零 `_consecutive_ai_turns` / `_rounds_without_user_or_mention`；while 内 peek 队首算 `cost`、超 cap 不 pop 直接 break；mint turn_id → `recorder.start_turn(turn_id, task_id, trigger={"kind": "handoff", "handoff_item": item.to_dict()})`（**`trigger` 必须带 `handoff_item`**，否则 reason / target / issued_by / panel_group_id 全丢；评审反馈 v6-#2） → 为每 winner 生成 `ScoreResult(score=1.0, kind=MENTION, raw="handoff_delegate")`（评审反馈 v5-#2）→ `record_scoring(threshold=None, results=[(r, None) for r in score_results], winners=winners, scoring_path="handoff_delegate", ...)`（**`threshold=None`** 与 mention / broadcast 同口径，**不要写 0.0**；评审反馈 v7-#1。**注意 tuple 列表形**，prompt 传 None；评审反馈 v6-#1）→ `_emit_turn(TURN_START, data={"scores": [...], "scoring_path": ...})`（**用既有 `data: dict` 签名，不扩 kwargs**；评审反馈 v6-#2） → emit `HANDOFF_CONSUMED` envelope（**顶层 `turn_id`**，`data` 只含 `item`，不在 data 里重复塞 turn_id；评审反馈 v8-#2） → **复用既有 `_let_speak(...)` helper** 串行跑 winners（评审反馈 v6-#4：不抽 `_speak_one`，P7.2 真需要 extra_blocks 再给 `_let_speak` 加形参） + cancel fixup（try/except CancelledError → `_emit_cancel_fixup` + `self._recorder.flush_turn()` + raise，**flush_turn 无参**，状态走 messages[].status 表达，评审反馈 v5-#1）→ **末尾 5 步顺序严格对齐 `_run_ai_chain:376-399`**（反向评审 v2-#1 修正）：① peek 下一项 + 算 cost + 比 cap → `next_state` → ② 一次性 emit `_emit_turn(TURN_END, data={"next": next_state})`（不再发 speculative `next="ai"` 再补 `next="user"` 帧，反向评审 #3） → ③ `self._recorder.flush_turn()` → ④ `_kick_summarize()` / `_tick_cooldown()` / `_kick_detect_new_artifacts(sink, task_id)`（与 `_run_ai_chain:396-399` 同口径，反向评审 #1；**禁止把 hook 放到 turn_end 之前**——否则 `task_artifact_added` 早于 `turn_end`，前端状态错位） → ⑤ `if not has_next: return`；**不**回落 scoring | P7.1.2, P7.1.3, P7.1.4 | 单测：① 空队列直接返回；② 单条 delegate 跑通 + turn_id 一致；③ cap 撞顶不 pop 队首；④ speak 中段 cancel → `turn_end(cancelled)` + recorder 落一行（messages[].status="cancelled"）+ 队列剩余项保留；⑤ 队列空后**不回落 scoring**（mock `_run_ai_chain` 不被调）；⑥ `turn_start.data.scores` 含 winner 名；⑦ **正常完成单条 delegate 时 `_kick_detect_new_artifacts` 被调 1 次**（mock 验证 / 或写一个测：drain 前在 `tasks/<active>/artifacts/` 放一个新文件，drain 完成后断言 `task_artifact_added` envelope 已 emit）；⑧ **每个 turn 末尾只 emit 一帧 `turn_end`**（不再有 ai + user 两帧重叠）；⑨ **`turn_end` envelope 顺序在 `_kick_detect_new_artifacts` 触发的 `task_artifact_added` envelope 之前**（mock sink 记录 emit 顺序断言；与 `_run_ai_chain` 同口径） | `57040fb` |
+| **P7.1.5 (承重墙)** | `chahua/orchestrator.py` 加 `run_pending_handoff(sink, *, task_id)` drain loop（§3.4 伪代码）：入口清零 `_consecutive_ai_turns` / `_rounds_without_user_or_mention`；while 内 peek 队首算 `cost`、超 cap 不 pop 直接 break；mint turn_id → `recorder.start_turn(turn_id, task_id, trigger={"kind": "handoff", "handoff_item": item.to_dict()})`（**`trigger` 必须带 `handoff_item`**，否则 reason / target / targets / summarizer / issued_by 全丢；评审反馈 v6-#2） → 为每 winner 生成 `ScoreResult(score=1.0, kind=MENTION, raw="handoff_delegate")`（评审反馈 v5-#2）→ `record_scoring(threshold=None, results=[(r, None) for r in score_results], winners=winners, scoring_path="handoff_delegate", ...)`（**`threshold=None`** 与 mention / broadcast 同口径，**不要写 0.0**；评审反馈 v7-#1。**注意 tuple 列表形**，prompt 传 None；评审反馈 v6-#1）→ `_emit_turn(TURN_START, data={"scores": [...], "scoring_path": ...})`（**用既有 `data: dict` 签名，不扩 kwargs**；评审反馈 v6-#2） → emit `HANDOFF_CONSUMED` envelope（**顶层 `turn_id`**，`data` 只含 `item`，不在 data 里重复塞 turn_id；评审反馈 v8-#2） → **复用既有 `_let_speak(...)` helper** 串行跑 winners（评审反馈 v6-#4：不抽 `_speak_one`，P7.2 真需要 extra_blocks 再给 `_let_speak` 加形参） + cancel fixup（try/except CancelledError → `_emit_cancel_fixup` + `self._recorder.flush_turn()` + raise，**flush_turn 无参**，状态走 messages[].status 表达，评审反馈 v5-#1）→ **末尾 5 步顺序严格对齐 `_run_ai_chain:376-399`**（反向评审 v2-#1 修正）：① peek 下一项 + 算 cost + 比 cap → `next_state` → ② 一次性 emit `_emit_turn(TURN_END, data={"next": next_state})`（不再发 speculative `next="ai"` 再补 `next="user"` 帧，反向评审 #3） → ③ `self._recorder.flush_turn()` → ④ `_kick_summarize()` / `_tick_cooldown()` / `_kick_detect_new_artifacts(sink, task_id)`（与 `_run_ai_chain:396-399` 同口径，反向评审 #1；**禁止把 hook 放到 turn_end 之前**——否则 `task_artifact_added` 早于 `turn_end`，前端状态错位） → ⑤ `if not has_next: return`；**不**回落 scoring | P7.1.2, P7.1.3, P7.1.4 | 单测：① 空队列直接返回；② 单条 delegate 跑通 + turn_id 一致；③ cap 撞顶不 pop 队首；④ speak 中段 cancel → `turn_end(cancelled)` + recorder 落一行（messages[].status="cancelled"）+ 队列剩余项保留；⑤ 队列空后**不回落 scoring**（mock `_run_ai_chain` 不被调）；⑥ `turn_start.data.scores` 含 winner 名；⑦ **正常完成单条 delegate 时 `_kick_detect_new_artifacts` 被调 1 次**（mock 验证 / 或写一个测：drain 前在 `tasks/<active>/artifacts/` 放一个新文件，drain 完成后断言 `task_artifact_added` envelope 已 emit）；⑧ **每个 turn 末尾只 emit 一帧 `turn_end`**（不再有 ai + user 两帧重叠）；⑨ **`turn_end` envelope 顺序在 `_kick_detect_new_artifacts` 触发的 `task_artifact_added` envelope 之前**（mock sink 记录 emit 顺序断言；与 `_run_ai_chain` 同口径） | `57040fb` |
 | **P7.1.6** | `chahua/server.py`：① 加 `self._inflight_kind: Optional[Literal["user","handoff"]] = None` 与 `_inflight_turn_task` 同槽（反向评审 v2-#3 / v3-#1）；② **所有创建 `_run_turn` task 的入口都标 "user"**（反向评审 v4-#1）：`_inbound_user_message`（chahua/server.py:632）+ `_kick_synthesized_user_message`（chahua/server.py:444）；`_run_turn` wrapper finally 多清一行 `self._inflight_kind = None`（现状只清 `_inflight_turn_task`）；③ 加 `_inbound_handoff_delegate` / `_inbound_handoff_clear` handler + `_INBOUND_ROUTES` 表两行：payload 严格白名单（`{type, target, reason?}` 等，未知字段 → NOTICE error 丢帧）；④ **`_inbound_handoff_delegate` 条件性 cancel + 条件性启动 wrapper**（反向评审 v3-#1）：`if self._inflight_kind == "user": await self._cancel_and_drain_inflight()` → `snapshot = self._session.orchestrator.enqueue_handoff(item)` → `self._emit_handoff_envelope(sink, type=HANDOFF_ENQUEUED, data={"queue": [...]})` → `if self._inflight_turn_task is None: self._inflight_kind = "handoff"; self._inflight_turn_task = asyncio.create_task(self._run_handoff_turn(...))`；in-flight 是 handoff drain 时**不** cancel、**不**启 task（drain 内 while 自然消费新项）；⑤ **`_inbound_handoff_clear` 无差别**（反向评审 v3-#3 简化）：`await self._cancel_and_drain_inflight()` → `dropped = self._session.orchestrator.clear_handoff_queue()` → `self._emit_handoff_envelope(sink, type=HANDOFF_CLEARED, data={"items_dropped": [...]})`；clear 不挂 wrapper（队列已空，没有要 drain 的） | P7.1.5 | 单测：① 未知字段 → NOTICE error；② target 不存在 → NOTICE error 不入队；③ 合法 delegate inbound → `handoff_enqueued` envelope + `_inflight_turn_task` 非 None + `_inflight_kind == "handoff"`；④ handoff drain 中 `handoff_clear` → in-flight 被 cancel + `items_dropped` 含剩余；⑤ **handoff drain 中再 delegate B → 不 cancel 当前 + B append 队尾**（核心保护队列回归测，反向评审 v3-#1）；⑥ user-turn 跑期间 delegate → cancel user-turn + 启动 handoff drain；⑦ **synthesized user-turn（`_kick_synthesized_user_message`）跑期间 delegate → 也按 user-turn 路径走（cancel + 启动 handoff drain）**（反向评审 v4-#1 回归测；模拟一个 task handler 触发 synth turn + 紧跟 delegate）；⑧ 无 in-flight 时 `handoff_clear` 直接清队列不挂 task | `57040fb` |
 | **P7.1.7** | `chahua/server.py` 加 `_run_handoff_turn(sink, *, task_id)` wrapper（照搬 `_run_turn`：try `await self._session.orchestrator.run_pending_handoff(...)` / except CancelledError swallow + `_log.info` / except Exception swallow + log.exception / finally **同槽清** `self._inflight_turn_task = None; self._inflight_kind = None`，反向评审 v2-#3）；inbound handler 第 5 步走它而不是直接 create_task | P7.1.6 | 单测：① 正常跑完 `_inflight_turn_task` 与 `_inflight_kind` 都被清；② 中途 cancel → swallow 不 reraise + 两槽都清；③ 内部异常 → swallow + log + 两槽都清；④ busy 判定 (`_inflight_turn_task is not None and not done()`) 与 user-turn 同口径 | `57040fb` |
 | **P7.1.8** | 前端 `app/renderer/events.js` 加 3 个 `EventType` 常量（`HANDOFF_ENQUEUED` / `HANDOFF_CONSUMED` / `HANDOFF_CLEARED`） + `Inbound.HANDOFF_DELEGATE` / `HANDOFF_CLEAR`；`renderer.js` 收 `handoff_*` 时维护本地 `handoffQueueState`（数组 + group_id 分组）；刷新 / 切房时 reset | P7.1.6 | dev：F12 console 打 `__chahua_handoff_state` 能看到队列；切房后清零 | `519ad47` |
