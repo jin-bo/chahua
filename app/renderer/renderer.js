@@ -243,6 +243,8 @@ function closePermissionPopover() {
   permissionPopover?.close();
 }
 function showPermissionPopover(anchor, g) {
+  // 权限 popover 与 ⇨ delegate popover 共用茶客行 anchor —— 互斥，开一个关另一个。
+  closeHandoffPopover();
   permissionPopover?.show(anchor, g);
 }
 
@@ -252,6 +254,8 @@ function closeHandoffPopover() {
   handoffPopover?.close();
 }
 function showHandoffPopover(anchor, guestName) {
+  closePermissionPopover();
+  closeActionPopover();
   handoffPopover?.show(anchor, guestName);
 }
 
@@ -491,7 +495,7 @@ function renderSidebar(roomInfo) {
     // drain 跑期间不 disable —— 此时 delegate 应 append 到队尾、不抢占。
     const delegate = document.createElement("button");
     delegate.type = "button";
-    delegate.className = "guest-delegate";
+    delegate.className = "row-icon-btn guest-delegate";
     delegate.textContent = "⇨";
     delegate.title = `把下一句指派给 ${g.name}（加入队列）`;
     delegate.addEventListener("click", (ev) => {
@@ -502,7 +506,7 @@ function renderSidebar(roomInfo) {
     li.appendChild(delegate);
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "row-remove";
+    remove.className = "row-icon-btn row-remove";
     remove.textContent = "×";
     if (lastGuestLock) {
       remove.disabled = true;
@@ -558,7 +562,7 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
       // 删除房间按钮 —— 只对非当前房显示。当前房不能删（先切走再删，与 server 端约束一致）。
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.className = "row-remove";
+      remove.className = "row-icon-btn row-remove";
       remove.textContent = "×";
       remove.title = `删除房间 ${r.name || r.room_id}`;
       remove.addEventListener("click", (ev) => {
@@ -1031,6 +1035,7 @@ const composerTaskChip = createComposerTaskChip({
   closeOtherPopovers: () => {
     closeActionPopover();
     closePermissionPopover();
+    closeHandoffPopover();
   },
 });
 
@@ -1221,10 +1226,10 @@ function clearCurrentRoom() {
   setStatus("", `清空「${roomName}」…`);
 }
 
-// 跨 popover 互斥：开 action 前先关 permission（反向不需要 —— 头像 click 与
-// anchor dblclick 物理不冲突）。
+// 跨 popover 互斥：开 action 前先关 permission / handoff。
 function showActionPopover(anchor, title, items) {
   closePermissionPopover();
+  closeHandoffPopover();
   openActionPopover(anchor, title, items);
 }
 

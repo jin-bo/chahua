@@ -271,16 +271,14 @@
   white-space: nowrap;
 }
 
-/* 行内"删除"按钮 —— hover 行时浮现。茶客行 / 房间行共用：圆角小红 ×。
-   disabled（最后一位茶客）灰色不响应。 */
-.row-remove {
+/* 行内圆形小按钮基座 —— 茶客行 / 房间行 hover 才浮现。.row-remove（删除红）/
+   .guest-delegate（⇨ 交给棕）只在这之上改 color / font-size / hover 配色。 */
+.row-icon-btn {
   margin-left: 6px;
   width: 18px;
   height: 18px;
   padding: 0;
-  font-size: 13px;
   line-height: 1;
-  color: #c66;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 50%;
@@ -289,32 +287,18 @@
   transition: opacity 0.12s;
   font-family: inherit;
 }
-#guests li:hover .row-remove,
-#rooms li:hover .row-remove,
-.row-remove:focus { opacity: 1; }
+#guests li:hover .row-icon-btn,
+#rooms li:hover .row-icon-btn,
+.row-icon-btn:focus { opacity: 1; }
+
+/* "删除" ×：圆角小红。disabled（最后一位茶客）灰色不响应。 */
+.row-remove { font-size: 13px; color: #c66; }
 .row-remove:hover:not(:disabled) { background: #fbe6e6; border-color: #f5b3b3; }
 .row-remove:disabled { color: #ccc; cursor: not-allowed; opacity: 0; }
 
-/* ⇨ 交给：茶客行 hover 才浮现的 delegate 入口，紧挨 row-remove 左侧。
-   连接断时整 body.disconnected 把它灰掉（与 .dblclick-anchor 同口径）。 */
-.guest-delegate {
-  margin-left: 6px;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  font-size: 12px;
-  line-height: 1;
-  color: #6b4f2a;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 50%;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s;
-  font-family: inherit;
-}
-#guests li:hover .guest-delegate,
-.guest-delegate:focus { opacity: 1; }
+/* ⇨ 交给：delegate 入口，紧挨 row-remove 左侧。连接断时整 body.disconnected
+   把它灰掉（与 .dblclick-anchor 同口径）。 */
+.guest-delegate { font-size: 12px; color: #6b4f2a; }
 .guest-delegate:hover { background: #ece5d2; border-color: #d8c9a3; }
 body.disconnected .guest-delegate {
   color: #ccc;
