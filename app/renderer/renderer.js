@@ -141,6 +141,9 @@ const send = (payload) => ws.send(JSON.stringify(payload));
 let currentTurnId = null;
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
+// renderSidebar 上次渲染的房间 id —— 用来区分"真正切房" vs "同房 room_info 刷新"
+// （改头像 / 改设置 / 增删茶客都会重发 room_info）。handoff 队列预览只在真正切房时清。
+let handoffRoomId = null;
 // 茶客行 → 打分 span 的引用。sidebar 装好后填，turn_start/turn_end 直接改文字，
 // 不重建 DOM（避免头像 / 徽章闪烁）。
 const scoreSpansByName = new Map();
@@ -435,8 +438,16 @@ function renderSidebar(roomInfo) {
   proposalCard.reset();
   // 调试抽屉只看实时本会话；切房 / 重连 / 清空 → reset 清 turn 记录。
   debugPanel.reset();
-  // handoff 队列是调度层瞬态（不落盘）—— 切房 / 重连 / 清空都强清，避免旧房队列残留。
-  handoffState.reset();
+  // handoff 队列是调度层瞬态（不落盘）。只在**真正切房**时清 —— renderSidebar 每条
+  // room_info 都跑（含改头像 / 改设置 / 增删茶客等同房刷新），无差别 reset 会在服务端
+  // 队列仍在时把预览抹掉，且服务端不会在 room_info 里重发 handoff_enqueued 补救
+  // （队列不进房间快照）。同房刷新 → 队列原样保留。clear_room 走 reset_room 清服务端
+  // 队列，由 clearCurrentRoom 单独 reset；switch_room 房间 id 变 → 这里自然清。
+  const nextRoomId = roomInfo.current_room_id ?? null;
+  if (nextRoomId !== handoffRoomId) {
+    handoffState.reset();
+    handoffRoomId = nextRoomId;
+  }
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
@@ -1234,6 +1245,9 @@ function clearCurrentRoom() {
   const roomName = roomNameEl.textContent;
   if (!window.confirm(`确定清空「${roomName}」的全部聊天记录？\n茶客在场，但本房间的 transcript / 摘要 / 游标会被重置。`)) return;
   ws.send(JSON.stringify({ type: Inbound.CLEAR_ROOM }));
+  // 服务端 reset_room 会清 handoff 队列，但回环的 room_info 房间 id 不变 ——
+  // renderSidebar 的切房判定不会触发，这里显式 reset 让预览跟上。
+  handoffState.reset();
   setStatus("", `清空「${roomName}」…`);
 }
 
