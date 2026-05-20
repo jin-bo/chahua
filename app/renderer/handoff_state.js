@@ -52,6 +52,8 @@ export function applyCleared() {
 }
 
 // 切房 / 重连 / clear_room —— 与 in-flight 流、proposalCard 去重指纹同口径强清。
+// 故意不像 applyCleared 那样在 queue 已空时 early-return：reset 是生命周期硬清，
+// 订阅者需要无条件收一次 notify 对着新房间上下文重渲（哪怕队列恰好 0→0）。
 export function reset() {
   queue = Object.freeze([]);
   publish();
