@@ -54,6 +54,7 @@
   - 新增 `app/renderer/assign_popover.js`（`createAssignPopover`）；删除 `handoff_popover.js` / `panel_popover.js`；删除侧栏「圆桌」toggle（`panel-mode-toggle`）/ 多选模式 / `panel-launch` 条 / 茶客行 ⇨ 按钮及其全部 CSS。`index.html` composer 底栏加 `#assign-handoff` 按钮。
   - **纯前端改动**：inbound 协议（`handoff_delegate` / `handoff_panel` / `handoff_review` / `handoff_clear`）、五道校验、drain 调度层、`schema_version` 全部不变。客户端 cap 预校验数学（`min(MAX_PANEL_TARGETS, max_consecutive_ai_turns - has_summarizer)`）原样保留进新 popover。
   - **review 不动**：消息气泡「请审…」按钮是消息锚定的（要先选哪条消息），留在气泡上，仅样式跟随统一。设计文档 P7 §5.1 / P7.3 §6.1 加 2026-05-20 后续修订注。
+- **开源协议 MIT → Apache License 2.0**（2026-05-21）：`LICENSE` 换成 Apache 2.0 全文（`Copyright 2026 Bo Jin`）；`pyproject.toml` 的 `license` 字段改 `Apache-2.0`（SPDX）；`README.md` License 节同步。Apache 2.0 在 MIT 的宽松基础上多了显式专利授权与商标条款。
 
 ## [0.1.1] - 2026-05-19
 

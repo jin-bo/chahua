@@ -97,4 +97,4 @@ P3.3.2 内未做。Windows .exe 接缝（`build:win`）已配，跑构建需 Win
 
 ## License
 
-MIT —— 详见 [`LICENSE`](LICENSE)。
+Apache License 2.0 —— 详见 [`LICENSE`](LICENSE)。

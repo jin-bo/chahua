@@ -3,7 +3,7 @@ name = "chahua"
 version = "0.1.2.dev0"
 description = "茶话室 —— 多 Agent 群聊桌面 App"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
