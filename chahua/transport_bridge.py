@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from agentao.transport import AgentEvent, EventType, SdkTransport
 
@@ -39,6 +39,12 @@ from .task_tools import TASK_WRITE_ARTIFACT_TOOL_NAME
 from .tasks_store import _validate_artifact_name
 
 _log = logging.getLogger(__name__)
+
+
+# P8.3：托管会话内拦截管理者 propose 的 hook 签名。收一条 ``TASK_PROPOSAL`` envelope
+# + 当前 bind 的 sink，返回 ``True`` 表示「已处理，别再下发前端」（拦截）、``False``
+# 表示「照常 emit」。Orchestrator 注入 :meth:`Orchestrator._intercept_task_proposal`。
+TaskProposalHook = Callable[["ChahuaEnvelope", EnvelopeSink], bool]
 
 
 class ChahuaTransport(SdkTransport):
@@ -64,6 +70,17 @@ class ChahuaTransport(SdkTransport):
         # P6.1：bind() 时由 TeaGuest 传入；workflow tool_start/complete 事件下钩到这里。
         # 未 bind 时为 NOOP_RECORDER；与 sink 同生命周期。
         self._recorder: TurnRecorder = NOOP_RECORDER
+        # P8.3：托管会话内拦截管理者 propose 的 hook。``None`` = 缺省（非托管房间 /
+        # 测试），``emit_chahua`` 行为与今天完全一致。session 装配时由 Orchestrator
+        # 注入；与 transport 终身绑定（不随 bind / clear 变）。
+        self._task_proposal_hook: Optional[TaskProposalHook] = None
+
+    def set_task_proposal_hook(self, hook: Optional[TaskProposalHook]) -> None:
+        """注入 / 清除 ``TASK_PROPOSAL`` 拦截 hook（P8.3，docs §5.1）。
+
+        session 装配期一次性注入；与 transport 同生命周期，不随每次 ``bind`` 变。
+        """
+        self._task_proposal_hook = hook
 
     # ── per-speak 生命周期 ─────────────────────────────────────────────────
 
@@ -155,19 +172,27 @@ class ChahuaTransport(SdkTransport):
             merged: Mapping[str, Any] = data or {}
         else:
             merged = {**(data or {}), "task_id": self._task_id}
-        emit_to_sink(
-            self._sink,
-            ChahuaEnvelope(
-                room_id=self._room_id,
-                turn_id=self._turn_id,
-                guest_name=self._guest_name,
-                message_id=self._message_id,
-                type=type,
-                status=status,
-                seq=seq,
-                data=merged,
-            ),
+        env = ChahuaEnvelope(
+            room_id=self._room_id,
+            turn_id=self._turn_id,
+            guest_name=self._guest_name,
+            message_id=self._message_id,
+            type=type,
+            status=status,
+            seq=seq,
+            data=merged,
         )
+        # P8.3：托管会话内管理者的 handoff_delegate / handoff_panel 提议被 hook 直接
+        # 入队、拦下不下发前端（不渲采纳卡，docs §5.1）。hook 返回 True = 已拦截。
+        # hook 缺省 None / 非 TASK_PROPOSAL 时这段零成本。hook 抛错不阻断 emit ——
+        # 退化成照常下发（与 emit_to_sink「sink 不能挂掉生产者」同口径）。
+        if type is ChahuaEventType.TASK_PROPOSAL and self._task_proposal_hook is not None:
+            try:
+                if self._task_proposal_hook(env, self._sink):
+                    return
+            except Exception:
+                _log.exception("task_proposal_hook raised; falling back to emit")
+        emit_to_sink(self._sink, env)
 
     def _maybe_record_artifact_path(
         self, tool_name: str, args: Any

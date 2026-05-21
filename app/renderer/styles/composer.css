@@ -429,3 +429,47 @@ body:not(.has-active-task) .pending-file-attach { display: none; }
   background: #d8d0bc;
   cursor: not-allowed;
 }
+
+/* ── P8.3 托管会话（MTS） ───────────────────────────────────────────────── */
+
+/* 「托管」按钮（入口 + 状态 + 停止三合一）在 active 任务卡里 ——
+   见 task_panel.css 的 .task-card-manage-btn。 */
+
+/* 「托管运行」popover —— 复用 .popover 底座，锚到任务卡里的「托管」按钮上方。 */
+.managed-popover-hint {
+  margin: 2px 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #777;
+}
+.managed-popover-field {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #777;
+}
+.managed-popover-manager,
+.managed-popover-budget {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 3px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: #444;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+}
+.managed-popover-confirm {
+  width: 100%;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #fff;
+  background: #3a5266;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.managed-popover-confirm:hover { background: #2e4252; }

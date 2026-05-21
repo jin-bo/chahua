@@ -25,6 +25,7 @@ import {
   buildOwnerOptionData,
   formatTaskLabel,
   formatTaskEventNotice,
+  formatManagedSessionNotice,
   isTaskClosed,
 } from "./events.js";
 import {
@@ -46,6 +47,7 @@ import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
 import { createAssignPopover } from "./assign_popover.js";
 import { createHandoffQueueBar } from "./handoff_queue_bar.js";
+import { createManagedSession } from "./managed_session.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
 import * as handoffState from "./handoff_state.js";
@@ -156,8 +158,8 @@ let userAvatarDataUri = null;
 // 可用 persona 候选（room_info 来时装）—— "添加茶客" / "新建房间"的 picker 用。
 let personasAvailable = []; // [{persona, name, avatar_data_uri}, ...]
 // 房间生效的 max_consecutive_ai_turns（room_info.orchestrator 来时装）—— 圆桌
-// cap 预校验用；缺省 4 与 config.py 默认一致。
-let maxAiTurns = 4;
+// cap 预校验用；缺省 20 与 OrchestratorConfig 默认一致。
+let maxAiTurns = 20;
 
 // 茶客头像 —— 按名字在 guests 数组里 find；茶客 ≤ 个位数，线性查比维护并行 Map 简单
 // （且任何 guests 变更都自动跟上）。
@@ -188,6 +190,8 @@ function setInputEnabled(enabled) {
   addRoomBtn.disabled = !enabled;
   attachFileBtn.disabled = !enabled;
   updateNewTaskBtn();
+  // P8.3：「托管」按钮可点性 = connected + 有 active 任务 + 无 MTS（managedSession 自判）。
+  managedSession?.refresh();
   // 双击 anchor 不走 disabled——dblclick handler 自己看 connected 决定弹不弹 popover。
   // 视觉上 .dblclick-anchor 的 hover 在 :not(.disconnected) 下亮，连接断时变灰。
   document.body.classList.toggle("disconnected", !enabled);
@@ -286,6 +290,9 @@ function showPermissionPopover(anchor, g) {
 // composer 底栏「指派」按钮触发；勾 1 人 = delegate、勾 2~4 人 = panel。delegate 与
 // panel 后端本是同一件事，前端入口也合一，勾选人数定语义。见 ./assign_popover.js。
 let assignPopover = null;
+// P8.3 托管会话模块——工厂实例化在文件后段（依赖 send / guests），先 let 占位让
+// setInputEnabled / taskState.subscribe 等早于实例化的引用点安全（避免 const TDZ）。
+let managedSession = null;
 function closeAssignPopover() {
   assignPopover?.close();
 }
@@ -562,6 +569,8 @@ function renderSidebar(roomInfo) {
   const nextRoomId = roomInfo.current_room_id ?? null;
   if (nextRoomId !== handoffRoomId) {
     handoffState.reset();
+    // P8.3：MTS 与 handoff 队列同瞬态——切房即清状态条。
+    managedSession?.reset();
     handoffRoomId = nextRoomId;
   }
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
@@ -586,7 +595,7 @@ function renderSidebar(roomInfo) {
   renderUserRow();
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
-  maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 4;
+  maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 20;
   renderGuests();
   renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
   // room_info 到达 → composer 解锁；之前 onopen 不再 enable，避免 userDisplayName
@@ -803,6 +812,19 @@ function handleEnvelope(env) {
     case EventType.HANDOFF_CLEARED:
       handoffState.applyCleared();
       return;
+    // P8.3 托管会话（docs/P8.3 §3.4）。三个 hint 事件维护状态条；ended 追系统气泡。
+    case EventType.MANAGED_SESSION_STARTED:
+      managedSession.onStarted(env.data ?? {});
+      return;
+    case EventType.MANAGED_SESSION_ADVANCED:
+      managedSession.onAdvanced(env.data ?? {});
+      return;
+    case EventType.MANAGED_SESSION_ENDED: {
+      const reason = env.data?.reason;
+      managedSession.onEnded(env.data ?? {});
+      appendBubble({ kind: "system", text: formatManagedSessionNotice(reason) });
+      return;
+    }
     case EventType.GUEST_CAPS_INFO: {
       // view 由请求方经 envelope 回声带回 —— 多条 /tools / /skills 并发时各响应
       // 自带"查的是哪段"，不靠全局态对号入座。
@@ -920,6 +942,8 @@ function connect() {
     // 且点 ✕ 会发 handoff_clear 误取消正在跑的 turn。断线即清，与"刷新即清"同口径；
     // 重连后 renderSidebar 房间 id 不变不会再清，靠这里兜底。
     handoffState.reset();
+    // P8.3：MTS 状态条同断线即清（与 handoff 预览同口径）。
+    managedSession?.reset();
     // 拒绝所有等 echo 的上传，让 change handler 的 finally 清 isUploading + 启用附件按钮。
     upload.dropPending(`ws closed (${ev.code})`);
     // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
@@ -1092,6 +1116,16 @@ const handoffQueueBar = createHandoffQueueBar({
 });
 handoffState.subscribe((queue) => handoffQueueBar.render(queue));
 
+// P8.3 托管会话：任务卡里的「托管」按钮（入口 + 状态 + 停止三合一）。状态来自
+// managed_session_* envelope；与 handoff 队列同瞬态——切房 / 断线即 reset。
+managedSession = createManagedSession({
+  send,
+  isConnected: () => connected,
+  setStatus,
+  getGuests: () => guests.map((g) => g.name),
+  getActiveTask: () => taskState.getActiveTask(),
+});
+
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。
 
@@ -1180,6 +1214,9 @@ const taskPanel = createTaskPanel({
     send({ type: Inbound.DOWNLOAD_FILE, rel });
     setStatus("", `下载「${rel}」…`);
   },
+  // P8.3：active 任务卡里的「托管运行」按钮槽位交给 managed_session 模块渲染 ——
+  // 由它按 MTS 状态决定渲「托管运行」还是「托管中」。
+  onMountManage: (slotEl) => managedSession.mountManageButton(slotEl),
 });
 
 // 茶客 propose 卡片渲染 + 去重 + 采纳/忽略闭环。renderSidebar 进新房时调 reset() 清
@@ -1248,6 +1285,8 @@ taskState.subscribe((state) => {
   // body class 给 CSS 用 —— 控制 share/ pill 上 "拷贝到当前任务" 按钮是否可见。
   document.body.classList.toggle("has-active-task", !!active);
   updateNewTaskBtn();
+  // P8.3：active 任务变化 → 刷新「托管」按钮可点性。
+  managedSession?.refresh();
 });
 
 taskPanelNewBtn.addEventListener("click", () => {
@@ -1339,6 +1378,8 @@ function clearCurrentRoom() {
   // 服务端 reset_room 会清 handoff 队列，但回环的 room_info 房间 id 不变 ——
   // renderSidebar 的切房判定不会触发，这里显式 reset 让预览跟上。
   handoffState.reset();
+  // P8.3：reset_room 也清 MTS（orchestrator.reset_room），状态条同步收起。
+  managedSession?.reset();
   setStatus("", `清空「${roomName}」…`);
 }
 

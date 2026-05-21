@@ -45,6 +45,47 @@ HANDOFF_ISSUED_BY_USER = "user"
 """
 
 
+MAX_MANAGED_BUDGET = 20
+"""``managed_session_start`` inbound 的 ``budget`` 上限硬护栏（P8.3，docs §3.1）。
+托管会话自循环烧 token 的兜底之一——预算无论用户填多大都不越过这个数。"""
+
+MANAGED_SESSION_DEFAULT_BUDGET = 6
+"""前端「托管运行」弹窗的预填预算（P8.3，docs §3.1 / §8.1）。仅 UI 默认值，
+后端不依赖——校验只认 ``1..MAX_MANAGED_BUDGET``。"""
+
+
+# MTS 结束 reason —— ``managed_session_ended`` envelope 的 ``data.reason``（docs §2.2）。
+# 封闭 6 值集合，散在 orchestrator / server inbound 多处 emit；立常量同 ``INFLIGHT_KIND_*``
+# 的理由——避免字面值散漏改名漂移。前端 ``events.js`` 按字面值镜像。
+MANAGED_SESSION_REASON_MANAGER_FINISHED = "manager_finished"
+MANAGED_SESSION_REASON_BUDGET_EXHAUSTED = "budget_exhausted"
+MANAGED_SESSION_REASON_TASK_CLOSED = "task_closed"
+MANAGED_SESSION_REASON_CAP_REACHED = "cap_reached"
+MANAGED_SESSION_REASON_USER_STOPPED = "user_stopped"
+MANAGED_SESSION_REASON_USER_CANCEL = "user_cancel"
+
+
+@dataclass
+class ManagedSession:
+    """托管任务会话（MTS）运行态（P8.3，docs/P8.3-原生自动推进.md §3.1）。
+
+    与 :class:`Orchestrator` 的 ``_handoff_queue`` 同瞬态语义：**不落盘**、crash 即丢、
+    ``reset_room`` / 切房即清。单房间最多一个。``_managed_session is None`` 即「无托管」
+    ——不另存 ``enabled`` bool（避免「enabled=False 但对象还在」的二义态）。
+
+    非 ``frozen``：``budget`` 每次「worker→管理者」回调扣 1（docs §4.1）。
+    """
+
+    task_id: str
+    """MTS 驱动的任务 id（= 开启时的 active task）。"""
+
+    manager_guest: str
+    """注册的管理者茶客 name（= speaker_id）。"""
+
+    budget: int
+    """剩余复查回合数。每次「worker→管理者」回调扣 1；kickoff 不耗（docs §2.2）。"""
+
+
 @dataclass(frozen=True, slots=True)
 class HandoffItem:
     """确定性发言队列的一项。"""

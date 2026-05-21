@@ -18,7 +18,7 @@ import { $, createLlmSection } from "./llm_section_form.js";
 // admin 层报错前给用户红字提示，避免来回 echo 等错。
 const ORCH_BOUNDS = Object.freeze({
   want_threshold: { kind: "float", min: 0, max: 1, default: 0.45 },
-  max_consecutive_ai_turns: { kind: "int", min: 1, default: 4 },
+  max_consecutive_ai_turns: { kind: "int", min: 1, default: 20 },
   speaker_cooldown_turns: { kind: "int", min: 0, default: 1 },
   onboarding_threshold: { kind: "int", min: 1, default: 20 },
 });

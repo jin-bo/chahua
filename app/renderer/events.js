@@ -65,6 +65,14 @@ export const EventType = Object.freeze({
   // view} —— 茶客 agent 注册的 tools + 可用 skills + 权限模式；view 是请求方回声，
   // 前端按它裁剪显示哪段。一次性查询、不进 transcript。镜像 chahua/events.py。
   GUEST_CAPS_INFO: "guest_caps_info",
+  // P8.3 托管任务会话（MTS，docs/P8.3-原生自动推进.md §3.4）。三者都是 hint 型事件
+  // —— 前端渲状态条 / 系统气泡，不进 transcript、不触发 AI。镜像 chahua/events.py。
+  //   - MANAGED_SESSION_STARTED  {task_id, manager_guest, budget}
+  //   - MANAGED_SESSION_ADVANCED {manager_guest, remaining_budget}（UI 倒计时）
+  //   - MANAGED_SESSION_ENDED    {reason}（见 formatManagedSessionNotice）
+  MANAGED_SESSION_STARTED: "managed_session_started",
+  MANAGED_SESSION_ADVANCED: "managed_session_advanced",
+  MANAGED_SESSION_ENDED: "managed_session_ended",
 });
 
 // TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
@@ -164,6 +172,11 @@ export const Inbound = Object.freeze({
   HANDOFF_REVIEW: "handoff_review",
   HANDOFF_PANEL: "handoff_panel",
   HANDOFF_CLEAR: "handoff_clear",
+  // P8.3 托管任务会话（docs/P8.3 §3.2）。
+  //   - MANAGED_SESSION_START {task_id, manager_guest, budget}：开启 MTS。
+  //   - MANAGED_SESSION_STOP 无 payload：停止托管（不取消当前 in-flight turn）。
+  MANAGED_SESSION_START: "managed_session_start",
+  MANAGED_SESSION_STOP: "managed_session_stop",
   // /tools / /skills slash 查询。payload: {guest, view}。服务端回 GUEST_CAPS_INFO
   // 并原样带回 view（请求方据此裁剪显示，多查询并发不串台）。
   LIST_GUEST_CAPS: "list_guest_caps",
@@ -261,6 +274,23 @@ export function formatTaskEventNotice(type, data) {
     default:
       return "";
   }
+}
+
+// P8.3：managed_session_ended 的 reason → 居中系统气泡文案。文案唯一来源
+// （同 formatTaskEventNotice 口径）。manager_finished 取中性措辞「托管会话结束」
+// —— 它兜底覆盖「管理者没派活 / 调用链续不下去」，不写「管理者已完成」（docs §2.2）。
+const _MANAGED_SESSION_END_REASONS = Object.freeze({
+  manager_finished: "托管会话结束",
+  budget_exhausted: "托管预算已用尽",
+  task_closed: "任务已关闭，托管会话结束",
+  cap_reached: "已达连续发言上限，托管会话结束",
+  user_stopped: "你停止了托管会话",
+  user_cancel: "托管会话已结束",
+});
+
+export function formatManagedSessionNotice(reason) {
+  const label = _MANAGED_SESSION_END_REASONS[reason] || "托管会话结束";
+  return `🛑 ${label}`;
 }
 
 // goal 取首行并截到 80 字 —— 系统气泡只给一句概要，完整 goal 已在任务面板。

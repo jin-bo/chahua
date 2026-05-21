@@ -110,6 +110,9 @@ export function createTaskPanel({
   // (rel) → 发 download_file inbound 的回调。无 callback 时 artifact 不可点击（保留
   // 纯只读概览语义，便于将来嵌只读视图）。
   onDownloadArtifact = null,
+  // (slotEl) → P8.3：把 active 任务卡里的「托管运行」按钮槽位交给调用方
+  // （managed_session 模块）渲染。无 callback 时不渲托管入口（只读视图）。
+  onMountManage = null,
 }) {
   let collapsed = collapsedPref.read();
   // othersOpen 提到工厂闭包：render 是 task_info 热路径（artifact / decision /
@@ -228,6 +231,16 @@ export function createTaskPanel({
       if (!isTaskClosed(task.status)) {
         card.appendChild(renderTaskCardCloseActions(task));
       }
+    }
+
+    // P8.3：「托管运行」按钮槽位 —— 只非终结态 active 任务可托管（renderTaskCard 只
+    // 渲 active 任务）。槽位的实际渲染交给 managed_session 模块，由它按 MTS 状态决定
+    // 渲「托管运行」还是「托管中」。
+    if (onMountManage && !isTaskClosed(task.status)) {
+      const manageSlot = document.createElement("div");
+      manageSlot.className = "task-card-manage";
+      card.appendChild(manageSlot);
+      onMountManage(manageSlot);
     }
 
     const meta = document.createElement("dl");

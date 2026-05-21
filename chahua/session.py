@@ -479,6 +479,12 @@ def build_room_session(
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
 
+    # P8.3：给每位茶客的 transport 注入托管会话 propose 拦截 hook（docs §5.1）。
+    # 非托管房间 hook 命中即返 False、行为不变；MTS 内管理者的 delegate / panel
+    # 提议经此直接入队、不渲采纳卡。一处装配、与 transport 终身绑定。
+    for guest in guests:
+        guest.set_task_proposal_hook(orchestrator._intercept_task_proposal)
+
     session = RoomSession(
         room=room,
         orchestrator=orchestrator,

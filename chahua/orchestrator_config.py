@@ -17,8 +17,10 @@ class OrchestratorConfig:
     """打分 ≥ 此值才允许发言。0.55 起步时招呼/中性话题全员低于阈值导致冷场（实测），
     降到 0.45 让常见话题至少有一人接住；同时配合 ``threshold_decay_per_turn`` 防 AI 跑飞。"""
 
-    max_consecutive_ai_turns: int = 4
-    """连续 AI 发言数上限；达到后强制让麦给用户。一次"同回合 1~2 人抢话"算 1~2 轮。"""
+    max_consecutive_ai_turns: int = 20
+    """连续 AI 发言数上限；达到后强制让麦给用户。一次"同回合 1~2 人抢话"算 1~2 轮。
+    P8.3 起默认 20（从 4 上调）—— 托管会话（MTS）的 worker↔管理者自循环要在这个硬护栏
+    下跑得开，4 轮放不下「kickoff + 几轮派活复查」；MTS 预算 ``budget`` 仍是用户旋钮。"""
 
     max_speakers_per_pick: int = 2
     """同一回合最多几位茶客同时抢话。设计文档 §3.3 「取分数 ≥ 阈值的前 1~2 名」。

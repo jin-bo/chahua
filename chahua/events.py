@@ -131,6 +131,20 @@ class ChahuaEventType(str, Enum):
     # （``"tools"`` / ``"skills"``），前端按它裁剪显示哪段，多查询并发时不串台。
     # 一次性查询、不进 transcript、不落盘、不挂房间 turn；schema_version 不 bump。
     GUEST_CAPS_INFO = "guest_caps_info"
+    # P8.3 托管任务会话（MTS，docs/P8.3-原生自动推进.md §3.4）。三者都是 **hint 型**
+    # 事件——前端渲状态条 / 系统气泡，不进 transcript、不触发 AI（同 handoff_* /
+    # task_* 口径）。都不挂房间 turn（turn_id / message_id / guest_name 全 None）。
+    # data 形状：
+    #   - MANAGED_SESSION_STARTED  ``{task_id, manager_guest, budget}`` MTS 建立后；
+    #   - MANAGED_SESSION_ADVANCED ``{manager_guest, remaining_budget}`` 每次
+    #     「worker→管理者」回调入队后（UI 倒计时）；
+    #   - MANAGED_SESSION_ENDED    ``{reason}`` MTS 结束时恰好一次（reason 见
+    #     docs §2.2：manager_finished / budget_exhausted / task_closed /
+    #     cap_reached / user_stopped / user_cancel）。
+    # 新增的是事件类型——旧前端遇未知 type WARN 后忽略（向前兼容），不 bump schema_version。
+    MANAGED_SESSION_STARTED = "managed_session_started"
+    MANAGED_SESSION_ADVANCED = "managed_session_advanced"
+    MANAGED_SESSION_ENDED = "managed_session_ended"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

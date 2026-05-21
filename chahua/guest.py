@@ -172,6 +172,14 @@ class TeaGuest:
         """当前权限模式（每次从 agent.permission_engine 拉，避免与运行时切换脱节）。"""
         return self.agent.permission_engine.active_mode.value
 
+    def set_task_proposal_hook(self, hook) -> None:
+        """转发到 :meth:`ChahuaTransport.set_task_proposal_hook`（P8.3）。
+
+        session 装配期由 Orchestrator 注入 ``_intercept_task_proposal`` —— 托管会话内
+        管理者的 delegate / panel 提议经此 hook 直接入队、不渲采纳卡（docs §5.1）。
+        """
+        self._transport.set_task_proposal_hook(hook)
+
     def describe_capabilities(self) -> dict:
         """只读快照：本茶客 agent 注册的 tools + 可用 skills + 当前权限模式。
 

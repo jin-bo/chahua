@@ -5,14 +5,16 @@
 >
 > P8 的技术路线是 **「skill + artifact 约定 + 少量状态提议」**，不是新增一个计划
 > 子系统：
-> - **P8.1（已落地）**：`examples/skill/task-management/SKILL.md` —— 茶客侧任务管理
->   工作手册，完全跑在 P5~P7 已有原语上，零后端改动。这是 **P8 的主方案**。
+> - **P8.1（已落地）**：`examples/personas/Maya/skills/task-management/SKILL.md` ——
+>   茶客侧任务管理工作手册（随 Maya persona bundle），完全跑在 P5~P7 已有原语上，
+>   零后端改动。这是 **P8 的主方案**。
 > - **P8.2（已落地，最小增强）**：只新增一个 `task_propose_status` 工具，补「茶客
 >   无法提议把任务设为 done / blocked / review」这一个真实能力缺口。
-> - **P8.3（草案，未规划）**：原生自动推进 —— 管理者茶客在被指派茶客执行完后自动
->   获得下一回合。难点在 orchestrator 回合模型，与计划是否结构化无关（§6）。
+> - **P8.3（已落地）**：原生自动推进 —— 管理者茶客在被指派茶客执行完后自动
+>   获得下一回合。难点在 orchestrator 回合模型，与计划是否结构化无关。完整设计见
+>   [`P8.3-原生自动推进.md`](P8.3-原生自动推进.md)。
 
-**状态：设计中（2026-05-21，经评审收敛）**。上游契约见 [`P5-任务房间.md`](P5-任务房间.md)
+**状态：P8.1 / P8.2 / P8.3 均已落地（2026-05-21，经评审收敛）**。上游契约见 [`P5-任务房间.md`](P5-任务房间.md)
 （Task / Decision / Artifact 模型、`task_*` 工具、propose / 采纳机制）/ [`P7-显式
 handoff 与 delegation.md`](P7-显式%20handoff%20与%20delegation.md)（handoff drain loop
 回合模型）/ [`P7.4-茶客 propose handoff.md`](P7.4-茶客%20propose%20handoff.md)
@@ -24,7 +26,7 @@ handoff 与 delegation.md`](P7-显式%20handoff%20与%20delegation.md)（handoff
 
 **做**：
 
-- **P8.1**（已落地为 example skill）：`examples/skill/task-management/SKILL.md` 茶客侧
+- **P8.1**（已落地为 persona-bundled skill）：`examples/personas/Maya/skills/task-management/SKILL.md` 茶客侧
   任务管理工作手册，跑在现有原语上。
 - **P8.2**（已落地）：新增**一个**茶客侧工具 `task_propose_status(status,
   reason)`，复用 `TASK_PROPOSAL` envelope，采纳后按状态分流到既有 `update_task` /
@@ -248,7 +250,10 @@ room snapshot + `admin_toml.py`（`summary` 进 round-trip，P4「配置闭环�
 
 ## 6. P8.3（草案）：原生自动推进
 
-> 未规划。本节是方向草案，记录「自动推进难在哪、需要什么」，避免 P8.2 为它做重。
+> **完整设计与落地见 [`P8.3-原生自动推进.md`](P8.3-原生自动推进.md)（2026-05-21 已落地）。**
+> 本节保留为方向草案，记录「自动推进难在哪、需要什么」；P8.3 据此落地为
+> 「托管任务会话（MTS）」运行态 + drain loop `_advance_managed_session_after_turn`
+> 步 + 管理者提议在 MTS 内由后端 hook 自动入队。
 
 「原生自动推进」= 管理者茶客发起一次 handoff 后，被指派茶客执行完，控制权**自动回到
 管理者**复查，而不是回到用户。难点**不在** Task 数据结构、**不在** `plan_items` 是否
@@ -298,8 +303,8 @@ P8.2 落地后，`SKILL.md` Step 5「判断 Goal」可补一句：达成时用 `
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| **P8.1** | `examples/skill/task-management/SKILL.md` 茶客侧任务管理 skill，零后端改动 | 已落地 |
+| **P8.1** | `examples/personas/Maya/skills/task-management/SKILL.md` 茶客侧任务管理 skill（随 Maya persona bundle），零后端改动 | 已落地 |
 | **P8.2** | `task_propose_status` 工具 + `TASK_PROPOSAL_KIND_STATUS` flat kind + `proposal_card.js` 一个 `status` 分支（采纳按终结态分流 `update_task` / `close_task`）+ SKILL.md Step 5 跟进 + 测试（两类状态各覆盖） | 已落地 |
 | **P8.2-roster-a** | 能力花名册（§5.2）—— 可选 `[[guest]].summary` room.toml 字段（走 P4 配置闭环四点）+ `context_renderer.py` 的 `<room>` 渲染（手写摘要 / 退回名字两级）。不依赖 LLM | 已落地 |
 | **P8.2-roster-b** | LLM 生成缓存（§5.3）—— `persona_summary.py`：persona 摘要后台生成、落 `user_data_root` 中央内容寻址缓存（hash 键 + `gen_version`）。`build_room_session` 装配时对缓存 miss 的 persona 调 `schedule_generation` 预热（`get_running_loop()` 守卫，无 loop 跳过）。`build_room_session` 不改 async、boot 不阻塞、缓存命中零调用 | 已落地 |
-| **P8.3** | 原生自动推进 —— 「managed task session」运行态（§6 草案） | 未规划 |
+| **P8.3** | 原生自动推进 —— 「托管任务会话（MTS）」运行态 + handoff drain loop `_advance_managed_session_after_turn` 步 + 管理者提议经 `task_proposal_hook` 在 MTS 内自动入队 + `<managed_session>` prompt 块 + 任务面板托管按钮 / 状态条，详见 [`P8.3-原生自动推进.md`](P8.3-原生自动推进.md) | 已落地 |
