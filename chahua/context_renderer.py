@@ -15,6 +15,7 @@ from typing import Optional
 from xml.sax.saxutils import quoteattr
 
 from .orchestrator_config import OrchestratorConfig
+from .persona_summary import clamp_summary
 from .room import Message, Room, format_messages
 from .summarizer import SummarySpan, Summarizer, TaskSummaries
 from .task import Task
@@ -59,6 +60,7 @@ class ContextRenderer:
         config: OrchestratorConfig,
         tasks_store: Optional[TasksStore] = None,
         task_summaries: Optional[TaskSummaries] = None,
+        roster: Optional[dict[str, str]] = None,
     ) -> None:
         self.room = room
         self.user_config = user_config
@@ -66,6 +68,10 @@ class ContextRenderer:
         self.config = config
         self.tasks_store = tasks_store
         self.task_summaries = task_summaries
+        # P8.2-roster-a：茶客名 → 一句话能力摘要。session 装配时一次性解析（手写
+        # [[guest]].summary 优先，缺则查中央缓存——roster-b）；运行期增删茶客会整体
+        # 重建 session，故 renderer 持的是不可变快照。仅 onboarding 的 <room> 块用。
+        self.roster = roster or {}
         self._display_for: Optional[dict[str, str]] = None
 
     def invalidate_display_cache(self) -> None:
@@ -201,6 +207,29 @@ class ContextRenderer:
             }
         return self._display_for
 
+    def _render_roster(self) -> str:
+        """``<room>`` 的「在场」行（P8.2-roster-a）。
+
+        任一茶客有摘要 → 渲成 bullet 花名册（无摘要的茶客只列名）；全员无摘要 →
+        退回逗号单行（roster-a 前的行为，优雅降级）。用户无摘要。
+        """
+        display_for = self.display_map()
+
+        def label(p: str) -> str:
+            name = display_for.get(p, p)
+            return f"{name}（人类用户）" if p == USER_SPEAKER_ID else name
+
+        entries = [
+            (label(p), clamp_summary(self.roster.get(p, "")))
+            for p in self.room.participants
+        ]
+        if not any(summary for _, summary in entries):
+            return "在场：" + ", ".join(name for name, _ in entries)
+        lines = ["在场："]
+        for name, summary in entries:
+            lines.append(f"- {name} —— {summary}" if summary else f"- {name}")
+        return "\n".join(lines)
+
     # ── XML 块拼装 ────────────────────────────────────────────────────
 
     def _render_onboarding(
@@ -220,11 +249,6 @@ class ContextRenderer:
         裁剪；``<order_hint>`` 与 ``<current_task>`` 同生共灭。
         """
         display_for = self.display_map()
-
-        def label(p: str) -> str:
-            name = display_for.get(p, p)
-            return f"{name}（人类用户）" if p == USER_SPEAKER_ID else name
-
         blocks: list[str] = []
 
         # 属性值走 quoteattr 转义 —— room.name / display_name 来自用户配置，含 `"` / `<` /
@@ -235,7 +259,7 @@ class ContextRenderer:
             room_lines.append(f"话题：{self.room.topic}")
         if self.room.rules:
             room_lines.append(f"规则：{self.room.rules}")
-        room_lines.append("在场：" + ", ".join(label(p) for p in self.room.participants))
+        room_lines.append(self._render_roster())
         room_lines.append("</room>")
         blocks.append("\n".join(room_lines))
 

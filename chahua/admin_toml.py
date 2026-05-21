@@ -36,6 +36,7 @@ class GuestSnapshot(TypedDict, total=False):
     persona: str
     permission: str
     isolation: str
+    summary: str  # P8.2-roster-a：一句话能力摘要；缺 / 空 = 不写
     # LLM 四件套（all-or-nothing：写 model 才允许 base_url / api_key_env / temperature，
     # 详见 chahua.llm_spec.LLMSpec.from_toml 校验）。temperature 是 float（非字符串），
     # render 时走 scalar literal —— 见 _render_llm_field。
@@ -63,7 +64,7 @@ class TomlSnapshot(TypedDict, total=False):
 
 # render 时认得的 guest 字段。
 _ALLOWED_GUEST_EMIT: frozenset[str] = (
-    frozenset({"name", "persona", "permission", "isolation", "extra_mcp_servers"})
+    frozenset({"name", "persona", "permission", "isolation", "summary", "extra_mcp_servers"})
     | frozenset(LLM_TOML_FIELDS)
 )
 
@@ -259,6 +260,8 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
         # 让 [[guest]] 段读起来连成一块）；api_key_env 自己 11 字符，会占满。
         if "isolation" in g:
             lines.append(f"isolation  = {_toml_basic_string(str(g['isolation']))}")
+        if g.get("summary"):
+            lines.append(f"summary    = {_toml_basic_string(str(g['summary']))}")
         for key in LLM_TOML_FIELDS:
             if key in g:
                 lines.append(f"{key:<11}= {_render_llm_field(key, g[key])}")

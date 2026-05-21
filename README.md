@@ -53,7 +53,7 @@ transcript / cursor / summary 持久化保留。
 - 显式接力（handoff）：意愿打分之上的确定性指派通道。composer 底栏「指派」按钮弹一个统一面板，勾 1 位茶客 =「交给他发下一句」、勾 2~4 位 = 发起一场平行表态的圆桌（可选指定汇总人）；消息气泡上的「请审…」按钮另派一位茶客审阅该条消息。接力跑完即回到等用户输入、不回落打分；顶部「➡️ 下一句」队列条可整体取消（停当前 + 清后续）。茶客也能在发言里**提议**接力（指派 / 请审 / 圆桌），渲成「采纳 / 忽略」卡片，你点采纳后才生效。
 - 多行输入：Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px 切滚动。
 - 附件上传：composer 左侧 `+`，文件落房间共享目录，随下一条消息一起进上下文。
-- 任务房间：右上角面板「+ 新任务」开任务 → composer 顶部 chip 显示当前 active 任务；茶客感知 active 任务（onboarding/incremental prompt 都注入 task 块），可写 `./task/<name>` 自动归集为 artifact、可 propose 决策 / 新任务待你「采纳」。产物列表点击即下载（带白名单 + symlink 防逃逸）。多任务共存，单时刻最多 1 个 active。
+- 任务房间：右上角面板「+ 新任务」开任务 → composer 顶部 chip 显示当前 active 任务；茶客感知 active 任务（onboarding/incremental prompt 都注入 task 块），可写 `./task/<name>` 自动归集为 artifact、可 propose 决策 / 新任务 / 改任务状态（如达成时提议标记完成）待你「采纳」。产物列表点击即下载（带白名单 + symlink 防逃逸）。多任务共存，单时刻最多 1 个 active。
 - 调试抽屉：与任务面板互斥占右侧槽位，看每一轮谁被候选 / 分数 / 选谁 / prompt / 用了哪些工具 / 产物路径；切房 / 重启后仍能翻"开窗前"的历史 turn（点击索引行即拉详情）。默认开，盘上落到 `rooms/<id>/debug/`；`max_turns = 500` 按 turn 自动 rotation；`room.toml [debug] enabled = false` 可关。
 - 茶客能力查询：composer 里输 `/tools <茶客名>` / `/skills <茶客名>` 查某位茶客 agent 注册的工具 / 可用 skills（只读，结果显示为系统气泡，不进记录）；`/help` 看全部斜杠命令。
 - sidebar：切换房间 / 加茶客 / 导入 persona（本地目录或 GitHub）；点茶客头像设权限、勾选信任其 MCP。

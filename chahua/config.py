@@ -69,7 +69,7 @@ _ALLOWED_ROOM_KEYS: frozenset[str] = (
 # 在 LLMSpec.from_toml；这里只是顶层白名单。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
     {
-        "name", "persona", "permission", "isolation",
+        "name", "persona", "permission", "isolation", "summary",
         "model", "base_url", "api_key_env", "temperature",
         "extra_mcp_servers",
     }
@@ -150,6 +150,11 @@ class GuestConfig:
     llm: Optional[LLMSpec] = None
     """``[[guest]]`` 里写明的 ``model`` / ``base_url`` / ``api_key_env`` 解析结果；
     缺即走房间默认（:meth:`LLMSpec.from_env`）。P4.1 起每位茶客可独立配 client。"""
+
+    summary: Optional[str] = None
+    """``[[guest]].summary`` —— 一句话能力摘要（P8.2-roster-a）。手写可选字段；
+    onboarding 的 ``<room>`` 块「在场」行据此渲成带摘要的花名册，让茶客分工时看得见
+    别的茶客擅长什么。缺即 ``None``，「在场」行优雅降级为只列名字。"""
 
     extra_mcp_servers: Optional[dict[str, dict[str, Any]]] = None
     """房间级 inline MCP servers（``[[guest.extra_mcp_servers]]`` 数组表解析结果）。
@@ -624,6 +629,12 @@ def _build_guests(
             toml_path=toml_path,
         )
 
+        summary = _as_str(
+            g.get("summary"),
+            label=f"[[guest]] {name!r} summary",
+            toml_path=toml_path,
+        )
+
         out.append(
             GuestConfig(
                 name=name,
@@ -632,6 +643,7 @@ def _build_guests(
                 isolation=isolation_raw,
                 llm=guest_llm,
                 extra_mcp_servers=extra_mcp,
+                summary=summary or None,
             )
         )
 

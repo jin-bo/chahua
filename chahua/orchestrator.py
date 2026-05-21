@@ -125,6 +125,7 @@ class Orchestrator:
         tasks_store: Optional[TasksStore] = None,
         task_summaries: Optional[TaskSummaries] = None,
         recorder: TurnRecorder = NOOP_RECORDER,
+        roster: Optional[dict[str, str]] = None,
     ) -> None:
         self.room = room
         self.user_config = user_config
@@ -162,6 +163,7 @@ class Orchestrator:
             config=config,
             tasks_store=tasks_store,
             task_summaries=task_summaries,
+            roster=roster,
         )
         # 后台摘要任务：每轮发言后被 ``_kick_summarize`` 启动；下次再 kick 时如果还在跑
         # 就跳过，避免堆积。摘要慢点不影响当前回合，所以**不 await**。
