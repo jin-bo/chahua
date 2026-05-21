@@ -49,6 +49,7 @@ transcript / cursor / summary 持久化保留。
 可用快捷动作：
 
 - 发言 / 停止当前 turn（同一按钮形变）；`@<茶客名>` 直接路由（含空格的名字也能命中）。
+- 显式接力（handoff）：意愿打分之上的确定性指派通道。茶客卡片 ⇨ 按钮「交给…发下一句」指派单人接话；消息气泡「请审…」按钮派一位茶客审阅该条消息；右上角「圆桌」按钮进多选模式、选 ≥2 位茶客发起一场平行表态（可选指定汇总人）。接力跑完即回到等用户输入、不回落打分；顶部「➡️ 下一句」队列条可整体取消（停当前 + 清后续）。
 - 多行输入：Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px 切滚动。
 - 附件上传：composer 左侧 `+`，文件落房间共享目录，随下一条消息一起进上下文。
 - 任务房间：右上角面板「+ 新任务」开任务 → composer 顶部 chip 显示当前 active 任务；茶客感知 active 任务（onboarding/incremental prompt 都注入 task 块），可写 `./task/<name>` 自动归集为 artifact、可 propose 决策 / 新任务待你「采纳」。产物列表点击即下载（带白名单 + symlink 防逃逸）。多任务共存，单时刻最多 1 个 active。
@@ -76,7 +77,7 @@ ship 自带的 python 包 + 默认 personas 在 `.app` bundle 内只读，与用
 
 - **macOS 签名 / 公证**：当前 .dmg 仍未签名，用户双击会 Gatekeeper 红屏（ctrl-click → 打开 走一次即可）。脱 Gatekeeper 警告需 Apple Developer ID（$99/年），未排期。
 - **P3.3.3 Windows 实跑**：build-python-bundle 跑 win 端 + electron-builder NSIS 出未签名 .exe；接缝（platform 分支 / sidecar resolver / `mklink /J` junction / stdin EOF graceful shutdown / `build.win` 配置）从 v0.1.0 起一直就位，仍剩 Windows 主机 / CI matrix 端真跑一次。
-- **ACP 异构茶客**：当前只支持 agentao 驱动的茶客；接第一个非 agentao 的 ACP 茶客排在 P5 任务房间之后。
+- **ACP 异构茶客**：当前只支持 agentao 驱动的茶客；接第一个非 agentao 的 ACP 茶客（`transport = "acp"`，详见 `docs/DESIGN.md` §3.9）是后续大版本，暂未排期。
 
 ## 打包发布
 
