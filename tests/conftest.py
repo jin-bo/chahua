@@ -227,8 +227,8 @@ def task_inbound_srv(env_paths, monkeypatch):
 
 
 async def drain_inflight(srv) -> None:
-    """让 ``_kick_synthesized_user_message`` 创建的 turn task 跑到 ``room.append`` 之后
-    再返回控制权。配合 :func:`task_inbound_srv` 的 no-op AI 链 —— await 即完成。"""
+    """等当前 ``_inflight_turn_task``（用户消息 turn）跑完再返回控制权。配合
+    :func:`task_inbound_srv` 的 no-op AI 链 —— await 即完成。"""
     task = srv._inflight_turn_task
     if task is not None and not task.done():
         await task

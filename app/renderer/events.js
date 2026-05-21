@@ -39,6 +39,10 @@ export const EventType = Object.freeze({
   // P5.2.4：任务推入终结态（done / abandoned）后的 hint。与其它四个 hint 同口径 —— 紧
   // 跟一帧 TASK_INFO 才是权威状态；这里仅给前端做 toast / 卡片翻灰动画用。
   TASK_CLOSE: "task_close",
+  // P5.8：/clear task 清空产物后的 hint。data {task_id, title, count, names}。
+  // 其它 task hint 自带 diff，清空动作只有 TASK_INFO 全量快照 —— 单独加这个轻量
+  // hint 让前端不必从快照猜 diff。镜像 chahua/events.py::TASK_ARTIFACTS_CLEARED。
+  TASK_ARTIFACTS_CLEARED: "task_artifacts_cleared",
   // P5.3.3：茶客通过 task_propose_* 工具发出的"提议"（开任务 / 记决策）。data 形状：
   // {task_id?, proposer, kind: "decision"|"open", payload}。**纯 hint** —— 写权限永远
   // 在用户，前端渲染成"采纳/忽略"卡片，采纳后薄包装转译回既有 ADD_DECISION / OPEN_TASK
@@ -72,6 +76,13 @@ export const TaskProposalKind = Object.freeze({
   HANDOFF_DELEGATE: "handoff_delegate",
   HANDOFF_REVIEW: "handoff_review",
   HANDOFF_PANEL: "handoff_panel",
+});
+
+// artifact 的 created_by 取值。镜像 chahua/task.py::ARTIFACT_CREATED_BY_GUEST /
+// MARKED_BY_USER —— 用户 attach_artifact 上传 vs 茶客自动归集两条来源。
+export const ArtifactCreatedBy = Object.freeze({
+  GUEST: "guest",
+  USER: "user",
 });
 
 export const Status = Object.freeze({
@@ -217,6 +228,44 @@ export const TASK_UNTITLED = "(无标题)";
 export function formatTaskLabel(task) {
   if (!task) return "";
   return `📋 ${task.title || TASK_UNTITLED}`;
+}
+
+// P5.8：把 task hint envelope 渲成聊天区居中系统气泡的文案。task event 不再合成
+// user 消息进 transcript（docs/P5.8-任务事件系统气泡.md）—— 系统气泡是当前客户端的
+// 瞬时 UI 通知，刷新 / 切房即清。文案唯一来源，renderer.js task hint 分支调用。
+export function formatTaskEventNotice(type, data) {
+  switch (type) {
+    case EventType.TASK_OPEN: {
+      const goal = firstLineClamped(data.goal);
+      return `📋 用户开启任务【${data.title || TASK_UNTITLED}】${
+        goal ? ` · 目标：${goal}` : ""
+      }`;
+    }
+    case EventType.TASK_CLOSE:
+      // data.title 由后端补字段（docs §5.5），不依赖此刻 taskState 是否已被 TASK_INFO 推进。
+      return data.status === "done"
+        ? `✅ 任务【${data.title || TASK_UNTITLED}】已完成`
+        : `✗ 任务【${data.title || TASK_UNTITLED}】已放弃`;
+    case EventType.TASK_DECISION_ADDED:
+      return `📌 决策：${data.summary || ""}`;
+    case EventType.TASK_ARTIFACT_ADDED:
+      return data.created_by === ArtifactCreatedBy.GUEST
+        ? `📎 茶客产出：${data.name || ""}`
+        : `📎 用户挂载产物：${data.name || ""}`;
+    case EventType.TASK_ARTIFACTS_CLEARED:
+      return `🗑️ 用户清空了任务【${data.title || TASK_UNTITLED}】的产物（${
+        data.count || 0
+      } 个文件）`;
+    default:
+      return "";
+  }
+}
+
+// goal 取首行并截到 80 字 —— 系统气泡只给一句概要，完整 goal 已在任务面板。
+function firstLineClamped(s) {
+  if (typeof s !== "string" || !s) return "";
+  const line = s.split("\n", 1)[0].trim();
+  return line.length <= 80 ? line : line.slice(0, 80) + "…";
 }
 
 // owner 选 null 时的展示文案；wire 层 owner = null，UI 层 "全员"。下拉 / meta 都从这里取。

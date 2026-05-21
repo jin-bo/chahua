@@ -24,6 +24,7 @@ import {
   TASK_UNTITLED,
   buildOwnerOptionData,
   formatTaskLabel,
+  formatTaskEventNotice,
   isTaskClosed,
 } from "./events.js";
 import {
@@ -766,11 +767,26 @@ function handleEnvelope(env) {
     case EventType.TASK_INFO:
       taskState.setSnapshot(env.data ?? {});
       return;
+    // P5.8：task hint 既闪面板增量项、又在聊天区追一条居中系统气泡（task event
+    // 不再合成 user 消息进 transcript）。气泡是瞬时 UI 通知，刷新 / 切房即清。
     case EventType.TASK_OPEN:
-    case EventType.TASK_UPDATE:
     case EventType.TASK_DECISION_ADDED:
     case EventType.TASK_ARTIFACT_ADDED:
-    case EventType.TASK_CLOSE:
+    case EventType.TASK_CLOSE: {
+      taskPanel.flashHint(env.type, env.data ?? {});
+      const text = formatTaskEventNotice(env.type, env.data ?? {});
+      if (text) appendBubble({ kind: "system", text });
+      return;
+    }
+    case EventType.TASK_ARTIFACTS_CLEARED: {
+      // 不调 flashHint —— 清空动作没有可高亮的"新增项"，状态推进全靠紧随的
+      // TASK_INFO；本事件唯一价值就是系统气泡。
+      const text = formatTaskEventNotice(env.type, env.data ?? {});
+      if (text) appendBubble({ kind: "system", text });
+      return;
+    }
+    // TASK_UPDATE 不显示气泡 —— 避免用户编辑标题时聊天流被刷。
+    case EventType.TASK_UPDATE:
       taskPanel.flashHint(env.type, env.data ?? {});
       return;
     case EventType.TASK_PROPOSAL:

@@ -911,9 +911,8 @@ class Orchestrator:
         - ``ref_seq``：transcript 最后一条消息的 seq —— 用户路径指向用户那条，AI 链路径
           指向上一位 AI 的发言。``None`` = transcript 全空（极少；onboarding 期）。
 
-        P6.1 不区分 ``synthesized``：``_kick_synthesized_user_message`` 最终也走
-        ``submit_user_message``，orchestrator 无从分辨。要分辨需新增形参一路透传，
-        本期不做。
+        ``kind`` 只分 ``user_msg`` / ``ai_chain`` 两态 —— 全部 turn 都由真用户消息
+        （``_inbound_user_message``）触发；P5.8 起 task 事件不再合成 user turn。
         """
         last = self.room.last_message()
         return {

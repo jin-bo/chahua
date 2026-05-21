@@ -15,6 +15,7 @@
 
 import { renderMarkdown } from "./chat_view.js";
 import {
+  ArtifactCreatedBy,
   EventType,
   TASK_OWNER_ALL,
   TASK_STATUS_OPTIONS,
@@ -424,7 +425,9 @@ export function createTaskPanel({
         const parts = [];
         const sizeText = formatSize(a.size);
         if (sizeText) parts.push(sizeText);
-        if (a.created_by && a.created_by !== "user") parts.push(`by ${a.created_by}`);
+        if (a.created_by && a.created_by !== ArtifactCreatedBy.USER) {
+          parts.push(`by ${a.created_by}`);
+        }
         detail.textContent = parts.join("，");
         li.appendChild(detail);
         // 点条目 = 下载。rel 缺时不挂监听（保护性早返：server 端也会拒空 rel）。

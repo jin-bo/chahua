@@ -8,9 +8,10 @@ diff 上次扫到的文件名集合，emit ``task_artifact_added`` hint + 一帧
 设计要点：
 - 初始化只 seed 非终结态任务的 artifacts —— closed task 永远不会
   被 :meth:`detect` 读到（前置过滤），seed 进来纯浪费 readdir 还堆 dict。
-- 用户走 UI ``attach_artifact`` 上传时 seen 缓存不同步更新 —— 下次 :meth:`detect` 扫到那些
-  文件会重复 emit hint；接受（前端以 ``task_info`` 为权威，hint 仅可选 toast，重复无感），
-  不在两个组件间加 sync 通道避免耦合。
+- 用户走 UI ``attach_artifact`` 上传到 active 任务后，调用方须同步调 :meth:`mark_seen`
+  把新文件名记进 ``seen`` —— 否则下一轮 :meth:`detect` 会把它当 ``new_names`` 重发
+  ``task_artifact_added`` 且无条件标 ``created_by=guest``。P5.8 把 hint 渲成可见系统
+  气泡后，这个重复会变成"用户上传却显示茶客产出"的可见 bug（P5.8 §5.4）。
 """
 
 from __future__ import annotations
@@ -20,9 +21,7 @@ from typing import Optional
 from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink, emit_to_sink
 from .room import Room
 from .task import ARTIFACT_CREATED_BY_GUEST
-from .task_event_text import detect_artifacts_text
 from .tasks_store import CLOSED_STATUSES, TasksStore, build_task_info_payload
-from .user_md import USER_SPEAKER_ID
 
 
 class ArtifactDetector:
@@ -34,7 +33,6 @@ class ArtifactDetector:
         room: Room,
         tasks_store: Optional[TasksStore],
     ) -> None:
-        self.room = room
         self.room_id = room.name
         self.tasks_store = tasks_store
         # task_id → 上次扫到的文件名 set。boot 时按非 closed 任务的现存 artifact seed。
@@ -54,6 +52,17 @@ class ArtifactDetector:
         —— 避免私属性外泄到 ``server_inbound_task`` / ``cli`` 两个调用点。
         """
         self.seen[task_id] = set()
+
+    def mark_seen(self, task_id: str, name: str) -> None:
+        """把单个 artifact 名增量记进 ``seen`` —— 给 ``attach_artifact`` 用（P5.8 §5.4）。
+
+        用户经 UI 上传产物到 active 任务后调用方须同步调本方法，否则下一轮
+        :meth:`detect` 把该文件当 ``new_names`` 重发 ``task_artifact_added`` 且无条件
+        标 ``created_by=guest``。**必须 ``setdefault`` 增量 add**，不能
+        ``self.seen[task_id] = {name}`` 整组覆盖 —— 那会让该任务已有的 ``seen`` 旧名
+        丢失，下一轮 detect 把它们重新当新产物再发一轮气泡。
+        """
+        self.seen.setdefault(task_id, set()).add(name)
 
     def detect(self, sink: EnvelopeSink, active_task_id: Optional[str]) -> None:
         """扫 active task 的 ``artifacts/``，emit 茶客新写入的产物（P5.4）。
@@ -94,14 +103,11 @@ class ArtifactDetector:
                 "created_by": ARTIFACT_CREATED_BY_GUEST,
             })
         if new_names:
+            # P5.8：只 emit envelope，不再 ``room.append`` 合成 user 消息。茶客本轮
+            # 不再以 transcript 消息形式看到"茶客产出 X"，但产物仍在
+            # ``tasks/<active>/artifacts/``，下一轮 ``<current_task>`` 的 artifacts
+            # 列表照常呈现 —— 上下文不丢，只是"事件感"没了（P5.8 §5.3）。
             emit(
                 ChahuaEventType.TASK_INFO,
                 build_task_info_payload(self.tasks_store),
-            )
-            # 直接 ``room.append`` 而非 ``submit_user_message``：本函数在 in-flight
-            # turn 的 pick 周期末尾被调用，再 kick 一条新 turn 会自冲突（P5.5 §4.3）。
-            self.room.append(
-                USER_SPEAKER_ID,
-                detect_artifacts_text(sorted(new_names)),
-                task_id=active_task_id,
             )

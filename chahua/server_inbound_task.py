@@ -23,13 +23,6 @@ from .events import (
 )
 from .session import ensure_room_share_dir, relink_task_dirs
 from .task import MARKED_BY_USER
-from .task_event_text import (
-    add_decision_text,
-    attach_artifact_text,
-    clear_artifacts_text,
-    close_task_text,
-    open_task_text,
-)
 from .tasks_store import (
     ArtifactSourceMissingError,
     CLOSED_STATUSES,
@@ -142,6 +135,12 @@ class TaskHandlers:
                 text=f"{INBOUND_OPEN_TASK}: owner 必须是 str / null",
             )
             return
+        # open_task 自动 set_active 到新任务并 relink_task_dirs —— 与 set_active_task /
+        # close_task 同口径，改 active 前先 drain in-flight turn。否则正在跑的 turn 仍
+        # 持旧 active_task_id，而 ./task 软链已指向新任务，其后续工具写会落到错任务、
+        # 且 turn 末尾 detector 扫的还是旧任务（P5.8 移除 _kick_synthesized_user_message
+        # 时连带丢了这个 cancel，本是它的副作用）。
+        await self.server._cancel_and_drain_inflight()
         try:
             task = self.server._session.tasks_store.open_task(
                 title=title, goal=goal, owner=owner_raw,
@@ -155,9 +154,6 @@ class TaskHandlers:
             sink, type=ChahuaEventType.TASK_OPEN, data=task.to_jsonl_dict(),
         )
         self._emit_task_info(sink)
-        await self.server._kick_synthesized_user_message(
-            open_task_text(task), sink, task_id=task.id,
-        )
 
     async def _inbound_update_task(self, data: dict, sink: EnvelopeSink) -> None:
         if not self.server._reject_unknown_keys(
@@ -327,6 +323,9 @@ class TaskHandlers:
         走前 ``_cancel_and_drain_inflight`` —— 若被关的就是当前 active，inflight turn
         的余生 message 没必要再挂到这个任务。成功后发 ``task_close`` hint event + 重发
         ``task_info`` 权威快照。
+
+        ``TASK_CLOSE`` 的 ``data`` 带 ``title`` —— 前端系统气泡文案需要"任务【title】"，
+        与 ``TASK_OPEN`` 走 ``task.to_jsonl_dict()`` 自带全量字段同口径（P5.8 §5.5）。
         """
         if not self.server._reject_unknown_keys(
             data, _CLOSE_TASK_ALLOWED, where=INBOUND_CLOSE_TASK, sink=sink,
@@ -368,17 +367,12 @@ class TaskHandlers:
             type=ChahuaEventType.TASK_CLOSE,
             data={
                 "task_id": task.id,
+                "title": task.title,
                 "status": status,
                 "closed_at_ms": task.closed_at_ms,
             },
         )
         self._emit_task_info(sink)
-        # task_id=task.id（不读 store.active_task_id）：close_task 后 active 可能已被
-        # store 清空，但合成消息按"关闭那个任务"的语义归到被关的 task 上。
-        await self.server._kick_synthesized_user_message(
-            close_task_text(task, status),  # type: ignore[arg-type]
-            sink, task_id=task.id,
-        )
 
     async def _inbound_attach_artifact(
         self, data: dict, sink: EnvelopeSink
@@ -421,6 +415,13 @@ class TaskHandlers:
             "attach_artifact: task=%s share_rel=%r → %s",
             task_id, share_rel, info["rel"],
         )
+        # P5.8 §5.4：同步 detector 的 seen 缓存。否则下一轮 detect() 把这个用户上传的
+        # 文件当 new_names 重发 TASK_ARTIFACT_ADDED 且无条件标 created_by=guest ——
+        # P5.8 把 hint 渲成可见气泡后会变成"用户上传却显示茶客产出"的 bug。mark_seen
+        # 对非 active 任务也安全（detect 只扫 active，重复实际只在挂到 active 时发生）。
+        self.server._session.orchestrator._artifact_detector.mark_seen(
+            task_id, info["name"],
+        )
         self._emit_task_envelope(
             sink,
             type=ChahuaEventType.TASK_ARTIFACT_ADDED,
@@ -434,11 +435,6 @@ class TaskHandlers:
             },
         )
         self._emit_task_info(sink)
-        # task_id 用 inbound 指定值（可能不是当前 active —— 用户在"老任务"卡片上
-        # 挂产物的场景）。
-        await self.server._kick_synthesized_user_message(
-            attach_artifact_text(info["name"]), sink, task_id=task_id,
-        )
 
     async def _inbound_add_decision(
         self, data: dict, sink: EnvelopeSink
@@ -486,9 +482,6 @@ class TaskHandlers:
             data=decision.to_jsonl_dict(),
         )
         self._emit_task_info(sink)
-        await self.server._kick_synthesized_user_message(
-            add_decision_text(decision), sink, task_id=task_id,
-        )
 
     async def _inbound_clear_task_artifacts(
         self, data: dict, sink: EnvelopeSink
@@ -501,13 +494,13 @@ class TaskHandlers:
         延续——茶客不能走这条 inbound，只能 propose（暂不支持 propose 清产物，与
         propose 写产物不对称是因为"删"动作风险更高，必须用户主动）。
 
-        副作用顺序：
+        副作用顺序（P5.8 §4.3）：
         1. ``tasks_store.clear_artifacts`` 删盘 + 落 ``events.jsonl`` audit。
         2. **重置 :class:`ArtifactDetector` 的 seen 缓存**——否则下一轮 detect 扫到
            ``current_names = {}``、``prev = 老集合`` 走 ``removed_names`` 分支会与
            本帧 ``task_info`` 形成两次广播（无害但冗余）。
-        3. emit ``task_info`` 权威快照（artifacts: []）。
-        4. ``_kick_synthesized_user_message`` 让茶客看见"用户清空了产物"。
+        3. emit ``task_artifacts_cleared`` hint —— 前端据此渲染系统气泡。
+        4. emit ``task_info`` 权威快照（artifacts: []）。
 
         与 ``clear_room`` 的区别：``clear_room`` 重置整间公共状态 + agent 会话窗口；
         本 inbound 只清单任务产物，transcript / agent.messages 都不动。
@@ -543,10 +536,17 @@ class TaskHandlers:
             return
         self.server._session.orchestrator._artifact_detector.forget(task_id)
         _log.info("clear_task_artifacts: task=%s deleted=%d", task_id, len(deleted))
-        self._emit_task_info(sink)
-        await self.server._kick_synthesized_user_message(
-            clear_artifacts_text(task, len(deleted)), sink, task_id=task_id,
+        self._emit_task_envelope(
+            sink,
+            type=ChahuaEventType.TASK_ARTIFACTS_CLEARED,
+            data={
+                "task_id": task_id,
+                "title": task.title,
+                "count": len(deleted),
+                "names": sorted(deleted),
+            },
         )
+        self._emit_task_info(sink)
 
     def _snapshot_active_task_id(self) -> Optional[str]:
         """接帧同步快照当前 active task —— 不能延到 _run_turn 里再读：从这次

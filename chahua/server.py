@@ -494,36 +494,6 @@ class ChahuaServer:
             # 不会再抛；保留 CancelledError 兜底是为 cancel→reraise 极小竞态窗口。
             pass
 
-    async def _kick_synthesized_user_message(
-        self,
-        text: str,
-        sink: EnvelopeSink,
-        *,
-        task_id: Optional[str],
-    ) -> None:
-        """系统侧合成的"用户消息"（P5.5，docs/P5.5-任务事件全房广播.md §4.1）。
-
-        语义：UI 上按钮操作 = 用户行为，紧跟一句话进 transcript / orchestrator
-        scoring 循环，让茶客知道刚发生了什么。``text`` 由调用方（task handler / 茶客
-        自动归集）构造（emoji 前缀 + 任务摘要），不来自 ws 帧。
-
-        与 :meth:`_inbound_user_message` 的差异：
-          - 串行口径相同：先 ``_cancel_and_drain_inflight`` 再创建新 turn，与
-            add_guest / set_active_task 同口径 —— 任何改变房间状态的用户操作都
-            重启 in-flight turn。
-          - 不 emit user envelope：与真用户消息口径一致（``submit_user_message``
-            不 emit，靠前端 local echo 显示气泡）；合成路径无 echo，本会话内
-            不进聊天气泡，切房 / 刷新后从 ``room_history`` 重建时才出现。
-        """
-        await self._cancel_and_drain_inflight()
-        self._set_inflight(
-            asyncio.create_task(
-                self._run_turn(text, sink, task_id=task_id),
-                name="chahua-synth-turn",
-            ),
-            INFLIGHT_KIND_USER,
-        )
-
     async def _run_turn(
         self, text: str, sink: EnvelopeSink, *, task_id: Optional[str],
     ) -> None:

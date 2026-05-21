@@ -1,11 +1,12 @@
-"""P5.5 不变量：``set_active_task`` 与 ``update_task`` 不发合成消息
-（docs/P5.5-任务事件全房广播.md §5 / §6）。
+"""不变量：``set_active_task`` 与 ``update_task`` 不进 transcript / 不显系统气泡。
 
-set_active 是纯 UI 焦点切换，transcript 不该多一行；茶客对 active 切换的感知靠下一次
-prompt 注入的 ``<current_task>`` XML 块（onboarding / incremental 两路径都覆盖）天然完成。
-update_task 推到 §9 后续 —— 要 diff old/new 才能挑出实质变更。
+set_active 是纯 UI 焦点切换，transcript 不该多一行、不发任何 hint；茶客对 active 切换
+的感知靠下一次 prompt 注入的 ``<current_task>`` XML 块（onboarding / incremental 两路径
+都覆盖）天然完成。``update_task`` 仍不发系统气泡 —— 要 diff old/new 才能挑出实质变更
+（docs/P5.8-任务事件系统气泡.md §3）。
 
-夹具与 ``drain_inflight`` 在 ``conftest.py``。
+P5.8 起其它五个 task inbound 也不再合成 user 消息，反面回归见
+``test_task_event_no_broadcast.py``。夹具与 ``drain_inflight`` 在 ``conftest.py``。
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ def _user_message_count(session) -> int:
 
 
 async def test_set_active_task_does_not_append(task_inbound_srv):
-    """开两个任务（绕过 inbound 跳过合成消息副作用），切回第一个任务的 active 不该 +1。"""
+    """开两个任务后切回第一个任务的 active，transcript 用户消息数不该 +1。"""
     session, srv = task_inbound_srv
     t1 = session.tasks_store.open_task(title="t1", goal="g1")
     session.tasks_store.open_task(title="t2", goal="g2")  # 自动 set_active 到 t2
@@ -44,7 +45,7 @@ async def test_set_active_task_does_not_append(task_inbound_srv):
 
 
 async def test_update_task_does_not_append(task_inbound_srv):
-    """P5.5 不做 update_task 广播 —— 改 owner / goal / title 不该往 transcript 追加。"""
+    """update_task 不进 transcript —— 改 owner / goal / title 不该往 transcript 追加。"""
     session, srv = task_inbound_srv
     t = session.tasks_store.open_task(title="t", goal="g")
     base = _user_message_count(session)

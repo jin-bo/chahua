@@ -92,6 +92,10 @@ class ChahuaEventType(str, Enum):
     # P5.2.4：任务关闭（done / abandoned）—— hint 事件，前端用做局部反馈
     # （toast / 卡片样式翻灰），权威状态仍以紧跟其后的 TASK_INFO 为准。
     TASK_CLOSE = "task_close"
+    # P5.8：/clear task 清空产物后的 hint。其它 task hint 自带 diff 信息，清空动作
+    # 只有 TASK_INFO 全量快照 —— 单独加这个轻量 hint 让前端不必从快照猜 diff。
+    # data 形状：``{task_id, title, count, names}``。前端据此渲染系统气泡。
+    TASK_ARTIFACTS_CLEARED = "task_artifacts_cleared"
     # P5.3.3：茶客通过 task_propose_* 工具发出的"提议"（开任务 / 记决策）。data 形状：
     # ``{task_id?, proposer, kind: "decision"|"open", payload: {...}}``。**纯 hint** ——
     # 写权限永远在用户（docs §8 不变量 #3）：前端渲染成"采纳 / 忽略"卡片，采纳后薄包装

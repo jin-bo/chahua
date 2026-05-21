@@ -6,8 +6,8 @@
 - 同步重置 ``ArtifactDetector.seen[task_id] = set()``，避免下一轮 detect 走多余的
   ``removed_names`` 分支。
 - 落 ``events.jsonl`` ``artifacts_cleared{count, names}`` audit 行。
-- ``transcript`` 通过 ``_kick_synthesized_user_message`` 追一条"用户清空了产物"
-  让茶客看见；inbound 端 emit ``task_info`` 权威快照。
+- inbound 端 emit ``task_artifacts_cleared`` hint + ``task_info`` 权威快照；P5.8 起
+  不再合成 user 消息进 transcript（docs/P5.8-任务事件系统气泡.md §4.3）。
 """
 
 from __future__ import annotations
@@ -62,6 +62,16 @@ async def test_clear_task_artifacts_removes_files_and_keeps_task(srv_with_task):
     tasks_payload = infos[-1]["data"]["tasks"]
     target = next(t for t in tasks_payload if t["id"] == task.id)
     assert target["artifacts"] == []
+
+    # task_artifacts_cleared hint —— 前端据此渲染系统气泡。
+    cleared = [
+        e for e in captured
+        if e["type"] == ChahuaEventType.TASK_ARTIFACTS_CLEARED.value
+    ]
+    assert len(cleared) == 1
+    assert cleared[0]["data"]["title"] == "评审 PR-123"
+    assert cleared[0]["data"]["count"] == 2
+    assert sorted(cleared[0]["data"]["names"]) == ["评审-v1.md", "评审-v2.md"]
 
 
 async def test_clear_task_artifacts_writes_audit_event(srv_with_task):
