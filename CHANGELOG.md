@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-21
+
+详见 [`docs/releases/v0.1.2.md`](docs/releases/v0.1.2.md)。
+
 ### Added
 - **P8.3 原生自动推进 —— 托管任务会话（MTS）**（2026-05-21，详见 [`docs/P8.3-原生自动推进.md`](docs/P8.3-原生自动推进.md)）：让「管理者茶客指派 → 被指派茶客执行 → 控制权**自动回到管理者**复查 → 再指派」闭环自己转起来，不必每一步都等用户敲消息或点「采纳」。用户在任务面板**显式开启**一段有预算上限的「托管任务会话」（Managed Task Session, **MTS**），授权某位管理者茶客在预算内自主推进、随时可停。**纯调度层增量**：复用 P7 的 handoff drain loop / `HandoffItem` / cap / `_run_handoff_turn` wrapper，复用 P7.4 的 propose 工具（工具面零改动），复用 P5 的 Task 模型——不改对话原语、不改 Task 数据结构、不引结构化 `plan_items`、不新开调度路径、不新增管理者专用工具。设计经三轮评审收敛（v3）。
   - **运行态**（P8.3.1）。`chahua/handoff.py` 加 `ManagedSession` dataclass（`task_id` / `manager_guest` / `budget`）+ `MAX_MANAGED_BUDGET = 20` / `MANAGED_SESSION_DEFAULT_BUDGET = 6` 常量。挂 `Orchestrator._managed_session`，与 `_handoff_queue` 同瞬态语义——不落盘、crash / 切房 / `reset_room` 即清，`None` 即「无托管」（不另存 `enabled` bool）。单房间最多 1 个。`events.py` / `events.js` 加 3 个 hint 型事件类型 `managed_session_started` / `managed_session_advanced` / `managed_session_ended`（`schema_version` 不 bump）。
