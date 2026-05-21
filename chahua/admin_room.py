@@ -89,6 +89,8 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
         }
         if gc.isolation != DEFAULT_ISOLATION:
             g["isolation"] = gc.isolation
+        if gc.summary:
+            g["summary"] = gc.summary
         if gc.llm is not None:
             g.update(_llm_spec_to_dict(gc.llm))
         if gc.extra_mcp_servers:

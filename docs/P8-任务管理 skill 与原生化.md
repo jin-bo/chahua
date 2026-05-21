@@ -188,34 +188,33 @@ room snapshot + `admin_toml.py`（`summary` 进 round-trip，P4「配置闭环�
    —— 摘要只进 onboarding 的 `<room>`、不进每轮 `<room_update>`（§5.2），后台补好
    缓存也不会即时刷进进行中的会话窗口。
 
-**生成时机 —— 首选「导入角色时」预热**：
+**生成时机 —— 房间装配（`build_room_session`，已落地口径）**：
 
-- **导入角色时（首选触发点）** —— persona 导入走 server 的 async inbound
-  （`server_inbound_io` 的 persona import 路径），那里**有运行中的 event loop +
-  runtime 调度器**，是最干净的生成点。导入完成后、**当 LLM available 时**立即
-  `schedule_persona_summary_generation(...)` 把摘要预生成进中央缓存 —— 这样该 persona
-  首次被拉进任何房间，`<room>` 一上来就直接命中缓存、有摘要，不必等「下一次
-  onboarding」。
-- **加 / 改 guest persona 时** —— `admin_guest` 同属 server async 上下文，同口径调度。
-- **房间装配兜底** —— `build_room_session` 对中央缓存仍 miss 的 persona（随包 bundled、
-  手放、或导入时 LLM 不可用）请求一次生成，走 `schedule_persona_summary_generation`
-  间接层（不直接 `create_task`）。
+- `build_room_session` 解析花名册时，对手写与缓存**都 miss** 的 persona 收集成候选，
+  调 `persona_summary.schedule_generation(...)` 后台预热中央缓存。生成在后台 task 跑，
+  不阻塞装配 / boot；摘要在**下一次重建 session** 时进 `<room>`（见「摘要解析」第 5 步）。
+- **admin 加 / 改 guest 自动覆盖** —— admin 改 guest 走 `_replace_session` → 重跑
+  `build_room_session`，装配触发点天然覆盖，无需单独 hook。
+- **persona 导入暂不单独预热** —— 导入只落 persona 文件、不动当前房间；该 persona 被
+  加进任何房间时由装配触发点补缓存。「导入即预热」是纯延迟优化（少等一次重建），
+  本期不做，留作后续 follow-up。
 
-**「当 LLM available」是所有触发点的统一前置**：LLM 未配置 / 不可达 / 无调度器环境
-→ 跳过生成 + WARN，摘要留空、`<room>` 退回只列名字，等下一个 LLM available 的触发点
-（含下次导入 / 改 persona / 房间装配）再补。导入是**最早**的那个机会，但不是唯一。
+设计早期版本想做「导入时 / admin 时」独立预热 hook + 注入式
+`schedule_persona_summary_generation` 间接层。落地时收敛掉 —— 见下方工程契约。
 
 工程契约 —— 把评审担心的复杂度写实：
 
 - **不改 `build_room_session` 为 async** —— 现有 `build_room_session` 是同步函数，
   为摘要生成把它异步化会逼整条房间装配链路异步化、改动面失控。
-- **后台生成走单一调度口径，不在 session 层直接 `create_task`** —— `build_room_session`
-  是同步函数，装配期通常**没有运行中的 event loop**，直接 `asyncio.create_task` 会
-  抛 `RuntimeError`。收窄成一个口径：由 server / runtime 层提供
-  `schedule_persona_summary_generation(...)`，`session.py` / `admin_guest.py` 只
-  **请求调度**、不自己起 task；无调度器环境（如纯 CLI oneshot）→ 跳过生成 + WARN，
-  `<room>` 就只列名字。**不**用 `asyncio.gather` 嵌进同步装配链。第一版调度器内
-  **串行后台生成**也可接受（N 个 guest 排队，反正不阻塞 boot）。
+- **后台生成走 `schedule_generation` + `get_running_loop()` 守卫，不需注入式调度层**
+  —— `build_room_session` 是同步函数，但它的三个调用点（CLI `_repl` /
+  `server_entry._serve` / `server._replace_session`）**实测都在 `async def` 内**，运行期
+  必有 event loop。`persona_summary.schedule_generation` 内 `asyncio.get_running_loop()`
+  守卫：有 loop → `create_task` 后台生成；无 loop（sync 单测装配）→ WARN 跳过、不抛。
+  实跑都会预热，sync 单测优雅降级。早期设计的注入式 `schedule_persona_summary_
+  generation(...)` 间接层被这条守卫取代 —— 既然实跑必有 loop，间接层是多余抽象。
+  后台 task 持引用（模块级 `_inflight` dict）防 GC、按 persona hash 去重（多房间并发
+  调度同一 persona 只跑一次）。**不**用 `asyncio.gather` 嵌进同步装配链。
 - **boot 不被 LLM 强依赖** —— 缓存 miss 时房间照常启动、`<room>` 先只列名字；摘要
   在后台补，**下一次 onboarding** 才生效（见上「摘要解析」第 5 步）。首轮可能只有
   名字，**接受**。
@@ -228,22 +227,21 @@ room snapshot + `admin_toml.py`（`summary` 进 round-trip，P4「配置闭环�
   被多个房间用只生成一次（content-addressed 天然去重）。persona 改了 hash 变 → 自动
   失效重生成；`gen_version` 是模块常量，改生成 prompt 时 bump 一次即让所有旧缓存
   失效。缓存是 **cache**（可重生成、丢了不影响正确性），不算「冗余 state」。
-- **生成用 summary effective spec，不承诺 cheap** —— 复用 `[summary]` section 解析
-  出的 effective LLM spec（缺则按 fallback 链到 scoring / 房间默认）。`[summary]` 只是
-  「摘要模型」配置位、**不保证便宜**，成本取决于用户怎么配；文档不承诺 cheap，避免
-  启动期自动生成出成本 surprise。
-- **失败只 WARN、不 NOTICE、不阻断房间** —— 单 guest 生成失败（无 key / 网络 /
-  解析）→ 退回只列名字 + WARN，不弹 NOTICE、不阻断 boot（与「recorder / rotation
-  失败不阻断房间」同口径）。
+- **生成用 summary effective spec 的已建 client，不另建** —— 复用 `build_room_session`
+  装配期已建好的 `summary_client`（`[summary]` → scoring → 房间默认 fallback 链）。
+  **不另 `build_client`** —— agentao `LLMClient.__init__` 会 evict 共享 logger 的文件
+  handler，多建一份会静默 detach 茶客日志。`[summary]` 不保证便宜，文档不承诺 cheap。
+- **失败只 WARN、不 NOTICE、不阻断房间** —— 生成失败（无 key / 网络 / 解析）→ 退回
+  只列名字 + WARN，不弹 NOTICE、不阻断 boot（与「recorder / rotation 失败不阻断房间」
+  同口径）。`chat_oneshot` 对所有异常兜底返 `""`。
 
-落地点：新增 persona 摘要生成 + 中央缓存模块（LLM 调用、内容 hash 键、失败兜底）/
-server / runtime 层提供 `schedule_persona_summary_generation(...)` 调度入口 /
-`server_inbound_io`（persona 导入路径，LLM available 时请求预热）+ `admin_guest.py`
-（加 / 改 guest 后请求调度）+ `session.py`（装配兜底，对仍 miss 的 persona 请求调度；
-不直接 `create_task`、不改 sync 签名；无调度器环境跳过 + WARN）/ `context_renderer.py`
-（`在场` 行解析按三级 fallback）。测试：缓存命中不重跑 LLM / persona 改动 hash 失效 /
-生成失败退名字 / 缓存 miss 时 `<room>` 先只列名字 / 无调度器或 LLM 不可用时跳过生成
-不报错 / **导入角色后中央缓存被预热**。
+落地点（已实现）：新增 `persona_summary.py`（内容 hash / 中央缓存读写 / LLM 生成 /
+`schedule_generation` / `resolve_guest_summary` 三级解析）+ `session.py`
+（`build_room_session` 解析花名册 + 调 `schedule_generation` 预热）+ `context_renderer.py`
+（`clamp_summary` 单点共用、`<room>` 在场行按 roster dict 渲染）。测试
+`tests/test_persona_summary.py`：内容寻址 hash / 缓存 round-trip / `gen_version` 失效 /
+损坏视作 miss / 三级解析 / LLM 生成 + 截断 / `schedule_generation` 无 loop 跳过 / 有 loop
+写缓存 / 已缓存不重跑。
 
 这套机制有工程量，但**不进 task tool、不影响 P8.2 的 `task_propose_status`、不改房间
 装配链路为 async、不改回合模型**；稳态缓存命中时不调用 LLM。
@@ -302,6 +300,6 @@ P8.2 落地后，`SKILL.md` Step 5「判断 Goal」可补一句：达成时用 `
 | --- | --- | --- |
 | **P8.1** | `examples/skill/task-management/SKILL.md` 茶客侧任务管理 skill，零后端改动 | 已落地 |
 | **P8.2** | `task_propose_status` 工具 + `TASK_PROPOSAL_KIND_STATUS` flat kind + `proposal_card.js` 一个 `status` 分支（采纳按终结态分流 `update_task` / `close_task`）+ SKILL.md Step 5 跟进 + 测试（两类状态各覆盖） | 已落地 |
-| **P8.2-roster-a** | 能力花名册（§5.2）—— 可选 `[[guest]].summary` room.toml 字段（走 P4 配置闭环四点）+ `context_renderer.py` 的 `<room>` 渲染（手写摘要 / 退回名字两级）。可独立完整落地、不依赖 LLM | 设计中 |
-| **P8.2-roster-b** | LLM 生成缓存（§5.3）—— persona 摘要经 `schedule_persona_summary_generation` 后台生成，落 `user_data_root` 中央内容寻址缓存。**首选触发点：导入角色时**（LLM available 即预热），admin 改 persona / 房间装配为兜底。不改 `build_room_session` 为 async、boot 不强依赖 LLM、缓存命中零调用 | 设计中 |
+| **P8.2-roster-a** | 能力花名册（§5.2）—— 可选 `[[guest]].summary` room.toml 字段（走 P4 配置闭环四点）+ `context_renderer.py` 的 `<room>` 渲染（手写摘要 / 退回名字两级）。不依赖 LLM | 已落地 |
+| **P8.2-roster-b** | LLM 生成缓存（§5.3）—— `persona_summary.py`：persona 摘要后台生成、落 `user_data_root` 中央内容寻址缓存（hash 键 + `gen_version`）。`build_room_session` 装配时对缓存 miss 的 persona 调 `schedule_generation` 预热（`get_running_loop()` 守卫，无 loop 跳过）。`build_room_session` 不改 async、boot 不阻塞、缓存命中零调用 | 已落地 |
 | **P8.3** | 原生自动推进 —— 「managed task session」运行态（§6 草案） | 未规划 |

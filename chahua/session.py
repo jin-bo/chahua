@@ -25,6 +25,7 @@ from .cursor import GuestCursor
 from .debug_recorder import TurnRecorder
 from .guest import TeaGuest
 from .llm_spec import LLMSpec, build_client
+from . import persona_summary
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .persona_assets import discover_assets, persona_relative
 from .room import Room
@@ -444,6 +445,25 @@ def build_room_session(
         room_config.orchestrator_overrides, explicit=orchestrator_config
     )
 
+    # P8.2-roster：花名册摘要三级解析 —— 手写 [[guest]].summary（roster-a）→ 中央
+    # 内容寻址缓存（roster-b）→ 无。运行期增删茶客整体重建 session，故装配期一次性
+    # 解析成不可变快照传给 orchestrator / renderer。仍 miss 的 persona 列进后台生成
+    # 候选，schedule_generation 在有 event loop 时预热缓存（不阻塞 boot；摘要下次
+    # 重建 session 才进 <room>）。
+    roster: dict[str, str] = {}
+    summary_pending: list[tuple[str, str]] = []
+    for gc, (_guest, persona_md) in zip(room_config.guests, guest_entries):
+        summary = persona_summary.resolve_guest_summary(
+            gc.summary, persona_md, paths=paths
+        )
+        if summary:
+            roster[gc.name] = summary
+        else:
+            summary_pending.append((persona_md, gc.name))
+    persona_summary.schedule_generation(
+        summary_pending, paths=paths, llm=summary_client
+    )
+
     orchestrator = Orchestrator(
         room=room,
         user_config=user_config,
@@ -454,6 +474,7 @@ def build_room_session(
         tasks_store=tasks_store,
         task_summaries=task_summaries,
         recorder=recorder,
+        roster=roster,
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
