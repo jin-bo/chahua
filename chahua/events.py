@@ -152,6 +152,9 @@ NOTICE_LEVEL_ERROR = "error"
 # 前端 ``proposal_card.js`` 单层 switch 即可分发。
 TASK_PROPOSAL_KIND_DECISION = "decision"
 TASK_PROPOSAL_KIND_OPEN = "open"
+# P8.2：茶客提议改任务状态。采纳后前端按 status 分流——非终结态 → update_task、
+# 终结态（done / abandoned）→ close_task（docs/P8 §4）。
+TASK_PROPOSAL_KIND_STATUS = "status"
 TASK_PROPOSAL_KIND_HANDOFF_DELEGATE = "handoff_delegate"
 TASK_PROPOSAL_KIND_HANDOFF_REVIEW = "handoff_review"
 TASK_PROPOSAL_KIND_HANDOFF_PANEL = "handoff_panel"

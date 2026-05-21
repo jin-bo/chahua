@@ -1,13 +1,14 @@
 """P5.3.4：茶客可调的 task-aware 工具集（docs/P5-任务房间.md §6.3 / §13 P5.3.4）。
 
-注册四个 in-process Python 工具给 agentao：
+注册五个 in-process Python 工具给 agentao：
 
 - ``task_list_artifacts()`` —— 列当前 active task 的产物清单
 - ``task_propose_decision(summary, supporting_message_ids?)`` —— 提议一条决策
 - ``task_propose_open(title, goal)`` —— 提议开新任务
+- ``task_propose_status(status, reason?)`` —— 提议改任务状态（P8.2）
 - ``task_write_artifact(name, content)`` —— **写**任务产物（绕开 agentao PathPolicy）
 
-三个 read-only 工具（list / propose_*）均 ``is_read_only = True``，但**这是为权限层
+四个 read-only 工具（list / propose_*）均 ``is_read_only = True``，但**这是为权限层
 放行而非声明"无副作用"**：
 
 - ``list_artifacts`` 是真无副作用 read-only；
@@ -35,10 +36,30 @@ from agentao.tools import Tool
 from .events import (
     TASK_PROPOSAL_KIND_DECISION,
     TASK_PROPOSAL_KIND_OPEN,
+    TASK_PROPOSAL_KIND_STATUS,
     ChahuaEventType,
 )
-from .task import format_artifact_mtime, format_artifact_size
-from .tasks_store import CLOSED_STATUSES, TaskNotFoundError, TasksStore
+from .task import (
+    TASK_STATUS_DISPLAY,
+    TASK_STATUS_OPEN,
+    format_artifact_mtime,
+    format_artifact_size,
+)
+from .tasks_store import (
+    CLOSED_STATUSES,
+    NON_TERMINAL_STATUSES,
+    TaskNotFoundError,
+    TasksStore,
+)
+
+# P8.2：``task_propose_status`` 可提议的状态值 —— 全部状态去掉创建态 ``open``
+# （茶客不能提议把任务"退回未开始"）。采纳时前端按终结与否分流到 close_task /
+# update_task（docs/P8 §4）。
+_PROPOSE_STATUS_VALUES: frozenset[str] = (
+    NON_TERMINAL_STATUSES - {TASK_STATUS_OPEN}
+) | CLOSED_STATUSES
+# 单点 sorted 列表 —— parameters 的 enum 与 execute 的错误文案共用，杜绝两处 sorted 漂移。
+_PROPOSE_STATUS_VALUES_SORTED: list[str] = sorted(_PROPOSE_STATUS_VALUES)
 
 if TYPE_CHECKING:
     # P6.1：transport_bridge.py 反向 import 本模块的 TASK_WRITE_ARTIFACT_TOOL_NAME
@@ -226,6 +247,64 @@ class TaskProposeOpenTool(_TaskProposeBase):
         return self._emit_proposal({"title": title, "goal": goal}, ack_label=title)
 
 
+class TaskProposeStatusTool(_TaskProposeBase):
+    """P8.2：提议把当前任务改成某个状态（docs/P8 §4）。
+
+    与 ``task_propose_decision`` / ``task_propose_open`` 同基类、同口径——只 emit
+    ``TASK_PROPOSAL``、不写库。采纳后前端按状态分流：非终结态走 ``update_task``、
+    终结态（done / abandoned）走 ``close_task``。补的是真实能力缺口：茶客此前**无法**
+    提议把任务设为 done / review / blocked，只能在聊天里口头提醒用户去面板手点。
+    """
+
+    _kind = TASK_PROPOSAL_KIND_STATUS
+
+    @property
+    def name(self) -> str:
+        return "task_propose_status"
+
+    @property
+    def description(self) -> str:
+        return (
+            "提议把当前任务改成某个状态。提议 ≠ 入库 —— UI 渲染成采纳 / 忽略卡片；"
+            "用户点采纳后才真正改状态。status 取值见枚举（不含创建态 open）；"
+            "reason 一句话说明理由（可选，仅显示在采纳卡片上、不入库）。"
+            "用于达成时提议标记 done、卡住时提议 blocked、需复核时提议 review 等。"
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": _PROPOSE_STATUS_VALUES_SORTED,
+                    "description": "目标状态。",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "改状态的理由（一句话，可选）。",
+                },
+            },
+            "required": ["status"],
+            "additionalProperties": False,
+        }
+
+    def execute(self, *, status: str, reason: str = "", **_: Any) -> str:
+        # parameters 已声明 enum，但 LLM 可能无视约束传任意值 —— 显式再校验。
+        if status not in _PROPOSE_STATUS_VALUES:
+            return f"Error: status 必须是 {_PROPOSE_STATUS_VALUES_SORTED!r} 之一。"
+        # 改状态提议必须挂某个任务——前端采纳卡按 data.task_id 拼 update_task /
+        # close_task inbound，无 active 时发出去的卡片必然不可采纳（codex P2）。
+        if self._transport.current_task_id is None:
+            return "Error: 当前无活跃任务，无法提议改任务状态。"
+        payload: dict[str, Any] = {"status": status}
+        if reason:
+            payload["reason"] = reason
+        label = TASK_STATUS_DISPLAY.get(status, status)
+        return self._emit_proposal(payload, ack_label=f"把任务标记为 {label}")
+
+
 # ── 写产物工具（绕开 agentao PathPolicy）────────────────────────────────────
 
 
@@ -265,7 +344,9 @@ class TaskWriteArtifactTool(Tool):
         return (
             "把内容写入当前任务的产物 ./task/<name>，自动入任务产物清单。"
             "用于落盘评审意见 / 设计方案 / 决策清单 / 代码片段 / 报告草稿等结构化产物。"
-            "name 必须是单一文件名（不含 / 或 .. 或前缀 .）；同名文件会被覆盖。"
+            "name 必须是单一文件名（不含 / 或 .. 或前缀 .）。"
+            "默认整体覆盖同名文件；append=true 时追加到文件末尾（文件不存在则新建）——"
+            "往复盘 / 日志类产物增量补内容时用 append，省去先读全文再整体写回。"
             "当前无活跃任务 / 任务已关闭 / name 不合法时返 ``Error: ...`` 字符串。"
             "**用本工具写**——普通 write_file('./task/<x>') 会被权限边界拒绝（PathPolicy）。"
         )
@@ -284,7 +365,11 @@ class TaskWriteArtifactTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "文件全部内容（覆盖写）。",
+                    "description": "要写入的内容（覆盖模式为文件全部内容；append 模式为追加的片段）。",
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "追加到文件末尾而非覆盖（默认 false）。",
                 },
             },
             "required": ["name", "content"],
@@ -295,7 +380,9 @@ class TaskWriteArtifactTool(Tool):
     def is_read_only(self) -> bool:
         return False
 
-    def execute(self, *, name: str, content: str, **_: Any) -> str:
+    def execute(
+        self, *, name: str, content: str, append: bool = False, **_: Any
+    ) -> str:
         task_id = self._transport.current_task_id
         if task_id is None:
             return "Error: 当前无活跃任务，无法落盘产物。"
@@ -306,7 +393,7 @@ class TaskWriteArtifactTool(Tool):
             return f"Error: 任务 {task_id} 已 {task.status}，无法落盘新产物。"
         try:
             result = self._tasks_store.write_artifact(
-                task_id, name=name, content=content,
+                task_id, name=name, content=content, append=append,
             )
         except ValueError as e:
             return f"Error: {e}"
@@ -314,7 +401,11 @@ class TaskWriteArtifactTool(Tool):
             return f"Error: {e}"
         except OSError as e:
             return f"Error: 写入失败 - {e}"
-        return f"Successfully wrote {result['size']} bytes to ./task/{result['name']}。"
+        action = "appended to" if append else "wrote"
+        return (
+            f"Successfully {action} ./task/{result['name']}"
+            f"（文件现 {result['size']} bytes）。"
+        )
 
 
 def register_task_tools(
@@ -323,13 +414,14 @@ def register_task_tools(
     tasks_store: TasksStore,
     transport: ChahuaTransport,
 ) -> None:
-    """把四个 task tool 注册到 agentao agent。工厂函数 —— TeaGuest 用一行调用。
+    """把五个 task tool 注册到 agentao agent。工厂函数 —— TeaGuest 用一行调用。
 
     工具构造时注入 ``tasks_store`` / ``transport``，让工具类不直接依赖 :class:`TeaGuest`
     （单测时各 mock 一份就够）。**不引入** ``TaskToolRegistry`` / plugin 抽象 ——
-    四个工具类 + 一个工厂函数足够（评审反馈：避免过度设计）。
+    五个工具类 + 一个工厂函数足够（评审反馈：避免过度设计）。
     """
     agent.tools.register(TaskListArtifactsTool(tasks_store=tasks_store, transport=transport))
     agent.tools.register(TaskProposeDecisionTool(transport=transport))
     agent.tools.register(TaskProposeOpenTool(transport=transport))
+    agent.tools.register(TaskProposeStatusTool(transport=transport))
     agent.tools.register(TaskWriteArtifactTool(tasks_store=tasks_store, transport=transport))

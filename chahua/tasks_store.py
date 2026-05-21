@@ -737,13 +737,19 @@ class TasksStore:
             )
         return deleted
 
-    def write_artifact(self, task_id: str, *, name: str, content: str) -> dict:
+    def write_artifact(
+        self, task_id: str, *, name: str, content: str, append: bool = False
+    ) -> dict:
         """直接把 ``content`` 写入 ``tasks/<task_id>/artifacts/<name>``。
 
         与 :meth:`attach_artifact` 区别：attach 从 ``share/`` 拷贝既有文件（copy 不 move），
-        本方法从内存字符串落盘新文件。茶客的 ``task_write_artifact`` 工具走这条 ——
+        本方法从内存字符串落盘。茶客的 ``task_write_artifact`` 工具走这条 ——
         agentao ``WriteFileTool`` 经 ``PathPolicy`` 检查后会拒绝 ``./task/<x>``（软链解析
         到 cwd 外），所以茶客不能走原生写工具，必须通过 chahua 自己的路径。
+
+        ``append=False``（默认）整体覆盖写；``append=True`` 追加到文件末尾（文件不存在则
+        新建）—— 与 agentao ``WriteFileTool`` 的 ``append`` 形参同口径，给「往复盘 /
+        日志类产物增量补内容」省去「先 read 全文再整体写回」的往返。
 
         ``name`` 走 :func:`_validate_artifact_name`（与 attach_artifact 同口径）；非法时
         抛 :class:`ValueError`。task 不存在抛 :class:`TaskNotFoundError`。已 closed 的
@@ -751,8 +757,9 @@ class TasksStore:
         外检查 ``CLOSED_STATUSES``，与 attach_artifact "可往 closed 任务追老资料"口径
         对称）。
 
-        返 ``{name, size, rel}`` 与 ``attach_artifact`` 同形 —— 便于上层合成
-        ``task_artifact_added`` envelope。
+        返 ``{name, size, rel}`` 与 ``attach_artifact`` 同形（``size`` 是操作后的磁盘
+        文件总字节数，append 模式下含原有内容）—— 便于上层合成 ``task_artifact_added``
+        envelope。
         """
         if task_id not in self._tasks:
             raise TaskNotFoundError(f"task_id={task_id!r} 不存在")
@@ -762,10 +769,14 @@ class TasksStore:
         adir = self.artifacts_dir(task_id)
         adir.mkdir(parents=True, exist_ok=True)
         dst = adir / name
-        dst.write_text(content, encoding="utf-8")
+        if append:
+            with dst.open("a", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            dst.write_text(content, encoding="utf-8")
         return {
             "name": name,
-            "size": len(content.encode("utf-8")),
+            "size": dst.stat().st_size,
             "rel": f"tasks/{task_id}/{_ARTIFACTS_DIRNAME}/{name}",
         }
 

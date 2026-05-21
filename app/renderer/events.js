@@ -72,6 +72,8 @@ export const EventType = Object.freeze({
 export const TaskProposalKind = Object.freeze({
   DECISION: "decision",
   OPEN: "open",
+  // P8.2：改任务状态提议。采纳后按 status 分流 update_task / close_task。
+  STATUS: "status",
   // P7.4：handoff propose —— 平铺 kind，字面值与 Inbound.HANDOFF_* 同形。
   HANDOFF_DELEGATE: "handoff_delegate",
   HANDOFF_REVIEW: "handoff_review",

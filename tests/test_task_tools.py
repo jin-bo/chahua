@@ -20,6 +20,7 @@ from chahua.task_tools import (
     TaskListArtifactsTool,
     TaskProposeDecisionTool,
     TaskProposeOpenTool,
+    TaskProposeStatusTool,
     TaskWriteArtifactTool,
     register_task_tools,
 )
@@ -62,22 +63,24 @@ class _FakeAgent:
         self.tools = _FakeAgentTools()
 
 
-# ─── ① 三工具的元数据齐全 ───────────────────────────────────────────────────
+# ─── ① 五工具的元数据齐全 ───────────────────────────────────────────────────
 
 
-def test_four_tools_metadata_complete(tmp_path: Path):
+def test_five_tools_metadata_complete(tmp_path: Path):
     store = TasksStore(room_dir=tmp_path)
     transport = _FakeTransport()
     tools = [
         TaskListArtifactsTool(tasks_store=store, transport=transport),
         TaskProposeDecisionTool(transport=transport),
         TaskProposeOpenTool(transport=transport),
+        TaskProposeStatusTool(transport=transport),
         TaskWriteArtifactTool(tasks_store=store, transport=transport),
     ]
     expected_names = {
         "task_list_artifacts",
         "task_propose_decision",
         "task_propose_open",
+        "task_propose_status",
         "task_write_artifact",
     }
     assert {t.name for t in tools} == expected_names
@@ -88,12 +91,13 @@ def test_four_tools_metadata_complete(tmp_path: Path):
         assert params["type"] == "object"
         assert "properties" in params
         assert params["additionalProperties"] is False
-    # task_write_artifact 是写工具，is_read_only=False；其余三个 read-only 工具 True
+    # task_write_artifact 是写工具，is_read_only=False；其余四个 read-only 工具 True
     read_only_map = {t.name: t.is_read_only for t in tools}
     assert read_only_map == {
         "task_list_artifacts": True,
         "task_propose_decision": True,
         "task_propose_open": True,
+        "task_propose_status": True,
         "task_write_artifact": False,
     }
 
@@ -227,6 +231,63 @@ def test_propose_ack_truncates_long_label(tmp_path: Path):
     assert ack.count("决策") < 50
 
 
+# ─── ③b task_propose_status emit envelope ──────────────────────────────────
+
+
+def test_propose_status_parameters_schema(tmp_path: Path):
+    p = TaskProposeStatusTool(transport=_FakeTransport()).parameters
+    assert p["required"] == ["status"]
+    assert "reason" in p["properties"]
+    # 枚举含终结 / 非终结态，不含创建态 open
+    enum = set(p["properties"]["status"]["enum"])
+    assert {"ready", "doing", "blocked", "review", "done", "abandoned"} == enum
+    assert "open" not in enum
+
+
+def test_propose_status_emits_envelope_non_terminal(tmp_path: Path):
+    """非终结态（review）—— payload 带 status + reason，kind = "status"。"""
+    transport = _FakeTransport(guest_name="Maya", task_id="task_abc")
+    tool = TaskProposeStatusTool(transport=transport)
+    ack = tool.execute(status="review", reason="初稿已齐，请复核")
+    assert "已提议" in ack
+    et, data = transport.emitted[0]
+    assert et is ChahuaEventType.TASK_PROPOSAL
+    assert data["proposer"] == "Maya"
+    assert data["kind"] == "status"
+    assert data["payload"] == {"status": "review", "reason": "初稿已齐，请复核"}
+
+
+def test_propose_status_emits_envelope_terminal(tmp_path: Path):
+    """终结态（done）—— 同样只 emit envelope，采纳分流由前端负责。"""
+    transport = _FakeTransport(task_id="task_abc")
+    tool = TaskProposeStatusTool(transport=transport)
+    tool.execute(status="done")
+    _, data = transport.emitted[0]
+    assert data["kind"] == "status"
+    # reason 省略时不进 payload
+    assert data["payload"] == {"status": "done"}
+
+
+def test_propose_status_rejects_unknown_status(tmp_path: Path):
+    """非法 status（含创建态 open）→ 返 Error、不 emit envelope。"""
+    transport = _FakeTransport(task_id="task_abc")
+    tool = TaskProposeStatusTool(transport=transport)
+    for bad in ("open", "finished", ""):
+        out = tool.execute(status=bad)
+        assert out.startswith("Error:")
+    assert transport.emitted == []
+
+
+def test_propose_status_no_active_task_returns_error(tmp_path: Path):
+    """无 active task → 返 Error、不 emit —— 采纳卡缺 task_id 必不可采纳（codex P2）。"""
+    transport = _FakeTransport(task_id=None)
+    tool = TaskProposeStatusTool(transport=transport)
+    out = tool.execute(status="done")
+    assert out.startswith("Error:")
+    assert "无活跃任务" in out
+    assert transport.emitted == []
+
+
 # ─── ④ active=None 时 list_artifacts 返提示 ─────────────────────────────────
 
 
@@ -248,10 +309,10 @@ def test_list_artifacts_deleted_task_returns_hint(tmp_path: Path):
     assert "task_ghost" in out
 
 
-# ─── ⑤ register_task_tools 装 4 个 ──────────────────────────────────────────
+# ─── ⑤ register_task_tools 装 5 个 ──────────────────────────────────────────
 
 
-def test_register_task_tools_installs_four(tmp_path: Path):
+def test_register_task_tools_installs_five(tmp_path: Path):
     store = TasksStore(room_dir=tmp_path)
     transport = _FakeTransport()
     agent = _FakeAgent()
@@ -261,6 +322,7 @@ def test_register_task_tools_installs_four(tmp_path: Path):
         "task_list_artifacts",
         "task_propose_decision",
         "task_propose_open",
+        "task_propose_status",
         "task_write_artifact",
     }
 
@@ -297,6 +359,29 @@ def test_write_artifact_overwrites_existing(tmp_path: Path):
     out = tool.execute(name="report.md", content="v2")
     assert "Successfully" in out
     assert (store.artifacts_dir(task.id) / "report.md").read_text(encoding="utf-8") == "v2"
+
+
+def test_write_artifact_append_mode_appends(tmp_path: Path):
+    """``append=True`` → 追加到文件末尾而非覆盖；文件不存在时新建。"""
+    store = TasksStore(room_dir=tmp_path)
+    task = store.open_task(title="t", goal="g")
+    tool = TaskWriteArtifactTool(
+        tasks_store=store,
+        transport=_FakeTransport(task_id=task.id),
+    )
+    # 文件不存在 + append → 新建
+    out = tool.execute(name="retro.md", content="第一轮\n", append=True)
+    assert "Successfully" in out
+    # 再 append → 累加而非覆盖
+    tool.execute(name="retro.md", content="第二轮\n", append=True)
+    assert (store.artifacts_dir(task.id) / "retro.md").read_text(
+        encoding="utf-8"
+    ) == "第一轮\n第二轮\n"
+    # append=False（默认）仍是覆盖
+    tool.execute(name="retro.md", content="重写")
+    assert (store.artifacts_dir(task.id) / "retro.md").read_text(
+        encoding="utf-8"
+    ) == "重写"
 
 
 def test_write_artifact_no_active_task_returns_error(tmp_path: Path):

@@ -1,0 +1,4 @@
+[guest]
+name       = "Maya"
+sex        = "female"
+permission = "workspace-write"

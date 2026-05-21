@@ -3,7 +3,20 @@
 // 茶客 propose 卡片渲染 + 去重（docs/P5-任务房间.md §6.3）。
 // hint 事件不持久化：刷新页面 + reset() （切房 / clear_room 回环时调）会清空去重指纹。
 
-import { EventType, Inbound, TaskProposalKind } from "./events.js";
+import {
+  EventType,
+  Inbound,
+  TaskProposalKind,
+  TASK_STATUS_OPTIONS,
+  isTaskClosed,
+  taskStatusLabel,
+} from "./events.js";
+
+// P8.2：task_propose_status 可提议的状态值 —— 全部状态去掉创建态 "open"
+// （与 chahua/task_tools.py::_PROPOSE_STATUS_VALUES 同口径）。
+const _PROPOSE_STATUS_VALUES = new Set(
+  TASK_STATUS_OPTIONS.map((o) => o.value).filter((v) => v !== "open"),
+);
 
 // 提议去重指纹集合 —— 反复刷同一 propose 时只渲染一张。模块级；renderer.js 在
 // renderSidebar 入口调 reset() 清，避免跨房间残留。指纹构成按 kind 分（见 dedupKey）。
@@ -16,11 +29,19 @@ const _HANDOFF_KINDS = new Set([
   TaskProposalKind.HANDOFF_PANEL,
 ]);
 
-// handoff propose 卡的「采纳」发的是抢占式 handoff_* inbound：若在任意 turn 还在跑
-// 时点采纳，server 把 in-flight user-turn 当可抢占 → cancel/drain 掉它，反而截断了
-// 当前发言（codex P2）。所以点「采纳」时若有 turn 在跑，这一下不发、只把按钮 gate
-// 住（置灰反馈），收到 AI 链收尾（onTurnIdle）再统一放开。gate 在**点击时**判 ——
-// 覆盖"卡片当轮"与"留到后续任意 turn 才点的旧卡"，不靠渲染时一次性判定。
+// 抢占式 inbound —— server 收到会 cancel/drain 在跑的 turn。turn 在跑时点「采纳」
+// 会把 in-flight user-turn 当可抢占 → 截断当前发言（codex P2）。这些 inbound 的采纳
+// 要 gate 到 onTurnIdle。handoff_* 全部抢占；close_task 也抢占（STATUS 提议里
+// done / abandoned 走它）；update_task / add_decision / open_task 不抢占。
+const _PREEMPTIVE_INBOUND = new Set([
+  Inbound.HANDOFF_DELEGATE,
+  Inbound.HANDOFF_REVIEW,
+  Inbound.HANDOFF_PANEL,
+  Inbound.CLOSE_TASK,
+]);
+
+// 被 gate 住、等 onTurnIdle 放开的「采纳」按钮。gate 在**点击时**判 —— 覆盖"卡片
+// 当轮"与"留到后续任意 turn 才点的旧卡"，不靠渲染时一次性判定。
 const _gatedAccepts = new Set();
 
 // 同 task_panel.js::cssEscape —— 防御 older Electron / 测试环境没 CSS.escape；message_id
@@ -49,10 +70,15 @@ function dedupKey(data, messageId) {
   // 在后续某轮再次 propose 同样的 handoff 挂在另一条消息气泡下，必须能再渲一张卡 ——
   // 所以 handoff kind 的指纹额外含宿主 message_id，只有同一条消息内工具被调两次
   // （同一 envelope 重复）才去重，跨轮的同样提议不再被吞（codex P2）。
+  // STATUS 提议是 task-specific：同一茶客对不同任务提同一状态（两个任务都提 done）
+  // payload 完全相同，不含 task_id 会把后一张卡误当重复吞掉（codex P2）——所以
+  // STATUS 指纹额外含 task_id。
   const base = `${data.proposer || ""}|${data.kind || ""}|${stableStringify(
     data.payload ?? null,
   )}`;
-  return _HANDOFF_KINDS.has(data.kind) ? `${base}|${messageId || ""}` : base;
+  if (_HANDOFF_KINDS.has(data.kind)) return `${base}|${messageId || ""}`;
+  if (data.kind === TaskProposalKind.STATUS) return `${base}|${data.task_id || ""}`;
+  return base;
 }
 
 function truncate(s, n) {
@@ -94,6 +120,17 @@ function renderPayloadPreview(kind, payload) {
     box.appendChild(head);
     box.appendChild(titleEl);
     box.appendChild(goalEl);
+  } else if (kind === TaskProposalKind.STATUS) {
+    const head = document.createElement("div");
+    head.className = "proposal-card-kind";
+    head.textContent = `建议把任务状态改为『${taskStatusLabel(payload.status)}』`;
+    box.appendChild(head);
+    if (typeof payload.reason === "string" && payload.reason) {
+      const why = document.createElement("div");
+      why.className = "proposal-card-summary";
+      why.textContent = truncate(payload.reason, 200);
+      box.appendChild(why);
+    }
   } else if (kind === TaskProposalKind.HANDOFF_DELEGATE) {
     const head = document.createElement("div");
     head.className = "proposal-card-kind";
@@ -174,6 +211,17 @@ function buildAcceptInbound(data, taskId) {
     const goal = typeof payload.goal === "string" ? payload.goal : "";
     if (!title || !goal) return null;
     return { type: Inbound.OPEN_TASK, title, goal };
+  }
+  // P8.2：改状态提议按终结与否分流——终结态必经 close_task（update_task 入站拒终结
+  // 态），非终结态走 update_task 的 patch 子对象。reason 是 propose-only、不进 inbound。
+  if (data.kind === TaskProposalKind.STATUS) {
+    if (!taskId) return null;  // 改状态必须挂某个 task
+    const status = typeof payload.status === "string" ? payload.status : "";
+    if (!_PROPOSE_STATUS_VALUES.has(status)) return null;
+    if (isTaskClosed(status)) {
+      return { type: Inbound.CLOSE_TASK, task_id: taskId, status };
+    }
+    return { type: Inbound.UPDATE_TASK, task_id: taskId, patch: { status } };
   }
   // P7.4：handoff propose 采纳即拼回 P7.1~7.3 既有的 handoff_* inbound。kind 去掉
   // 「handoff_」前缀即 inbound type 后缀；只挑该 inbound 白名单内的键 ——
@@ -269,11 +317,11 @@ export function createProposalCard({ messagesEl, sendInbound, isTurnActive }) {
           : "字段不齐，无法采纳";
     } else {
       acceptBtn.addEventListener("click", () => {
-        // handoff 采纳发抢占式 handoff_* inbound —— turn 在跑时点会 cancel/drain
-        // 掉 in-flight turn、截断当前发言（codex P2）。所以有 turn 在跑就先不发、
-        // 把按钮 gate 住（置灰），AI 链收尾时 onTurnIdle 放开让用户重点。在点击时判
-        // 覆盖旧卡留到后续 turn 的情况。decision / open 的 inbound 不抢占，不 gate。
-        if (_HANDOFF_KINDS.has(data.kind) && isTurnActive()) {
+        // 抢占式 inbound（handoff_* / close_task）turn 在跑时点会 cancel/drain 掉
+        // in-flight turn、截断当前发言（codex P2）。所以有 turn 在跑就先不发、把按钮
+        // gate 住（置灰），AI 链收尾时 onTurnIdle 放开让用户重点。在点击时判，覆盖旧
+        // 卡留到后续 turn 的情况。update_task / add_decision / open_task 不抢占、不 gate。
+        if (_PREEMPTIVE_INBOUND.has(inbound.type) && isTurnActive()) {
           acceptBtn.disabled = true;
           acceptBtn.title = "茶客发言中，本轮结束后可采纳";
           _gatedAccepts.add(acceptBtn);
