@@ -328,3 +328,104 @@ body:not(.has-active-task) .pending-file-attach { display: none; }
   font-family: inherit;
 }
 .handoff-queue-clear:hover { background: #fbe6e6; border-color: #f5b3b3; }
+
+/* 「指派」按钮 —— 底栏紧挨 + 号，点开统一的指派 / 圆桌 popover。大小 / 配色与相邻的
+   .composer-task-chip（任务 chip）对齐，让底栏两个 pill 视觉同级。 */
+.composer-assign {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #6a4f25;
+  background: #fff4d6;
+  border: 1px solid #e0c068;
+  border-radius: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.composer-assign:hover:not(:disabled) {
+  background: #ffe9a8;
+  border-color: #c89c40;
+}
+.composer-assign:disabled {
+  background: #f5f1e6;
+  border-color: #e0dac8;
+  color: #b8b09a;
+  cursor: not-allowed;
+}
+
+/* 「指派下一句」popover —— 复用 .popover 底座（白底 + 阴影），锚到底栏按钮上方。
+   茶客 checkbox 清单 + 汇总者下拉（≥2 人显） + 内部备注（1 人显） + 确认按钮。 */
+.assign-guest-list {
+  margin: 2px 0 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.assign-guest-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #444;
+}
+.assign-guest-row:hover { background: #f5f1e6; }
+.assign-guest-cb { flex-shrink: 0; cursor: pointer; }
+.assign-guest-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assign-summ-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #777;
+}
+.assign-summ-label[hidden] { display: none; }
+.assign-summ {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 3px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: #444;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+}
+.assign-note {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: #444;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  resize: vertical;
+}
+.assign-note[hidden] { display: none; }
+.assign-note:focus { outline: none; border-color: #999; }
+.assign-confirm {
+  width: 100%;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #fff;
+  background: #6b4f2a;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.assign-confirm:hover:not(:disabled) { background: #5a4220; }
+.assign-confirm:disabled {
+  background: #d8d0bc;
+  cursor: not-allowed;
+}

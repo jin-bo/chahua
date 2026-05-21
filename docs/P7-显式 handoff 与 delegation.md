@@ -741,6 +741,13 @@ def build_context_for(
 
 ### 5.1 茶客侧栏
 
+> **后续修订（2026-05-20，handoff UI 统一）**：§5.1.1 的茶客行 ⇨ delegate 按钮与
+> §5.1.2 / P7.3 §6.1 的侧栏「圆桌」多选模式**已被合并**为 composer 底栏单个「指派」按钮
+> + 统一 popover（勾选人数定语义：1 人 = delegate、2~4 人 = panel）。下文 §5.1.1 /
+> §5.1.2 保留为设计时记录；当前实现见 `app/renderer/assign_popover.js` 与 CHANGELOG
+> `[Unreleased] / Changed`。inbound 协议（`handoff_delegate` / `handoff_panel`）与
+> 调度层不受影响。
+
 #### 5.1.1 ⇨ delegate 按钮（**P7.1**）
 - 每位茶客头像右下角加"⇨" hover 按钮 → 弹"交给…"小菜单（带可选**内部备注**输入）
 - **备注输入文案**（反向评审 #2）：placeholder 写"内部备注（用于自己回看 / 调试，**不发给茶客**）"，

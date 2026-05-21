@@ -32,13 +32,10 @@
       <div class="sidebar-section">
         <div class="sidebar-title">
           <span>茶客</span>
-          <button id="panel-mode-toggle" type="button" class="sidebar-add" title="圆桌模式：多选茶客发起一场平行讨论" disabled>🔄</button>
           <button id="import-persona" type="button" class="sidebar-add" title="导入新 persona（本地目录 / GitHub）" disabled>↓</button>
           <button id="add-guest" type="button" class="sidebar-add" title="添加茶客" disabled>+</button>
         </div>
         <ul id="guests"></ul>
-        <!-- P7.3 圆桌多选模式下浮现「发起圆桌(N)」按钮；非圆桌模式 hidden 不占位。 -->
-        <div id="panel-launch" class="panel-launch" hidden></div>
       </div>
       <div class="sidebar-section">
         <div class="sidebar-title">
@@ -509,6 +506,7 @@
     </div>
     <div class="composer-bottom-bar">
       <button type="button" id="attach-file" class="composer-attach" title="上传文件到房间共享目录（茶客可在 ./share/ 下读取）" aria-label="添加文件" disabled>+</button>
+      <button type="button" id="assign-handoff" class="composer-assign" title="指派下一句 —— 交给一位茶客发言，或选多位发起圆桌" aria-label="指派下一句" disabled>⇨ 指派</button>
       <div id="composer-task-chip" class="composer-task-chip" hidden></div>
       <button type="submit" class="composer-send" title="发送 (Enter)" aria-label="发送">↑</button>
     </div>

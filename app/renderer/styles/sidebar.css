@@ -271,8 +271,8 @@
   white-space: nowrap;
 }
 
-/* 行内圆形小按钮基座 —— 茶客行 / 房间行 hover 才浮现。.row-remove（删除红）/
-   .guest-delegate（⇨ 交给棕）只在这之上改 color / font-size / hover 配色。 */
+/* 行内圆形小按钮基座 —— 茶客行 / 房间行 hover 才浮现。.row-remove（删除红）
+   在这之上改 color / font-size / hover 配色。 */
 .row-icon-btn {
   margin-left: 6px;
   width: 18px;
@@ -295,122 +295,6 @@
 .row-remove { font-size: 13px; color: #c66; }
 .row-remove:hover:not(:disabled) { background: #fbe6e6; border-color: #f5b3b3; }
 .row-remove:disabled { color: #ccc; cursor: not-allowed; opacity: 0; }
-
-/* ⇨ 交给：delegate 入口，紧挨 row-remove 左侧。连接断时整 body.disconnected
-   把它灰掉（与 .dblclick-anchor 同口径）。 */
-.guest-delegate { font-size: 12px; color: #6b4f2a; }
-.guest-delegate:hover { background: #ece5d2; border-color: #d8c9a3; }
-body.disconnected .guest-delegate {
-  color: #ccc;
-  cursor: not-allowed;
-  opacity: 0;
-}
-
-/* 「交给…」popover：复用 .popover 底座，多一个备注 textarea + 确认按钮。 */
-.handoff-note {
-  width: 100%;
-  box-sizing: border-box;
-  margin: 2px 0 6px;
-  padding: 6px 8px;
-  font-family: inherit;
-  font-size: 12px;
-  color: #444;
-  border: 1px solid #d0c8b4;
-  border-radius: 4px;
-  resize: vertical;
-}
-.handoff-note:focus { outline: none; border-color: #999; }
-.handoff-confirm {
-  width: 100%;
-  padding: 6px 8px;
-  font-family: inherit;
-  font-size: 13px;
-  color: #fff;
-  background: #6b4f2a;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.handoff-confirm:hover { background: #5a4220; }
-
-/* P7.3 圆桌（panel）多选模式 ─────────────────────────────────────── */
-/* 「圆桌」toggle 点亮态：data-on=1 时高亮，与其它 sidebar-add 区分。 */
-#panel-mode-toggle[data-on="1"] {
-  background: #6b4f2a;
-  border-color: #6b4f2a;
-  color: #fff;
-}
-#panel-mode-toggle[data-on="1"]:hover:not(:disabled) {
-  background: #5a4220;
-  color: #fff;
-}
-
-/* 圆桌模式下的茶客行：checkbox + 头像 + 名字，整行可点。 */
-#guests li.panel-select-row { cursor: pointer; }
-#guests li.panel-select-row:hover { background: #f5f1e6; border-radius: 4px; }
-.panel-checkbox { flex-shrink: 0; cursor: pointer; }
-
-/* 侧栏底部「发起圆桌(N)」条。 */
-.panel-launch { margin-top: 6px; }
-.panel-launch[hidden] { display: none; }
-.panel-launch-btn {
-  width: 100%;
-  padding: 6px 8px;
-  font-family: inherit;
-  font-size: 13px;
-  color: #fff;
-  background: #6b4f2a;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.panel-launch-btn:hover:not(:disabled) { background: #5a4220; }
-.panel-launch-btn:disabled {
-  background: #d8d0bc;
-  cursor: not-allowed;
-}
-
-/* 圆桌配置 popover：复用 .popover 底座，多 summarizer 下拉 + 发起按钮。 */
-.panel-popover-members {
-  margin: 2px 0 6px;
-  font-size: 12px;
-  color: #555;
-  line-height: 1.5;
-}
-.panel-popover-summ-label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 12px;
-  color: #777;
-}
-.panel-popover-summ {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 3px;
-  padding: 4px 6px;
-  font-family: inherit;
-  font-size: 12px;
-  color: #444;
-  border: 1px solid #d0c8b4;
-  border-radius: 4px;
-}
-.panel-popover-confirm {
-  width: 100%;
-  padding: 6px 8px;
-  font-family: inherit;
-  font-size: 13px;
-  color: #fff;
-  background: #6b4f2a;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.panel-popover-confirm:hover:not(:disabled) { background: #5a4220; }
-.panel-popover-confirm:disabled {
-  background: #d8d0bc;
-  cursor: not-allowed;
-}
 
 /* 房间行：左侧 meta 块（name + topic），右侧 row-remove。 */
 #rooms li { display: flex; align-items: center; }

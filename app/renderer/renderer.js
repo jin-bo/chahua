@@ -43,8 +43,7 @@ import { createSettings } from "./settings.js";
 import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
-import { createHandoffPopover } from "./handoff_popover.js";
-import { createPanelPopover, panelTargetCap } from "./panel_popover.js";
+import { createAssignPopover } from "./assign_popover.js";
 import { createHandoffQueueBar } from "./handoff_queue_bar.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
@@ -71,8 +70,7 @@ const roomsEl = document.getElementById("rooms");
 const dropdownEl = document.getElementById("mention-dropdown");
 const addGuestBtn = document.getElementById("add-guest");
 const importPersonaBtn = document.getElementById("import-persona");
-const panelModeToggleBtn = document.getElementById("panel-mode-toggle");
-const panelLaunchEl = document.getElementById("panel-launch");
+const assignHandoffBtn = document.getElementById("assign-handoff");
 const addRoomBtn = document.getElementById("add-room");
 const addGuestModal = document.getElementById("add-guest-modal");
 const addRoomModal = document.getElementById("add-room-modal");
@@ -185,7 +183,7 @@ function setInputEnabled(enabled) {
   submitBtn.disabled = !enabled;
   addGuestBtn.disabled = !enabled;
   importPersonaBtn.disabled = !enabled;
-  panelModeToggleBtn.disabled = !enabled;
+  assignHandoffBtn.disabled = !enabled;
   addRoomBtn.disabled = !enabled;
   attachFileBtn.disabled = !enabled;
   updateNewTaskBtn();
@@ -255,65 +253,20 @@ function closePermissionPopover() {
   permissionPopover?.close();
 }
 function showPermissionPopover(anchor, g) {
-  // 权限 popover 与 ⇨ delegate popover 共用茶客行 anchor —— 互斥，开一个关另一个。
-  closeHandoffPopover();
   permissionPopover?.show(anchor, g);
 }
 
-// 「交给…」delegate popover（点茶客卡片的 ⇨ 按钮）—— 见 ./handoff_popover.js。
-let handoffPopover = null;
-function closeHandoffPopover() {
-  handoffPopover?.close();
+// ── 指派下一句（delegate + 圆桌 panel 统一入口）─────────────────────
+// composer 底栏「指派」按钮触发；勾 1 人 = delegate、勾 2~4 人 = panel。delegate 与
+// panel 后端本是同一件事，前端入口也合一，勾选人数定语义。见 ./assign_popover.js。
+let assignPopover = null;
+function closeAssignPopover() {
+  assignPopover?.close();
 }
-function showHandoffPopover(anchor, guestName) {
-  closePermissionPopover();
-  closeActionPopover();
-  handoffPopover?.show(anchor, guestName);
-}
-
-// ── 圆桌（panel）多选模式（P7.3 §6.1）────────────────────────────────
-// panelMode / panelSelected 是纯前端 UI 态（不来自 room_info）。toggle / 勾选都只
-// 重渲 guests 列表 + launch 条，不触发 renderSidebar 的全量重置。
-let panelMode = false;
-const panelSelected = new Set();
-let panelPopover = null;
-
-function closePanelPopover() {
-  panelPopover?.close();
-}
-
-// 只清状态、不重渲 —— 给 renderSidebar 真正切房分支用（彼时 guests 还没装好）。
-function resetPanelMode() {
-  panelMode = false;
-  panelSelected.clear();
-  closePanelPopover();
-}
-
-// 退出圆桌模式并重渲（发起后 / 再点 toggle 关闭时走这条）。
-function exitPanelMode() {
-  resetPanelMode();
-  renderGuests();
-}
-
-function togglePanelMode() {
+function openAssignPopover() {
   if (!connected) return;
-  if (panelMode) {
-    exitPanelMode();
-    return;
-  }
-  // 进圆桌模式前关掉锚在茶客行上的 popover —— renderGuests 会替掉整行 DOM。
-  closePermissionPopover();
-  closeHandoffPopover();
-  panelMode = true;
-  panelSelected.clear();
-  renderGuests();
-}
-
-function openPanelPopover(anchor) {
-  // panelist / summarizer 候选都按茶客行顺序取，显示稳定。
-  const panelists = guests.map((g) => g.name).filter((n) => panelSelected.has(n));
-  const others = guests.map((g) => g.name).filter((n) => !panelSelected.has(n));
-  panelPopover?.show(anchor, panelists, others, exitPanelMode);
+  closeActionPopover();
+  assignPopover?.show(assignHandoffBtn);
 }
 
 // P7.2「请审…」—— 点消息气泡的请审按钮触发。复用 action popover 当茶客选择菜单：
@@ -496,10 +449,8 @@ const {
 });
 
 // ── 茶客列表渲染 ──────────────────────────────────────────────────
-// renderSidebar 与圆桌模式 toggle 共用。读 module-level guests + panelMode +
-// panelSelected：圆桌模式渲多选 checkbox 行，否则渲常规行（权限 anchor / ⇨ / ×）。
-
-// 常规行：头像 / 名字（权限 anchor）+ 打分小数字 + ⇨ 交给 + × 请离。
+// 茶客行：头像 / 名字（权限 anchor）+ 打分小数字 + × 请离。指派 / 圆桌入口已挪到
+// composer 底栏「指派」按钮（见 assign_popover.js），不再挂在茶客行上。
 function renderGuestRowNormal(li, g, lastGuestLock) {
   // 头像 / 名字都是「设置权限」的 anchor —— popover 锚在头像更直观，但点名字也能开。
   const node = makeAvatarWithPermission(g, "avatar", "permission-badge");
@@ -529,19 +480,6 @@ function renderGuestRowNormal(li, g, lastGuestLock) {
   score.className = "guest-score";
   li.appendChild(score);
   scoreSpansByName.set(g.name, score);
-  // ⇨ 交给：hover 才显的 delegate 入口。点击弹 popover 收备注后发 handoff_delegate；
-  // drain 跑期间不 disable —— 此时 delegate 应 append 到队尾、不抢占。
-  const delegate = document.createElement("button");
-  delegate.type = "button";
-  delegate.className = "row-icon-btn guest-delegate";
-  delegate.textContent = "⇨";
-  delegate.title = `把下一句指派给 ${g.name}（加入队列）`;
-  delegate.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    if (!connected) return;
-    showHandoffPopover(delegate, g.name);
-  });
-  li.appendChild(delegate);
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "row-icon-btn row-remove";
@@ -561,79 +499,17 @@ function renderGuestRowNormal(li, g, lastGuestLock) {
   li.appendChild(remove);
 }
 
-// 圆桌模式行：checkbox + 头像 + 名字。点整行（checkbox 之外）也切换勾选。
-function renderGuestRowPanelMode(li, g) {
-  li.className = "panel-select-row";
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  cb.className = "panel-checkbox";
-  cb.checked = panelSelected.has(g.name);
-  li.appendChild(cb);
-  li.appendChild(makeAvatar(g.name, "avatar"));
-  li.appendChild(makeBadge("guest-name", null, g.name));
-  const sync = () => {
-    if (cb.checked) panelSelected.add(g.name);
-    else panelSelected.delete(g.name);
-    renderPanelLaunch();
-  };
-  // checkbox 自己处理 change；点行其余位置手动 toggle 一次。
-  cb.addEventListener("click", (ev) => ev.stopPropagation());
-  cb.addEventListener("change", sync);
-  li.addEventListener("click", () => {
-    cb.checked = !cb.checked;
-    sync();
-  });
-}
-
-// 圆桌模式下侧栏底部的「发起圆桌(N)」条；非圆桌模式 hidden 不占位。
-function renderPanelLaunch() {
-  panelLaunchEl.replaceChildren();
-  if (!panelMode) {
-    panelLaunchEl.hidden = true;
-    return;
-  }
-  panelLaunchEl.hidden = false;
-  const n = panelSelected.size;
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "panel-launch-btn";
-  btn.textContent = `发起圆桌（${n}）`;
-  // 上限按"未选 summarizer"乐观估；选了 summarizer 后 popover 里再按 has_summ 收紧。
-  const cap = panelTargetCap(maxAiTurns, false);
-  if (n < 2) {
-    btn.disabled = true;
-    btn.title = "至少勾选 2 位茶客";
-  } else if (n > cap) {
-    btn.disabled = true;
-    btn.title = `圆桌人数 ${n} 超出上限 ${cap}（受 max_consecutive_ai_turns=${maxAiTurns} 约束）`;
-  }
-  btn.addEventListener("click", () => {
-    if (!connected || btn.disabled) return;
-    openPanelPopover(btn);
-  });
-  panelLaunchEl.appendChild(btn);
-}
-
 function renderGuests() {
   guestsEl.replaceChildren();
   scoreSpansByName.clear();
-  // 圆桌 popover 锚在 launch 按钮上 —— 重渲会替掉它，先关掉避免悬空 anchor。
-  closePanelPopover();
-  // panelSelected 可能残留已被请离的茶客名 —— 按当前 guests 修剪。
-  for (const name of [...panelSelected]) {
-    if (!guests.some((g) => g.name === name)) panelSelected.delete(name);
-  }
   // 最后一位茶客不能删（与 server 端 admin.remove_guest 硬约束一致）—— 前端禁用按钮，
   // 用户少踩一次"提交后才发现不行"的坑。
   const lastGuestLock = guests.length <= 1;
   for (const g of guests) {
     const li = document.createElement("li");
-    if (panelMode) renderGuestRowPanelMode(li, g);
-    else renderGuestRowNormal(li, g, lastGuestLock);
+    renderGuestRowNormal(li, g, lastGuestLock);
     guestsEl.appendChild(li);
   }
-  panelModeToggleBtn.dataset.on = panelMode ? "1" : "";
-  renderPanelLaunch();
 }
 
 // ── sidebar 装配（room_info）────────────────────────────────────────
@@ -660,14 +536,12 @@ function renderSidebar(roomInfo) {
   const nextRoomId = roomInfo.current_room_id ?? null;
   if (nextRoomId !== handoffRoomId) {
     handoffState.reset();
-    // 圆桌多选是按房间的 UI 态 —— 真正切房时连同 handoff 队列一起清。
-    resetPanelMode();
     handoffRoomId = nextRoomId;
   }
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
   closePermissionPopover();
-  closeHandoffPopover();
+  closeAssignPopover();
   setStatus("ok", `已连接 ${wsUrl}`);
   roomNameEl.textContent = roomInfo.room_name || "—";
   roomTopicEl.textContent = roomInfo.topic || "";
@@ -1042,8 +916,8 @@ addGuestBtn.addEventListener("click", () => {
   openModal(addGuestModal);
 });
 
-// 「圆桌」多选模式 toggle —— 点亮进多选、再点退出。
-panelModeToggleBtn.addEventListener("click", togglePanelMode);
+// composer 底栏「指派」按钮 —— 弹统一的指派 / 圆桌 popover。
+assignHandoffBtn.addEventListener("click", openAssignPopover);
 
 addRoomBtn.addEventListener("click", () => {
   if (!connected) return;
@@ -1150,16 +1024,11 @@ permissionPopover = createPermissionPopover({
   openGuestSettings: (g) => guestSettings.open(g),
 });
 
-handoffPopover = createHandoffPopover({
+assignPopover = createAssignPopover({
   send,
   setStatus,
   isConnected: () => connected,
-});
-
-panelPopover = createPanelPopover({
-  send,
-  setStatus,
-  isConnected: () => connected,
+  getGuests: () => guests.map((g) => g.name),
   getMaxAiTurns: () => maxAiTurns,
 });
 
@@ -1224,7 +1093,7 @@ const composerTaskChip = createComposerTaskChip({
   closeOtherPopovers: () => {
     closeActionPopover();
     closePermissionPopover();
-    closeHandoffPopover();
+    closeAssignPopover();
   },
 });
 
@@ -1418,11 +1287,10 @@ function clearCurrentRoom() {
   setStatus("", `清空「${roomName}」…`);
 }
 
-// 跨 popover 互斥：开 action 前先关 permission / handoff / panel。
+// 跨 popover 互斥：开 action 前先关 permission / 指派 popover。
 function showActionPopover(anchor, title, items) {
   closePermissionPopover();
-  closeHandoffPopover();
-  closePanelPopover();
+  closeAssignPopover();
   openActionPopover(anchor, title, items);
 }
 

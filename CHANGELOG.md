@@ -25,6 +25,12 @@
   - **前端 UI**（PR2，P7.1.8~11）。`events.js` 加常量；`renderer.js` 维护本地 `handoffQueueState`（切房 / 刷新 reset）。茶客侧栏 ⇨ hover 按钮 → delegate popover（可选内部备注 textarea）；composer 上方队列预览小条显示"➡️ 下一句：A → B → C" + ✕ 全部取消；调试抽屉 turn 行复用 `scoring_path` 渲 "[指派] {winner}" 徽标、详情面板 `trigger.kind="handoff"` 加"由用户指派"提示条。**handoff drain 跑期间 ⇨ 按钮不 disable**（drain 中 delegate 应 append 队尾），只在 ws 断开 / target 不在场 / 提交中三种情况 disable。
   - **`reason` 是内部备注**：`HandoffItem.reason` 只进 debug record `trigger.handoff_item` + 队列预览 hover，**永远不进茶客 prompt**；UI 文案明示"不发给茶客"。`@提及` 与 `/delegate` 都是用户单点路由但语义不同：`@A` 完后回 scoring，`/delegate A` 完后不回落（等用户），`@` 不入队列。
 
+### Changed
+- **handoff UI 统一 —— delegate + panel 合并成 composer 底栏单个「指派」入口**（2026-05-20）：P7.1 的茶客行 ⇨ hover 按钮与 P7.3 的侧栏「圆桌」多选模式是同一能力的两套互不相干的交互（后端 `handoff_panel` 的 `targets` 长度=1 即等价 `handoff_delegate`），发现性差、心智割裂。改为 composer 底栏一个常驻「指派」按钮，点开统一 popover 列全体茶客 checkbox：**勾选人数定语义**——勾 1 人 → `handoff_delegate`（带可选内部备注）、勾 2~4 人 → `handoff_panel`（汇总者下拉仅 ≥2 人时显示），确认按钮文案随勾选人数变（「交给『X』发下一句」/「发起圆桌（N）」）。
+  - 新增 `app/renderer/assign_popover.js`（`createAssignPopover`）；删除 `handoff_popover.js` / `panel_popover.js`；删除侧栏「圆桌」toggle（`panel-mode-toggle`）/ 多选模式 / `panel-launch` 条 / 茶客行 ⇨ 按钮及其全部 CSS。`index.html` composer 底栏加 `#assign-handoff` 按钮。
+  - **纯前端改动**：inbound 协议（`handoff_delegate` / `handoff_panel` / `handoff_review` / `handoff_clear`）、五道校验、drain 调度层、`schema_version` 全部不变。客户端 cap 预校验数学（`min(MAX_PANEL_TARGETS, max_consecutive_ai_turns - has_summarizer)`）原样保留进新 popover。
+  - **review 不动**：消息气泡「请审…」按钮是消息锚定的（要先选哪条消息），留在气泡上，仅样式跟随统一。设计文档 P7 §5.1 / P7.3 §6.1 加 2026-05-20 后续修订注。
+
 ## [0.1.1] - 2026-05-19
 
 详见 [`docs/releases/v0.1.1.md`](docs/releases/v0.1.1.md)。
