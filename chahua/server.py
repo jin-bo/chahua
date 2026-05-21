@@ -136,6 +136,10 @@ INBOUND_HANDOFF_DELEGATE = "handoff_delegate"
 INBOUND_HANDOFF_REVIEW = "handoff_review"
 INBOUND_HANDOFF_PANEL = "handoff_panel"
 INBOUND_HANDOFF_CLEAR = "handoff_clear"
+# ``/tools`` / ``/skills`` slash 查询：只读 introspection，回茶客 agent 注册的
+# tools + 可用 skills + 权限模式。响应回 GUEST_CAPS_INFO envelope。归核心层
+# （与 fetch_turn_detail 同口径——introspection 不属任何 feature slot）。
+INBOUND_LIST_GUEST_CAPS = "list_guest_caps"
 
 # Payload 白名单——module-level 与 ``_OPEN_TASK_ALLOWED`` 等 task inbound 常量同
 # 位置（便于 grep，无 ``self.`` lookup 开销）。
@@ -143,6 +147,7 @@ _HANDOFF_DELEGATE_ALLOWED = frozenset({"type", "target", "reason"})
 _HANDOFF_REVIEW_ALLOWED = frozenset({"type", "target", "message_id"})
 _HANDOFF_PANEL_ALLOWED = frozenset({"type", "targets", "summarizer"})
 _HANDOFF_CLEAR_ALLOWED = frozenset({"type"})
+_LIST_GUEST_CAPS_ALLOWED = frozenset({"type", "guest", "view"})
 
 # ``_inflight_kind`` 取值——与 ``Literal["user","handoff"]`` 类型签名同口径，
 # 给 callsite 一个有名字面值，避免 6 处 `"user"` / `"handoff"` 散漏改名漂移。
@@ -656,6 +661,44 @@ class ChahuaServer:
             return
         _emit({"found": True, "turn": turn, "prompts": prompts})
 
+    async def _inbound_list_guest_caps(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """``{"type":"list_guest_caps","guest":"<name>","view":"tools"|"skills"}``
+        → 回 GUEST_CAPS_INFO。
+
+        ``/tools`` / ``/skills`` slash 查询的只读 introspection：回茶客 agent 注册的
+        tools + 可用 skills + 权限模式。不挂房间 turn / 不进 transcript / 不动
+        in-flight。guest 走 :meth:`Orchestrator.get_guest`（反映运行时增删，不读
+        ``RoomSession.guests`` boot 快照）；不在场 → NOTICE error。
+
+        ``view`` 是纯展示回声 —— 前端按它裁剪显示 tools / skills 段。server 不解释、
+        只规范化后原样回传：把"查的是哪段"绑在每个响应里，多查询并发时前端不靠一个
+        可变全局态对号入座（否则两条 in-flight 查询会串台）。
+        """
+        if not self._reject_unknown_keys(
+            data, _LIST_GUEST_CAPS_ALLOWED,
+            where=INBOUND_LIST_GUEST_CAPS, sink=sink,
+        ):
+            return
+        guest_name = _require_str(data, "guest", where=INBOUND_LIST_GUEST_CAPS)
+        if guest_name is None:
+            return
+        guest = self._session.orchestrator.get_guest(guest_name)
+        if guest is None:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"{INBOUND_LIST_GUEST_CAPS}: guest={guest_name!r} 不在场",
+            )
+            return
+        caps = guest.describe_capabilities()
+        caps["view"] = "skills" if data.get("view") == "skills" else "tools"
+        sink(ChahuaEnvelope(
+            room_id=self._session.room.name, turn_id=None, guest_name=None,
+            message_id=None, type=ChahuaEventType.GUEST_CAPS_INFO,
+            data=caps,
+        ))
+
     # ── P5.1.7 任务 inbound（docs/P5-任务房间.md §4.3 P5.1 段）─────────────
     #
     # 共通契约：
@@ -984,6 +1027,7 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_CLEAR_ROOM: "_inbound_clear_room",
     INBOUND_USER_MESSAGE: "_inbound_user_message",
     INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
+    INBOUND_LIST_GUEST_CAPS: "_inbound_list_guest_caps",
     INBOUND_HANDOFF_DELEGATE: "_inbound_handoff_delegate",
     INBOUND_HANDOFF_REVIEW: "_inbound_handoff_review",
     INBOUND_HANDOFF_PANEL: "_inbound_handoff_panel",

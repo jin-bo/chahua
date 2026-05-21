@@ -121,6 +121,12 @@ class ChahuaEventType(str, Enum):
     HANDOFF_ENQUEUED = "handoff_enqueued"
     HANDOFF_CONSUMED = "handoff_consumed"
     HANDOFF_CLEARED = "handoff_cleared"
+    # ``/tools`` / ``/skills`` slash 查询的回包（只读 introspection）。data 形状：
+    # ``{guest, permission, tools: [...], skills: [...], view}`` —— 茶客 agent 注册
+    # 的 tools + 可用 skills + 当前权限模式快照。``view`` 是请求方传来的展示回声
+    # （``"tools"`` / ``"skills"``），前端按它裁剪显示哪段，多查询并发时不串台。
+    # 一次性查询、不进 transcript、不落盘、不挂房间 turn；schema_version 不 bump。
+    GUEST_CAPS_INFO = "guest_caps_info"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。
@@ -132,11 +138,19 @@ STATUS_CANCELLED = "cancelled"
 NOTICE_LEVEL_INFO = "info"
 NOTICE_LEVEL_ERROR = "error"
 
-# TASK_PROPOSAL envelope 的 ``data.kind`` 取值（docs §6.3）。前端按 kind 分发"采纳"
-# 按钮：decision → ADD_DECISION inbound；open → OPEN_TASK inbound。Python 端
-# 工具子类 ``_kind`` 字面值、events.py 文档、前端 (P5.3.6) 都从这里取，单点散落。
+# TASK_PROPOSAL envelope 的 ``data.kind`` 取值（docs §6.3 / P7.4 §3.1）。前端按 kind
+# 分发"采纳"按钮：decision → ADD_DECISION / open → OPEN_TASK / handoff_* → 既有
+# HANDOFF_* inbound。Python 端工具子类 ``_kind`` 字面值、events.py 文档、前端
+# (P5.3.6 / P7.4.3) 都从这里取，单点散落。
+#
+# P7.4：handoff propose 复用同一 TASK_PROPOSAL envelope，kind 是**平铺值**（不嵌套
+# ``kind:"handoff"`` + ``payload.kind``）—— 字面值与 HANDOFF_* inbound 帧 type 同形，
+# 前端 ``proposal_card.js`` 单层 switch 即可分发。
 TASK_PROPOSAL_KIND_DECISION = "decision"
 TASK_PROPOSAL_KIND_OPEN = "open"
+TASK_PROPOSAL_KIND_HANDOFF_DELEGATE = "handoff_delegate"
+TASK_PROPOSAL_KIND_HANDOFF_REVIEW = "handoff_review"
+TASK_PROPOSAL_KIND_HANDOFF_PANEL = "handoff_panel"
 
 
 def new_id(prefix: str, n_bytes: int = 10) -> str:

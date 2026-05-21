@@ -808,7 +808,7 @@ P7 **不新增持久化目录、不新增 toml 字段、不 bump schema_version*
 | **P7.1** | **delegate only**：内存队列；`enqueue_handoff` + `run_pending_handoff`；server `_inbound_handoff_delegate`；扩展 `scoring_path` enum；UI 茶客侧栏 ⇨ 按钮 + 队列预览；cancel 同步 | 无 | **不碰** task.owner / AI propose / `[panel]` toml |
 | **P7.2** | review：UI 消息气泡"请审…"按钮触发（自带 `message_id`，`scope=message` 唯一档）；`extra_blocks` 参数 + `<review_target>` 块（onboarding/incremental 两条路径都接）。**详细设计见 [`P7.2-请审 review.md`](P7.2-请审%20review.md)** | P7.1 | **不开** `last` / `task` / slash `@msg_id`；右键复制 message_id 仅调试用 |
 | **P7.3** | panel：HandoffItem 持 `targets` 元组 + `summarizer` 字段（`to_dict` 转 list）一项跑一个 turn；串行 + `<panel_context>` / `<panel_summary_request>` 注入；`MAX_PANEL_TARGETS = 4` **硬编码常量**；summarizer 收进 panel item 字段、同 turn 末位 speaker（v2 收敛）；UI 圆桌模式 | P7.1 | **不开** `[panel]` toml / `default_summarizer` / `parallel_prompt_hint` 开关；**不**拆双 item / 不引入 `panel_group_id` |
-| **P7.4** | AI propose handoff（`task_propose_handoff` 工具 + `TASK_PROPOSAL` kind="handoff" + 前端卡片 kind 分支） | P7.1–7.3 | 最后开；基础动作稳了再放大 |
+| **P7.4 ✓ 完工** | 茶客 propose handoff：`propose_delegate` / `propose_review` / `propose_panel` 三工具落新模块 `handoff_tools.py`（**不带 `task_` 前缀**——handoff 非任务域）；`TASK_PROPOSAL` 加三个 **flat** handoff kind（`handoff_delegate` 等，非嵌套 `kind:"handoff"`）；前端 `proposal_card.js` 加 kind 分支，采纳即拼回既有 `handoff_*` inbound、**server handler 零改动**。**详细设计见 [`P7.4-茶客 propose handoff.md`](P7.4-茶客%20propose%20handoff.md)** | P7.1–7.3 | 最后开；基础动作稳了再放大 |
 | **P7.5（可选）** | delegate 联动 `task.owner`（勾选"同时设为负责人" + scoring owner bonus） | P7.1 + task | 独立小项，与 P7.1 解耦可后补 |
 | **`[panel]` toml** | 不属于任何阶段；用户开始 hit 上限 / 需要预设 summarizer 时再加 | P7.3 | 走 P4 four-touch checklist |
 

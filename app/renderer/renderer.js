@@ -214,9 +214,34 @@ const HELP_TEXT = [
   "- `/task <标题>` —— 新建任务（已有 active 时服务端会拒）",
   "- `/clear` 或 `/new` —— 清空整间房间聊天（重置 transcript / 摘要 / 茶客会话窗口）",
   "- `/clear task` —— 清空当前任务的全部产物（仅删 `artifacts/`，任务本身保留）",
+  "- `/tools <茶客名>` —— 查看某位茶客 agent 注册的工具",
+  "- `/skills <茶客名>` —— 查看某位茶客可用的 skills",
   "",
   "_本帮助是本地提示，不进 transcript；刷新 / 切房后消失。_",
 ].join("\n");
+
+// GUEST_CAPS_INFO envelope → system 气泡文案。view 决定列 tools 还是 skills 段
+// （permission / guest 两段共用）。description 取首行 + 截断，避免长描述刷屏。
+function formatGuestCaps(data, view) {
+  const guest = data.guest || "?";
+  const brief = (s) => (s || "").split("\n")[0].slice(0, 100);
+  if (view === "skills") {
+    const skills = Array.isArray(data.skills) ? data.skills : [];
+    const lines = [`**${guest}** 可用 skills（${skills.length}）`];
+    if (!skills.length) lines.push("_（无）_");
+    for (const s of skills) {
+      lines.push(`- \`${s.name}\`${s.description ? ` —— ${brief(s.description)}` : ""}`);
+    }
+    return lines.join("\n");
+  }
+  const tools = Array.isArray(data.tools) ? data.tools : [];
+  const lines = [`**${guest}** 注册的 tools（${tools.length}，权限模式：${data.permission || "?"}）`];
+  for (const t of tools) {
+    const ro = t.is_read_only ? "read-only" : "write";
+    lines.push(`- \`${t.name}\` (${ro})${t.description ? ` —— ${brief(t.description)}` : ""}`);
+  }
+  return lines.join("\n");
+}
 function updateSendButton() {
   const busy = currentTurnId !== null;
   submitBtn.textContent = busy ? STOP_ICON : SEND_ICON;
@@ -712,6 +737,9 @@ function handleEnvelope(env) {
       if (env.status !== Status.OK || next === "user") {
         currentTurnId = null;
         updateSendButton();
+        // AI 链收尾、无 in-flight turn —— 放开被 gate 的 handoff 采纳按钮（此刻采纳
+        // 不会抢占截断任何 turn）。next==='ai' 时链未结束，不放。
+        proposalCard.onTurnIdle();
       }
       return;
     }
@@ -759,6 +787,13 @@ function handleEnvelope(env) {
     case EventType.HANDOFF_CLEARED:
       handoffState.applyCleared();
       return;
+    case EventType.GUEST_CAPS_INFO: {
+      // view 由请求方经 envelope 回声带回 —— 多条 /tools / /skills 并发时各响应
+      // 自带"查的是哪段"，不靠全局态对号入座。
+      const data = env.data ?? {};
+      appendBubble({ kind: "system", text: formatGuestCaps(data, data.view) });
+      return;
+    }
     case EventType.ROOM_EXPORT: {
       const markdown = env.data?.markdown;
       const filename = env.data?.filename || "chahua-export.md";
@@ -1133,7 +1168,11 @@ const taskPanel = createTaskPanel({
 
 // 茶客 propose 卡片渲染 + 去重 + 采纳/忽略闭环。renderSidebar 进新房时调 reset() 清
 // 跨房间 dedup；采纳按钮按 kind 拼 ADD_DECISION / OPEN_TASK inbound 走既有 server handler。
-const proposalCard = createProposalCard({ messagesEl, sendInbound: send });
+const proposalCard = createProposalCard({
+  messagesEl,
+  sendInbound: send,
+  isTurnActive: () => currentTurnId !== null,
+});
 
 // 调试抽屉。默认隐藏 —— 用户点 task panel header 的 🔬 切到；调试内 ← 切回。
 // 模块级单例：重连时不重建（状态本就只活在本会话，renderSidebar 调 reset 清。）
@@ -1363,6 +1402,33 @@ composer.addEventListener("submit", (ev) => {
     textInput.value = "";
     autoResizeTextarea();
     return;
+  }
+  // /tools <茶客名> / /skills <茶客名> —— 查某位茶客 agent 的 tools / 可用 skills。
+  // 两者走同一只读 inbound list_guest_caps；view 随帧发出、回包原样带回，前端按它
+  // 裁剪显示哪段（不靠全局态，多查询并发不串台）。本地查询，不进 transcript。
+  {
+    const isTools = text === "/tools" || text.startsWith("/tools ");
+    const isSkills = text === "/skills" || text.startsWith("/skills ");
+    if (isTools || isSkills) {
+      const cmd = isTools ? "/tools" : "/skills";
+      const guest = text.slice(cmd.length).trim();
+      if (!guest) {
+        setStatus("error", `${cmd} 后面要跟茶客名`);
+        return;
+      }
+      if (!connected) {
+        setStatus("error", "未连接服务端");
+        return;
+      }
+      send({
+        type: Inbound.LIST_GUEST_CAPS,
+        guest,
+        view: isTools ? "tools" : "skills",
+      });
+      textInput.value = "";
+      autoResizeTextarea();
+      return;
+    }
   }
   // 斜杠命令 —— /task <title> 走 open_task inbound 而非 user_message。已有任务等
   // server 端拒绝（NOTICE error），前端不重复判定，让两条路径决断口径完全同源。

@@ -204,6 +204,15 @@ class Orchestrator:
     def guest_names(self) -> tuple[str, ...]:
         return tuple(self._guests)
 
+    def get_guest(self, name: str) -> Optional[TeaGuest]:
+        """按 name 取茶客实例；不在场返 ``None``。
+
+        ``_guests`` 私有，外部查茶客走这个公开访问器 —— 与 :attr:`guest_names`
+        同源，反映运行时 add/remove guest，不读 ``RoomSession.guests`` boot 快照。
+        """
+        entry = self._guests.get(name)
+        return entry.guest if entry is not None else None
+
     # ── 清空 ──────────────────────────────────────────────────────────
 
     def reset_room(self) -> None:

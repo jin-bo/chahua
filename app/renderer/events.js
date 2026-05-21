@@ -57,6 +57,10 @@ export const EventType = Object.freeze({
   HANDOFF_ENQUEUED: "handoff_enqueued",
   HANDOFF_CONSUMED: "handoff_consumed",
   HANDOFF_CLEARED: "handoff_cleared",
+  // /tools / /skills slash 查询的回包。data 形状 {guest, permission, tools, skills,
+  // view} —— 茶客 agent 注册的 tools + 可用 skills + 权限模式；view 是请求方回声，
+  // 前端按它裁剪显示哪段。一次性查询、不进 transcript。镜像 chahua/events.py。
+  GUEST_CAPS_INFO: "guest_caps_info",
 });
 
 // TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
@@ -64,6 +68,10 @@ export const EventType = Object.freeze({
 export const TaskProposalKind = Object.freeze({
   DECISION: "decision",
   OPEN: "open",
+  // P7.4：handoff propose —— 平铺 kind，字面值与 Inbound.HANDOFF_* 同形。
+  HANDOFF_DELEGATE: "handoff_delegate",
+  HANDOFF_REVIEW: "handoff_review",
+  HANDOFF_PANEL: "handoff_panel",
 });
 
 export const Status = Object.freeze({
@@ -143,6 +151,9 @@ export const Inbound = Object.freeze({
   HANDOFF_REVIEW: "handoff_review",
   HANDOFF_PANEL: "handoff_panel",
   HANDOFF_CLEAR: "handoff_clear",
+  // /tools / /skills slash 查询。payload: {guest, view}。服务端回 GUEST_CAPS_INFO
+  // 并原样带回 view（请求方据此裁剪显示，多查询并发不串台）。
+  LIST_GUEST_CAPS: "list_guest_caps",
 });
 
 // 镜像 chahua/handoff.py::HandoffKind —— handoff 队列项的 ``kind`` wire 值。

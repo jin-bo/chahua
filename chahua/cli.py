@@ -92,6 +92,34 @@ def _print_permission_info(guests: list[TeaGuest]) -> None:
         )
 
 
+def _print_guest_caps(session, name: str, *, view: str) -> None:
+    """打印某位茶客 agent 的 tools 或可用 skills（``/tools`` / ``/skills`` 共用）。
+
+    与 WebSocket 端 ``_inbound_list_guest_caps`` 共调 :meth:`TeaGuest.describe_capabilities`
+    这一个投影 —— CLI 有直接 Python 访问，不走 inbound / envelope 往返。
+    """
+    guest = session.orchestrator.get_guest(name)
+    if guest is None:
+        print(f"[{view}：茶客 {name!r} 不在场]")
+        return
+    caps = guest.describe_capabilities()
+    if view == "skills":
+        skills = caps["skills"]
+        print(f"{name} 可用 skills（{len(skills)}）：")
+        for s in skills:
+            desc = f" —— {s['description']}" if s["description"] else ""
+            print(f"  {s['name']}{desc}")
+        if not skills:
+            print("  （无）")
+        return
+    tools = caps["tools"]
+    print(f"{name} 注册的 tools（{len(tools)}，权限模式：{caps['permission']}）：")
+    for t in tools:
+        ro = "read-only" if t["is_read_only"] else "write"
+        desc = f" —— {t['description'].splitlines()[0]}" if t["description"] else ""
+        print(f"  {t['name']} ({ro}){desc}")
+
+
 # Web 与 CLI 两面 help 各自列本面支持的命令（CLI 端含 ``/info`` / ``/quit`` REPL
 # 专属；Web 端 ``HELP_TEXT`` 含 ``/task``）。加命令时改本面的这份即可。
 _HELP_LINES: tuple[str, ...] = (
@@ -101,6 +129,8 @@ _HELP_LINES: tuple[str, ...] = (
     "  /quit /exit :q      退出 REPL",
     "  /clear 或 /new      清空整间房间聊天（重置 transcript / 摘要 / 茶客会话窗口）",
     "  /clear task         清空当前任务的全部产物（仅删 artifacts/，任务本身保留）",
+    "  /tools <名字>       查看某位茶客 agent 注册的工具",
+    "  /skills <名字>      查看某位茶客可用的 skills",
     "  @<名字>             绕过打分直接点名一位茶客",
 )
 
@@ -250,6 +280,18 @@ async def _repl(args: argparse.Namespace) -> int:
                 print(
                     f"[已清空任务「{task.title}」的产物（{len(deleted)} 个文件）"
                     f" —— 任务本身保留]"
+                )
+                continue
+            if text == "/tools" or text == "/skills" or text.startswith(("/tools ", "/skills ")):
+                # /tools / /skills <名字>：只读查茶客 agent 的 tools / 可用 skills。
+                is_tools = text == "/tools" or text.startswith("/tools ")
+                cmd = "/tools" if is_tools else "/skills"
+                name = text[len(cmd):].strip()
+                if not name:
+                    print(f"[{cmd} 后面要跟茶客名]")
+                    continue
+                _print_guest_caps(
+                    session, name, view="tools" if is_tools else "skills",
                 )
                 continue
 

@@ -40,6 +40,7 @@ from .events import (
 from .mcp_thread import ThreadedMcpClientManager
 from .permissions import apply_permission_mode
 from .persona_assets import PersonaAssets
+from .handoff_tools import register_handoff_tools
 from .room import Message, Room
 from .task_tools import register_task_tools
 from .tasks_store import TasksStore
@@ -162,11 +163,47 @@ class TeaGuest:
         # 工具实例读 transport.current_task_id snapshot —— 与 message_* envelope 同源，
         # 避免老任务的 propose 错挂到新 active（docs §6.3 协议层不可能 race）。
         register_task_tools(self.agent, tasks_store=tasks_store, transport=self._transport)
+        # P7.4：handoff propose 工具（propose_delegate / review / panel）—— 与 task
+        # 工具并列注册。propose_review 要 room 把 reviewee 名解析成 message_id。
+        register_handoff_tools(self.agent, transport=self._transport, room=room)
 
     @property
     def permission(self) -> str:
         """当前权限模式（每次从 agent.permission_engine 拉，避免与运行时切换脱节）。"""
         return self.agent.permission_engine.active_mode.value
+
+    def describe_capabilities(self) -> dict:
+        """只读快照：本茶客 agent 注册的 tools + 可用 skills + 当前权限模式。
+
+        ``/tools`` / ``/skills`` slash 查询用 —— server ``_inbound_list_guest_caps``
+        与 CLI REPL 共调这一个投影。tools / 可用 skills 都是 ``__init__`` 时一次注册 /
+        扫描的**静态**集合，post-init 不变；本方法纯读、不动 agent 状态。
+        """
+        tools = [
+            {
+                "name": t.name,
+                "description": t.description or "",
+                "is_read_only": bool(t.is_read_only),
+            }
+            for t in sorted(self.agent.tools.list_tools(), key=lambda t: t.name)
+        ]
+        skill_mgr = self.agent.skill_manager
+        skills = [
+            {
+                "name": name,
+                "description": skill_mgr.available_skills.get(name, {}).get(
+                    "description", ""
+                )
+                or "",
+            }
+            for name in sorted(skill_mgr.list_available_skills())
+        ]
+        return {
+            "guest": self.name,
+            "permission": self.permission,
+            "tools": tools,
+            "skills": skills,
+        }
 
     # ── 主入口 ────────────────────────────────────────────────────────────
 

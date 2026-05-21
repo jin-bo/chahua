@@ -237,6 +237,18 @@ class Room:
                 return m
         return None
 
+    def latest_message_by_speaker_id(self, speaker_id: str) -> Optional[Message]:
+        """按 ``speaker_id`` 倒序线性查找最近一条发言；未命中返回 ``None``。
+
+        P7.4 ``propose_review`` 用 —— 茶客看不到 message_id，工具用此 helper 把
+        ``reviewee`` 茶客名解析成"其最近一条发言的 message_id"。与 :meth:`message_by_id`
+        同口径（O(n) 线性、不建索引；review 是低频动作，"能 derive 就不缓存"）。
+        """
+        for m in reversed(self._messages):
+            if m.speaker_id == speaker_id:
+                return m
+        return None
+
     @property
     def latest_seq(self) -> int:
         """最后一条消息的 seq；空房间返回 0。"""
