@@ -55,6 +55,7 @@ from chahua.server import (
 
 
 from chahua.server_inbound_admin import AdminHandlers
+from chahua.server_inbound_handoff import HandoffHandlers
 from chahua.server_inbound_io import IOHandlers
 from chahua.server_inbound_settings import SettingsHandlers
 from chahua.server_inbound_task import TaskHandlers
@@ -183,6 +184,9 @@ class _SpyServer(ChahuaServer):
         self.io = _SpyIO(self)
         self.settings = _SpySettings(self)
         self.task = _SpyTask(self)
+        # handoff slot 无 spy 子类 —— test_server_inbound 不测 handoff 路由，装真实
+        # HandoffHandlers 只为让 _bind_inbound_handlers 能解析 handoff.* 路径。
+        self.handoff = HandoffHandlers(self)
         self._inbound_handlers = _bind_inbound_handlers(self)
 
     async def _cancel_and_drain_inflight(self) -> None:  # type: ignore[override]
@@ -190,6 +194,11 @@ class _SpyServer(ChahuaServer):
 
     def _cancel_inflight(self) -> None:  # type: ignore[override]
         self.calls.append(("_cancel_inflight", {}))
+
+    def _maybe_end_managed_session(self, sink, *, reason):  # type: ignore[override]
+        # P8.3：路由 spy 刻意不挂 _session —— cancel 路由测不关心 MTS 收尾，
+        # 覆盖成 no-op（真行为见 test_managed_session.py）。
+        pass
 
     def _emit_room_info(self, sink) -> None:  # type: ignore[override]
         self.emit_room_info_count += 1

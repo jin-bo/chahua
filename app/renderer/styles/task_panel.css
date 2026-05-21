@@ -190,6 +190,41 @@
 }
 .task-card-close-abandoned:hover { background: #f5e3e3; }
 
+/* P8.3 「托管」按钮 —— active 任务卡里、close actions 之下。入口 + 状态 + 停止
+   三合一：空闲蓝灰调（区别于完成/放弃的绿/红），跑动时切到 .is-running 红调。 */
+.task-card-manage { margin-bottom: 8px; }
+.task-card-manage-btn {
+  width: 100%;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid #c5d3df;
+  border-radius: 4px;
+  background: #e8eef3;
+  color: #3a5266;
+  cursor: pointer;
+}
+.task-card-manage-btn:hover:not(:disabled) {
+  background: #d8e3ec;
+  border-color: #a9bccb;
+}
+.task-card-manage-btn:disabled {
+  background: #f3f1ea;
+  border-color: #e0dac8;
+  color: #b8b09a;
+  cursor: not-allowed;
+}
+/* MTS 跑动时：同一按钮变成「托管中 · 点击停止」—— 红调标出可停止的破坏性动作，
+   与完成/放弃里的 abandoned 同色系。 */
+.task-card-manage-btn.is-running {
+  background: #f7e9e7;
+  border-color: #e3b5b0;
+  color: #b1493f;
+}
+.task-card-manage-btn.is-running:hover:not(:disabled) {
+  background: #f3ddda;
+  border-color: #d99089;
+}
+
 /* 产物 / 决策两块：head + ul，空状态用淡色 hint */
 .task-section { margin-bottom: 12px; }
 .task-section-head {

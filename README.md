@@ -54,6 +54,7 @@ transcript / cursor / summary 持久化保留。
 - 多行输入：Enter 发送、Shift+Enter 换行；textarea 自动撑高到 200px 切滚动。
 - 附件上传：composer 左侧 `+`，文件落房间共享目录，随下一条消息一起进上下文。
 - 任务房间：右上角面板「+ 新任务」开任务 → composer 顶部 chip 显示当前 active 任务；茶客感知 active 任务（onboarding/incremental prompt 都注入 task 块），可写 `./task/<name>` 自动归集为 artifact、可 propose 决策 / 新任务 / 改任务状态（如达成时提议标记完成）待你「采纳」。产物列表点击即下载（带白名单 + symlink 防逃逸）。多任务共存，单时刻最多 1 个 active。
+- 任务管理与托管运行：带 `task-management` skill 的茶客能承担协调职责——拆解任务 Goal、按房间茶客情况分工、检查 Goal 是否达成（示范管理者角色 Maya 见 `examples/personas/Maya/`，其 `skills/task-management/SKILL.md` 是茶客侧任务管理工作手册）。任务面板「托管运行」可开启一段**托管任务会话**（MTS）：选一位管理者茶客 + 设预算上限，授权它在预算内自动「指派 → 执行 → 复查 → 再指派」推进任务，期间无需逐步采纳；composer 上方状态条显示剩余预算，「停止托管」随时收场。
 - 调试抽屉：与任务面板互斥占右侧槽位，看每一轮谁被候选 / 分数 / 选谁 / prompt / 用了哪些工具 / 产物路径；切房 / 重启后仍能翻"开窗前"的历史 turn（点击索引行即拉详情）。默认开，盘上落到 `rooms/<id>/debug/`；`max_turns = 500` 按 turn 自动 rotation；`room.toml [debug] enabled = false` 可关。
 - 茶客能力查询：composer 里输 `/tools <茶客名>` / `/skills <茶客名>` 查某位茶客 agent 注册的工具 / 可用 skills（只读，结果显示为系统气泡，不进记录）；`/help` 看全部斜杠命令。
 - sidebar：切换房间 / 加茶客 / 导入 persona（本地目录或 GitHub）；点茶客头像设权限、勾选信任其 MCP。
