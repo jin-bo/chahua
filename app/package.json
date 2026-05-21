@@ -61,7 +61,7 @@
           "arch": ["arm64"]
         }
       ],
-      "artifactName": "茶话室-${version}-mac-${arch}.${ext}",
+      "artifactName": "chahua-${version}-mac-${arch}.${ext}",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "identity": null
@@ -77,7 +77,7 @@
           "arch": ["x64"]
         }
       ],
-      "artifactName": "茶话室-${version}-win-${arch}.${ext}"
+      "artifactName": "chahua-${version}-win-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
