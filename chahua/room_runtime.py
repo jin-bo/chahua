@@ -21,7 +21,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from .events import ChahuaEnvelope, EnvelopeSink
+from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink
 from .session import RoomSession
 
 # in-flight turn 的类型标签。与 :data:`chahua.server.INFLIGHT_KIND_*` 同值域 ——
@@ -33,6 +33,23 @@ ROUTER_MODE_FOREGROUND = "foreground"
 ROUTER_MODE_BACKGROUND = "background"
 RouterMode = Literal["foreground", "background"]
 
+# 后台房间事件白名单（设计文档 §4 / 阶段 9.3.1）。后台 router 只放行**里程碑**事件
+# —— 房间列表「进行中」徽标 / 任务产物变化 / MTS 推进 / runtime 自毁通知；高频流式
+# （``message_start`` / ``message_delta`` / ``guest_thinking`` / ``tool_*``）一律丢
+# 弃。后台发言的**内容**不靠这些事件，靠切回时的 ``room_history`` 快照（从盘重建、
+# 完整无损）。改这个集合即改后台房间「能感知到什么」，与设计文档 §4 的表格同步。
+_BACKGROUND_WHITELIST: frozenset[ChahuaEventType] = frozenset({
+    ChahuaEventType.TURN_START,
+    ChahuaEventType.TURN_END,
+    ChahuaEventType.MESSAGE_END,
+    ChahuaEventType.TASK_INFO,
+    ChahuaEventType.TASK_ARTIFACT_ADDED,
+    ChahuaEventType.MANAGED_SESSION_STARTED,
+    ChahuaEventType.MANAGED_SESSION_ADVANCED,
+    ChahuaEventType.MANAGED_SESSION_ENDED,
+    ChahuaEventType.ROOM_BACKGROUND_FINISHED,
+})
+
 
 class RoomEventRouter:
     """per-room 可变路由 sink —— 本身就是一个 :data:`~chahua.events.EnvelopeSink`。
@@ -41,8 +58,9 @@ class RoomEventRouter:
     象），不是裸 ws sink。切房 = 翻 router 的 ``mode``：
 
     - ``foreground``：全量透传到 ``ws_sink`` —— 与 P9 之前的行为完全一致。
-    - ``background``：阶段 9.1.1 先做 **NOOP 占位**（丢弃全部事件），靠切回时的
-      ``room_history`` 快照补全；精确里程碑白名单留到阶段 9.3.1 再接。
+    - ``background``：只放行 :data:`_BACKGROUND_WHITELIST` 里的里程碑事件（阶段
+      9.3.1），高频流式事件丢弃；后台发言**内容**靠切回时的 ``room_history`` 快照
+      补全。
 
     单房间场景下 router 永远 ``foreground``，所以 9.1 全程行为不变。
 
@@ -59,10 +77,12 @@ class RoomEventRouter:
         self.ws_sink: EnvelopeSink = ws_sink
 
     def __call__(self, env: ChahuaEnvelope) -> None:
-        """投递一条 envelope —— ``foreground`` 全量透传，``background`` 当前丢弃。"""
+        """投递一条 envelope —— ``foreground`` 全量透传，``background`` 只放行里程碑。"""
         if self.mode == ROUTER_MODE_FOREGROUND:
             self.ws_sink(env)
-        # background：阶段 9.1.1 NOOP（丢弃）。精确白名单见阶段 9.3.1。
+        elif env.type in _BACKGROUND_WHITELIST:
+            # background：只放行里程碑事件，高频流式一律丢弃（设计文档 §4）。
+            self.ws_sink(env)
 
 
 @dataclass

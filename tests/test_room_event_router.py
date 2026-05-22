@@ -1,17 +1,21 @@
-"""P9 阶段 9.1.1：:class:`RoomEventRouter` 单测。
+"""P9 阶段 9.1.1 / 9.3.1：:class:`RoomEventRouter` 单测。
 
 覆盖路由模式两态：
 
 - ``foreground``：全量透传到 ``ws_sink``。
-- ``background``：阶段 9.1.1 NOOP 占位 —— 丢弃全部事件（精确白名单留到 9.3.1）。
+- ``background``：精确里程碑白名单 —— 放行 :data:`_BACKGROUND_WHITELIST`、丢弃其余
+  （阶段 9.3.1，替换 9.1.1 的 NOOP 占位）。
 - ``mode`` 翻转后路由立即跟着变（切房支点：in-flight turn 持同一 router 对象）。
 - ``ws_sink`` 可换新（连接级 sink，ws 重连场景）。
 """
 
 from __future__ import annotations
 
+import pytest
+
 from chahua.events import ChahuaEnvelope, ChahuaEventType
 from chahua.room_runtime import (
+    _BACKGROUND_WHITELIST,
     ROUTER_MODE_BACKGROUND,
     ROUTER_MODE_FOREGROUND,
     RoomEventRouter,
@@ -41,15 +45,57 @@ def test_foreground_passes_through() -> None:
     assert seen == [e1, e2]
 
 
-def test_background_drops_everything() -> None:
+# 后台白名单放行的里程碑事件 —— 与设计文档 §4 表格 / ``_BACKGROUND_WHITELIST`` 同步。
+_BACKGROUND_PASS = [
+    ChahuaEventType.TURN_START,
+    ChahuaEventType.TURN_END,
+    ChahuaEventType.MESSAGE_END,
+    ChahuaEventType.TASK_INFO,
+    ChahuaEventType.TASK_ARTIFACT_ADDED,
+    ChahuaEventType.MANAGED_SESSION_STARTED,
+    ChahuaEventType.MANAGED_SESSION_ADVANCED,
+    ChahuaEventType.MANAGED_SESSION_ENDED,
+    ChahuaEventType.ROOM_BACKGROUND_FINISHED,
+]
+
+# 后台丢弃的高频流式 / 非里程碑事件。
+_BACKGROUND_DROP = [
+    ChahuaEventType.MESSAGE_START,
+    ChahuaEventType.MESSAGE_DELTA,
+    ChahuaEventType.GUEST_THINKING,
+    ChahuaEventType.TOOL_START,
+    ChahuaEventType.TOOL_COMPLETE,
+    ChahuaEventType.TASK_PROPOSAL,
+    ChahuaEventType.HANDOFF_CONSUMED,
+]
+
+
+@pytest.mark.parametrize("kind", _BACKGROUND_PASS)
+def test_background_passes_milestones(kind: ChahuaEventType) -> None:
     seen: list[ChahuaEnvelope] = []
     router = RoomEventRouter(seen.append, mode=ROUTER_MODE_BACKGROUND)
 
-    router(_env())
-    router(_env(ChahuaEventType.TURN_END))
+    e = _env(kind)
+    router(e)
 
-    # 阶段 9.1.1 background = NOOP，连里程碑都丢（白名单留到 9.3.1）。
+    assert seen == [e]
+
+
+@pytest.mark.parametrize("kind", _BACKGROUND_DROP)
+def test_background_drops_streaming(kind: ChahuaEventType) -> None:
+    seen: list[ChahuaEnvelope] = []
+    router = RoomEventRouter(seen.append, mode=ROUTER_MODE_BACKGROUND)
+
+    router(_env(kind))
+
     assert seen == []
+
+
+def test_background_whitelist_matches_doc() -> None:
+    """``_BACKGROUND_WHITELIST`` 与本测试枚举的放行集合必须一致 —— 改一处炸另一处。"""
+    assert _BACKGROUND_WHITELIST == frozenset(_BACKGROUND_PASS)
+    # 放行与丢弃两集合不相交。
+    assert _BACKGROUND_WHITELIST.isdisjoint(frozenset(_BACKGROUND_DROP))
 
 
 def test_mode_flip_changes_routing_live() -> None:
