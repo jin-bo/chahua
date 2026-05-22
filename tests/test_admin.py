@@ -117,9 +117,54 @@ def test_create_room_rejects_existing(paths):
     )
     with pytest.raises(FileExistsError):
         admin.create_room(
-            paths=paths, room_id="dup", name="dup",
+            paths=paths, room_id="dup", name="dup-另名",
             guests=[{"persona": "chahua/personas/汪小姐.md"}],
         )
+
+
+def test_create_room_rejects_duplicate_room_name(paths):
+    """P9：[room].name 跨房唯一 —— 同名会让后台房间里程碑分流误判。"""
+    admin.create_room(
+        paths=paths, room_id="room-a", name="项目组",
+        guests=[{"persona": "chahua/personas/宝总.md"}],
+    )
+    with pytest.raises(ValueError, match="已被占用"):
+        admin.create_room(
+            paths=paths, room_id="room-b", name="项目组",
+            guests=[{"persona": "chahua/personas/汪小姐.md"}],
+        )
+    # 拒绝后不留半成品目录。
+    assert not (paths.user_data_root / "rooms" / "room-b").exists()
+
+
+def test_update_room_toml_rejects_rename_to_existing_name(paths):
+    """raw 编辑器把房间改名成另一个房已用的名字 → RoomConfigError，磁盘回滚。"""
+    admin.create_room(
+        paths=paths, room_id="room-a", name="甲房",
+        guests=[{"persona": "chahua/personas/宝总.md"}],
+    )
+    rc_b = admin.create_room(
+        paths=paths, room_id="room-b", name="乙房",
+        guests=[{"persona": "chahua/personas/汪小姐.md"}],
+    )
+    raw = (rc_b.room_dir / "room.toml").read_text(encoding="utf-8")
+    collided = raw.replace('"乙房"', '"甲房"')
+    with pytest.raises(RoomConfigError, match="已被占用"):
+        admin.update_room_toml(rc_b.room_dir, collided, paths=paths)
+    # 磁盘内容未被改坏 —— 仍是「乙房」。
+    assert load_room_config(rc_b.room_dir, paths=paths).name == "乙房"
+
+
+def test_update_room_toml_allows_keeping_own_name(paths):
+    """raw 编辑保持自己原名（不算与自己冲突）—— 改 topic 等其它字段应成功。"""
+    rc = admin.create_room(
+        paths=paths, room_id="room-a", name="甲房", topic="旧话题",
+        guests=[{"persona": "chahua/personas/宝总.md"}],
+    )
+    raw = (rc.room_dir / "room.toml").read_text(encoding="utf-8")
+    edited = raw.replace("旧话题", "新话题")
+    rc2 = admin.update_room_toml(rc.room_dir, edited, paths=paths)
+    assert rc2.name == "甲房" and rc2.topic == "新话题"
 
 
 def test_create_room_rolls_back_on_invalid_persona(paths):

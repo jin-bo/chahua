@@ -403,8 +403,24 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
     const callId = data.call_id;
     // call_id 缺时无法合并 —— 跳过（不引入"按 tool 名匹配最近一条 started"的脆弱启发式）。
     if (!callId) return;
-    const entry = msg.tool_calls.get(callId);
-    if (!entry) return;
+    let entry = msg.tool_calls.get(callId);
+    if (!entry) {
+      // P9：tool_start 在后台路由被白名单滤掉（切回房间前那位茶客正调工具）——
+      // 用 tool_complete 自带字段补一个 stub 条目，避免整条工具调用从调试面板蒸发。
+      // args 在 tool_complete envelope 里没有 —— stub 不显示参数，可接受。
+      const tool = data.tool || "";
+      const { source, mcp_server } = classifyToolSource(tool);
+      entry = {
+        tool,
+        args: undefined,
+        source,
+        mcp_server,
+        status: "started",
+        duration_ms: null,
+        error: null,
+      };
+      msg.tool_calls.set(callId, entry);
+    }
     entry.status = data.status || "ok";
     entry.duration_ms = typeof data.duration_ms === "number" ? data.duration_ms : null;
     entry.error = data.error || null;

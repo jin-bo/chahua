@@ -105,6 +105,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 ### 配置与 LLM 装配
 
 - **`room.toml` 未知字段必报错**。配错宁可炸，否则 typo 静默吞掉查不到。
+- **`[room].name` 跨房唯一**。envelope 顶层 `room_id` 用 `room.name` 占位，P9 前端据它分流前台/后台房间里程碑——同名会让后台房的 `message_end`/`task_info` 污染当前前台房。`admin.create_room` 与 `admin.update_room_toml`（raw 编辑）两入口都拒重名（`_other_room_names` 扫 `rooms/*/room.toml`）。手改 toml 绕过校验属「配错」。
 - **toml `model` 值形如 `<provider>/<model>`**。首个 `/` 拆 provider，二级路径（`openrouter/qwen/qwen3-coder`）保留进 model；无 `/` → `RoomConfigError`。CLI / dotenv 例外允许裸 model。
 - **LLM section 整段写或整段不写**。`[room.llm]` / `[scoring]` / `[summary]` / `[[guest]]` 四件套 all-or-nothing：`base_url` / `api_key_env` / `temperature` 不能脱离 `model` 单独出现。fallback 走 section 级（缺整段回上一档），不做字段级 overlay。
 - **房间默认 LLM 两层 fallback**。`[room.llm]` toml 段 → `LLMSpec.try_from_env()`，都缺 → `RoomConfigError`。toml 显式配置时 env 完全忽略（防 shell 变量偷胜）；单点走 `session._resolve_room_default_spec`。

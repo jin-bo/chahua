@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import tomllib
 from pathlib import Path
 from typing import Any, Literal, Optional, Sequence
 
@@ -48,6 +49,43 @@ from .permissions import DEFAULT_MODE
 from .persona_assets import persona_relative
 
 _log = logging.getLogger(__name__)
+
+
+# ── 房间名唯一性 ────────────────────────────────────────────────────────────
+
+
+def _other_room_names(
+    paths: Paths, *, exclude_room_id: Optional[str] = None
+) -> set[str]:
+    """扫 ``rooms/*/room.toml`` 收集已被占用的 ``[room].name``（建房 / raw 编辑校验用）。
+
+    P9：envelope 顶层 ``room_id`` 用 ``[room].name`` 占位，后台房间里程碑分流
+    （``renderer.js``）据它判前台 / 后台。两个房间同名 → 后台房的 ``message_end`` /
+    ``task_info`` 等里程碑因 ``room_id`` 撞上当前前台 id 而被误当前台事件，污染当前房
+    的聊天 / 任务面板。故建房与 raw 编辑 ``room.toml`` 时强制 ``[room].name`` 跨房唯一。
+
+    解析失败的房间跳过（坏 toml 各自在 ``load_room_config`` 时炸，不在这里兜）。
+    ``exclude_room_id`` = 正被编辑的房间目录名，自己不算与自己冲突。
+    """
+    names: set[str] = set()
+    rooms_dir = paths.user_data_root / "rooms"
+    if not rooms_dir.is_dir():
+        return names
+    for entry in sorted(rooms_dir.iterdir()):
+        if not entry.is_dir() or entry.name == exclude_room_id:
+            continue
+        toml_path = entry / "room.toml"
+        if not toml_path.is_file():
+            continue
+        try:
+            with toml_path.open("rb") as fh:
+                parsed = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        name = parsed.get("room", {}).get("name")
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip())
+    return names
 
 
 # ── room.toml 读现状（mutator 用，区别于 config.load_room_config 的严格校验路径）─
@@ -162,6 +200,8 @@ def create_room(
     room_id = normalize_room_id(room_id)
     if not name.strip():
         raise ValueError("房间名不能为空")
+    if name.strip() in _other_room_names(paths):
+        raise ValueError(f"房间名「{name.strip()}」已被占用 —— 房间名须跨房唯一")
     if not guests:
         raise ValueError("至少要有一位茶客")
 
