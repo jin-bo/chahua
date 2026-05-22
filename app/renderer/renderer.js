@@ -60,6 +60,7 @@ import { createChatStream } from "./chat_stream.js";
 import { createMessageFilter } from "./message_filter.js";
 import { createCommands } from "./commands.js";
 import { createConnection } from "./connection.js";
+import { createRoomList } from "./room_list.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -145,6 +146,15 @@ const connection = createConnection({
 });
 const send = connection.send;
 
+// 侧栏房间列表 + P9「进行中」后台房徽标 —— 见 ./room_list.js。后台房集合封在模块内，
+// renderer 经 render（room_info 重建）/ onBackgroundMilestone（后台里程碑）两出口交互。
+const roomList = createRoomList({
+  roomsEl,
+  isConnected: connection.isConnected,
+  send,
+  setStatus,
+});
+
 // chat-stream（气泡 / 流式 / 历史回放）见 ./chat_stream.js；在途消息 Map 封装在
 // 该模块内，外部只通过 ``closeInFlightOnDisconnect`` 一键清。
 // 当前 turn 的 id —— P3.3 cancel 状态机：turn_start 时设、turn_end(next=user) 或
@@ -163,11 +173,8 @@ let scoresByName = new Map();
 let handoffRoomId = null;
 // P9：当前前台房间在 envelope 里的 room_id（= room.name，见 chahua/events.py）。
 // 从 room_info envelope 顶层 room_id 捕获。后台房间的里程碑事件 room_id 与此不同 ——
-// 据此把它们分流给 handleBackgroundMilestone，不让它们污染前台聊天 / 任务面板。
+// 据此把它们分流给 roomList.onBackgroundMilestone，不让它们污染前台聊天 / 任务面板。
 let foregroundRoomId = null;
-// P9：当前判定「进行中」的后台房间 envelope room_id 集合。后台里程碑事件 add、
-// room_background_finished remove；renderRoomsList 据此渲染房间列表「进行中」徽标。
-const backgroundActiveRooms = new Set();
 // 茶客行 → 打分 span 的引用。sidebar 装好后填，turn_start/turn_end 直接改文字，
 // 不重建 DOM（避免头像 / 徽章闪烁）。
 const scoreSpansByName = new Map();
@@ -497,96 +504,13 @@ function renderSidebar(roomInfo) {
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
   maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 20;
   renderGuests();
-  // P9：从权威快照 rooms_available[].busy 重建「进行中」后台房集合 —— 切房 / 重连后
-  // 这帧是真理源（剔除已结束的、补上切走后转后台的）。后台房集合按 envelope room_id
-  // （= room.name）键，与 discover_rooms 的 r.name 同口径；当前房不计（自身活动由
-  // 聊天区体现，不需徽标）。随后到的后台里程碑事件再增量维护这个集合。
-  backgroundActiveRooms.clear();
-  for (const r of roomInfo.rooms_available ?? []) {
-    if (r.busy && r.room_id !== roomInfo.current_room_id) {
-      backgroundActiveRooms.add(r.name);
-    }
-  }
-  renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
+  // 房间列表 + P9「进行中」后台房徽标（见 ./room_list.js）—— render 内部从权威快照
+  // rooms_available[].busy 重建后台房集合再渲染。
+  roomList.render(roomInfo.rooms_available, roomInfo.current_room_id);
   // room_info 到达 → composer 解锁；之前 onopen 不再 enable，避免 userDisplayName
   // 跳变窗口（用户在 "我" 状态发了一条，第二条又变成实际显示名）。
   setInputEnabled(true);
   textInput.focus();
-}
-
-// 切换房间列表 —— 列其它房间（含当前），click 非 current 项发 switch_room frame。
-// 当前房间高亮、不可点；其它房间显示 name + topic 一句话预览，hover 出现"删除"按钮。
-function renderRoomsList(roomsAvailable, currentRoomId) {
-  roomsEl.replaceChildren();
-  const rooms = Array.isArray(roomsAvailable) ? roomsAvailable : [];
-  for (const r of rooms) {
-    const li = document.createElement("li");
-    li.dataset.roomId = r.room_id;
-    // P9：后台房徽标按 envelope room_id（= room.name）匹配 —— 存 r.name 供
-    // refreshRoomBadges 查（envelope 顶层 room_id 用 room.name，不是目录名）。
-    li.dataset.roomName = r.name || r.room_id;
-    if (r.room_id === currentRoomId) li.classList.add("current");
-    // text 块外裹 .room-meta，方便 row-remove 用 margin-left:auto 推到右侧。
-    const meta = document.createElement("div");
-    meta.className = "room-meta";
-    const name = document.createElement("div");
-    name.className = "room-name";
-    name.textContent = r.name || r.room_id;
-    meta.appendChild(name);
-    if (r.topic) {
-      const topic = document.createElement("div");
-      topic.className = "room-topic";
-      topic.textContent = r.topic;
-      meta.appendChild(topic);
-    }
-    li.appendChild(meta);
-    if (r.room_id !== currentRoomId) {
-      li.addEventListener("click", () => {
-        if (!connection.isConnected()) return;
-        send({ type: Inbound.SWITCH_ROOM, room_id: r.room_id });
-        setStatus("", `切换到 ${r.name || r.room_id}…`);
-      });
-      // 删除房间按钮 —— 只对非当前房显示。当前房不能删（先切走再删，与 server 端约束一致）。
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "row-icon-btn row-remove";
-      remove.textContent = "×";
-      remove.title = `删除房间 ${r.name || r.room_id}`;
-      remove.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        if (!connection.isConnected()) return;
-        if (!window.confirm(`删除房间「${r.name || r.room_id}」？\n房间目录及其全部历史 / 摘要 / 茶客工作区会被永久删除，无法撤销。`)) return;
-        send({ type: Inbound.DELETE_ROOM, room_id: r.room_id });
-        setStatus("", `删除 ${r.name || r.room_id}…`);
-      });
-      li.appendChild(remove);
-    }
-    roomsEl.appendChild(li);
-  }
-  refreshRoomBadges();
-}
-
-// P9：按 backgroundActiveRooms 集合刷新房间列表「进行中」徽标 —— 不重建整个列表
-// （避免后台事件高频到达时房间列表闪烁）。徽标只挂非当前房；当前房自身活动由聊天区
-// 体现。徽标元素增量挂 / 摘，不动其余 DOM。
-function refreshRoomBadges() {
-  // [...children] 快照 —— 当前循环只改 li 内的徽标 span、不增删 li，但 children 是
-  // live HTMLCollection，快照后即便将来改成增删 li 也不会漏元素。
-  for (const li of [...roomsEl.children]) {
-    const active =
-      !li.classList.contains("current") &&
-      backgroundActiveRooms.has(li.dataset.roomName);
-    let badge = li.querySelector(".room-busy-badge");
-    if (active && !badge) {
-      badge = document.createElement("span");
-      badge.className = "room-busy-badge";
-      badge.textContent = "进行中";
-      badge.title = "该房间正在后台续跑";
-      li.querySelector(".room-name")?.appendChild(badge);
-    } else if (!active && badge) {
-      badge.remove();
-    }
-  }
 }
 
 // ── @ 补全 + composer 键盘 ────────────────────────────────────────────
@@ -643,21 +567,6 @@ textInput.addEventListener("blur", () => {
 
 // ── envelope 分派 ────────────────────────────────────────────────
 
-// P9：后台房间里程碑事件 —— 只维护「进行中」房间集合 + 刷新房间列表徽标。
-// room_background_finished = 后台 runtime 跑完自毁 → 该房不再「进行中」；其余里程碑
-// （turn_* / message_end / task_* / managed_session_*）→ 标记该房后台仍在跑。
-function handleBackgroundMilestone(env) {
-  const roomId = env.room_id;
-  if (!roomId) return;
-  if (env.type === EventType.ROOM_BACKGROUND_FINISHED) {
-    backgroundActiveRooms.delete(roomId);
-    console.debug("[room_background_finished]", roomId);
-  } else {
-    backgroundActiveRooms.add(roomId);
-  }
-  refreshRoomBadges();
-}
-
 function handleEnvelope(env) {
   // P9：后台房间里程碑分流 —— envelope.room_id 与前台不同、且属后台白名单类型
   // （turn_* / message_end / task_info / task_artifact_added / managed_session_* /
@@ -671,7 +580,7 @@ function handleEnvelope(env) {
     env.room_id !== foregroundRoomId &&
     BACKGROUND_MILESTONE_TYPES.has(env.type)
   ) {
-    handleBackgroundMilestone(env);
+    roomList.onBackgroundMilestone(env);
     return;
   }
   // 调试抽屉旁路消费 —— 模块内部按 env.type dispatch；ROOM_INFO 的 reset 在
