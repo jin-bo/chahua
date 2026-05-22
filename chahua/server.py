@@ -299,14 +299,45 @@ class ChahuaServer:
     def _inflight_kind(self, value: Optional[Literal["user", "handoff"]]) -> None:
         self._foreground_runtime.inflight_kind = value
 
-    def close(self) -> None:
-        """关停**当前**活动 session。
+    async def aclose(self) -> None:
+        """进程退出 / ws 断开正常路径：遍历**所有** RoomRuntime 做 async
+        cancel+drain+close（P9 §5.1）。
 
-        换房会替换 ``self._session`` 引用（旧 session 在 ``_switch_room`` 里已 close），
-        所以进程退出时该关的是 server 持有的当前 session，不是 ``_serve`` 局部变量里
-        最初装配的那个（那个换房后变 stale）。
+        今天的同步 :meth:`close` 只关 ``self._session`` 一个 —— 多 runtime 后必须遍历
+        整个注册表，否则后台房间泄漏。带 MTS 的 runtime **先 ``end_managed_session``
+        再 cancel drain**（§8 拆除顺序：绝不留「``_managed_session`` 还在、drain 已
+        cancel」的死调度；``end_managed_session`` 同时清 ``_handoff_queue``）。
+
+        幂等：每个 runtime 清完即移出 ``_runtimes``，重复调用 → 空注册表 → noop。
+        ``_serve_one`` finally 与 ``server_entry`` 进程退出可能各清一次（§5.1）——
+        清理走 ``NOOP_SINK``（退出途中 ws sink 可能已不可写），MTS 收尾事件丢弃。
         """
-        self._session.close()
+        for runtime in list(self._runtimes.values()):
+            try:
+                orch = runtime.session.orchestrator
+                if orch.managed_session is not None:
+                    orch.end_managed_session(
+                        NOOP_SINK, reason=MANAGED_SESSION_REASON_USER_CANCEL,
+                    )
+                await runtime.cancel_and_drain_inflight()
+                runtime.close()
+            except Exception:
+                _log.exception("aclose: runtime %r 清理出错", runtime.room_id)
+            finally:
+                self._runtimes.pop(runtime.room_id, None)
+
+    def close(self) -> None:
+        """同步兜底关停 —— 仅 close 所有 runtime 的 session，不 cancel/drain in-flight。
+
+        P9 §5.1：正常退出走 async :meth:`aclose`（cancel+drain+close + MTS 收尾）。
+        本方法退化为兜底，给「拿不到 event loop / 无法 await」的同步退出路径用 ——
+        in-flight turn 不被 drain（进程即将退出，残留 task 随进程消亡）。
+        """
+        for runtime in list(self._runtimes.values()):
+            try:
+                runtime.close()
+            except Exception:
+                _log.exception("close: runtime %r close 出错", runtime.room_id)
 
     async def serve_forever(self, stop: asyncio.Event) -> None:
         """起 ws server，跑到 ``stop`` 被 set。关闭由 :func:`serve` 的 ``__aexit__``
