@@ -43,9 +43,11 @@ from .events import (
     ChahuaEnvelope,
     ChahuaEventType,
     EnvelopeSink,
+    NOOP_SINK,
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
+from .room_runtime import RoomEventRouter, RoomRuntime
 from .handoff import MANAGED_SESSION_REASON_USER_CANCEL
 from .orchestrator import OrchestratorConfig
 # Re-export 给测试 / 外部调用方（``from chahua.server import _llm_summary`` 路径不变）。
@@ -219,6 +221,10 @@ class ChahuaServer:
         port: int,
         paths: Paths,
     ) -> None:
+        # P9 阶段 9.1.2：server 从「持 1 个 session」升级为「持 RoomRuntime 注册表
+        # + 前台指针」。本阶段注册表恒单元素、router 恒 foreground —— 行为零变化。
+        # ``self._session`` 退化为读写前台 runtime.session 的兼容 property（见下），
+        # 这行赋值即走它的 setter 装好 ``_runtimes`` / ``_foreground_id``。
         self._session = session
         self._host = host
         self._port = port
@@ -238,6 +244,45 @@ class ChahuaServer:
         # P5.2 inbound handler 五个 slot + 一次性把 wire 路由解析成 bound-method 字典。
         _install_handler_slots(self)
         self._inbound_handlers = _bind_inbound_handlers(self)
+
+    # ── P9：RoomRuntime 注册表 + 前台指针 ───────────────────────────────
+    #
+    # 阶段 9.1.2 过渡设计：注册表恒单元素，``_session`` 是读写前台 runtime.session
+    # 的兼容 property —— 让 ``server.py`` / ``server_inbound_*.py`` 60+ 个旧读点
+    # （``self._session`` / ``self.server._session``）零改动继续走，行为完全不变。
+    # 多元素注册表 + ``_switch_room`` 不 cancel 留到阶段 9.2。
+
+    @property
+    def _foreground_runtime(self) -> RoomRuntime:
+        """ws 当前正在看的房间的 :class:`RoomRuntime`。"""
+        return self._runtimes[self._foreground_id]
+
+    @property
+    def _session(self) -> RoomSession:
+        """前台 runtime 的 :class:`RoomSession` —— 兼容 P9 之前的 ``self._session``。"""
+        return self._foreground_runtime.session
+
+    @_session.setter
+    def _session(self, value: RoomSession) -> None:
+        """装/换前台 session。
+
+        阶段 9.1.2 单元素注册表过渡期：直接用 ``value`` 重建注册表（单元素）+
+        前台指针。room_id 取 ``room_dir.name``（与 :meth:`_switch_room` 同口径），
+        换房 / create_room 后 room_id 变也能正确 rekey。
+
+        旧 session 的 close 由调用方（:meth:`_replace_session`）负责 —— 这里只换
+        引用、不 close，避免双 close。router 此阶段是 NOOP_SINK 占位（turn 仍走
+        ``_serve_one`` 的 ws sink，9.1.3 才把 turn 接到 ``runtime.router``）。
+        """
+        room_id = value.room_config.room_dir.name
+        self._runtimes = {
+            room_id: RoomRuntime(
+                room_id=room_id,
+                session=value,
+                router=RoomEventRouter(NOOP_SINK),
+            )
+        }
+        self._foreground_id = room_id
 
     def close(self) -> None:
         """关停**当前**活动 session。
