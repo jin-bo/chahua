@@ -24,7 +24,7 @@ from chahua.room_runtime import (
     RoomRuntime,
 )
 from chahua.server import ChahuaServer
-from chahua.server_room_snapshot import _rooms_available_with_busy
+from chahua.server_room_snapshot import _emit_inflight_message, _rooms_available_with_busy
 from chahua.session import build_room_session
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -160,3 +160,75 @@ def test_rooms_available_busy_flag_empty_registry(env_paths):
     srv = _server_with_runtimes(env_paths)
     rooms = _rooms_available_with_busy(srv)
     assert rooms and all(r["busy"] is False for r in rooms)
+
+
+# ── _emit_inflight_message ─────────────────────────────────────────────────
+
+
+class _FakeOrch:
+    def __init__(self, snap):
+        self._snap = snap
+
+    def snapshot_inflight_message(self):
+        return self._snap
+
+
+class _FakeSnapSession:
+    def __init__(self, snap):
+        self.orchestrator = _FakeOrch(snap)
+        self.room = type("_Room", (), {"name": "黄河路"})()
+
+
+def _srv_with_inflight(snap):
+    # 直接装注册表 —— 绕开 _session setter（它要 room_config.room_dir.name）。
+    srv = object.__new__(ChahuaServer)
+    rt = RoomRuntime(
+        room_id="x",
+        session=_FakeSnapSession(snap),  # type: ignore[arg-type]
+        router=RoomEventRouter(NOOP_SINK),
+    )
+    srv._runtimes = {"x": rt}  # type: ignore[attr-defined]
+    srv._foreground_id = "x"  # type: ignore[attr-defined]
+    return srv
+
+
+def test_emit_inflight_message_replays_start_and_delta():
+    """有 in-flight 消息 → 补发 message_start + message_delta(partial_text)。"""
+    captured = []
+    snap = {
+        "turn_id": "turn_x", "message_id": "msg_x", "guest_name": "宝总",
+        "task_id": "task_x", "partial_text": "你好，世",
+    }
+    _emit_inflight_message(_srv_with_inflight(snap), captured.append)
+
+    assert [e.type for e in captured] == [
+        ChahuaEventType.MESSAGE_START, ChahuaEventType.MESSAGE_DELTA,
+    ]
+    start, delta = captured
+    assert start.room_id == "黄河路"
+    assert start.message_id == "msg_x"
+    assert start.turn_id == "turn_x"
+    assert start.guest_name == "宝总"
+    assert start.data == {"task_id": "task_x"}
+    assert delta.message_id == "msg_x"
+    assert delta.data == {"chunk": "你好，世"}
+
+
+def test_emit_inflight_message_noop_when_none():
+    """无 in-flight 消息 → 不发任何帧。"""
+    captured = []
+    _emit_inflight_message(_srv_with_inflight(None), captured.append)
+    assert captured == []
+
+
+def test_emit_inflight_message_start_only_when_partial_empty():
+    """partial_text 为空（刚 bind 还没出字）→ 只发 message_start，不发空 delta。"""
+    captured = []
+    snap = {
+        "turn_id": "turn_x", "message_id": "msg_x", "guest_name": "宝总",
+        "task_id": None, "partial_text": "",
+    }
+    _emit_inflight_message(_srv_with_inflight(snap), captured.append)
+    assert [e.type for e in captured] == [ChahuaEventType.MESSAGE_START]
+    # task_id 为 None → message_start.data 不塞 task_id 键。
+    assert captured[0].data == {}

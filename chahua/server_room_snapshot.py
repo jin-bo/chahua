@@ -288,6 +288,11 @@ def emit_room_snapshot(server: "ChahuaServer", sink: EnvelopeSink) -> None:
 
     P9 阶段 9.3.2：前台房间若有托管会话（MTS）在跑，末尾补发一帧 ``managed_session_started``
     —— 让「切回托管中的后台房间」能自给自足重建前端「托管中」状态条（设计文档 §8）。
+
+    P9：前台房间若有正在流式输出的消息（切回一个 turn 在后台续跑的房间），末尾补发
+    那条进行中消息的 ``message_start`` + ``message_delta(partial_text)`` —— 让切回前
+    已流出的内容立即在聊天区 / 调试面板成形，不必干等 ``message_end``（设计文档 §3
+    「切回流式契约」的完整实现）。
     """
     emit_room_info(server, sink)
     emit_room_history(server, sink)
@@ -295,3 +300,36 @@ def emit_room_snapshot(server: "ChahuaServer", sink: EnvelopeSink) -> None:
     for warning in server._session.tasks_store.consume_load_warnings():
         server._emit_notice(sink, level=NOTICE_LEVEL_INFO, text=warning)
     server._session.orchestrator.emit_managed_session_snapshot(sink)
+    _emit_inflight_message(server, sink)
+
+
+def _emit_inflight_message(server: "ChahuaServer", sink: EnvelopeSink) -> None:
+    """切回房间时补发正在流式输出的那条消息（``message_start`` + 累积 ``message_delta``）。
+
+    无 in-flight 消息 → 空操作。两帧走既有前端 handler：``message_start`` 建流式气泡 /
+    调试消息记录，``message_delta`` 把切回前已流出的 ``partial_text`` 一次性灌进去；
+    其后真实 delta 严格续接（``partial_text`` 只含已 emit 过的 chunk）。
+    """
+    inflight = server._session.orchestrator.snapshot_inflight_message()
+    if inflight is None:
+        return
+    room_id = server._session.room.name
+    task_id = inflight["task_id"]
+    common = dict(
+        room_id=room_id,
+        turn_id=inflight["turn_id"],
+        guest_name=inflight["guest_name"],
+        message_id=inflight["message_id"],
+    )
+    sink(ChahuaEnvelope(
+        **common,
+        type=ChahuaEventType.MESSAGE_START,
+        data={"task_id": task_id} if task_id else {},
+    ))
+    partial = inflight["partial_text"]
+    if partial:
+        sink(ChahuaEnvelope(
+            **common,
+            type=ChahuaEventType.MESSAGE_DELTA,
+            data={"chunk": partial},
+        ))

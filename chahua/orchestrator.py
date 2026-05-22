@@ -231,6 +231,19 @@ class Orchestrator:
         entry = self._guests.get(name)
         return entry.guest if entry is not None else None
 
+    def snapshot_inflight_message(self) -> Optional[dict]:
+        """房间里当前正在流式输出的那条消息快照；无则 ``None``。
+
+        P9 切回一个 turn 在后台续跑的房间时，``emit_room_snapshot`` 据此补发进行中
+        消息的 ``message_start`` + ``message_delta(partial_text)``。轮内发言串行
+        （含 panel），任一时刻至多一条 in-flight —— 遍历茶客取第一条非 None。
+        """
+        for entry in self._guests.values():
+            snap = entry.guest.inflight_snapshot()
+            if snap is not None:
+                return snap
+        return None
+
     # ── 清空 ──────────────────────────────────────────────────────────
 
     def reset_room(self) -> None:

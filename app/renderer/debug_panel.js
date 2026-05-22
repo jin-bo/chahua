@@ -738,8 +738,8 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
       const note = document.createElement("div");
       note.className = "debug-turn-partial-note";
       note.textContent =
-        "切回房间时这一轮已在后台进行 —— 切回前的打分候选 / prompt 不可见，"
-        + "完整取证见 debug/turns.jsonl";
+        "切回房间时这一轮已在后台进行 —— 切回前的打分候选 / 早前消息明细可能不全；"
+        + "完整取证见 debug/turns.jsonl（本轮结束后下次切房即补全）";
       section.appendChild(note);
     }
 
