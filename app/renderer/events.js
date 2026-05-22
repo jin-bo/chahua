@@ -73,7 +73,27 @@ export const EventType = Object.freeze({
   MANAGED_SESSION_STARTED: "managed_session_started",
   MANAGED_SESSION_ADVANCED: "managed_session_advanced",
   MANAGED_SESSION_ENDED: "managed_session_ended",
+  // P9 切房后房间后台续跑（docs/P9 §4 / §5）。hint 型里程碑：切走后仍 busy 的房间
+  // 转后台续跑，其 turn / handoff drain 跑完、runtime 自毁时 emit 一次。前端据此
+  // 清掉房间列表「进行中」徽标。镜像 chahua/events.py::ROOM_BACKGROUND_FINISHED。
+  ROOM_BACKGROUND_FINISHED: "room_background_finished",
 });
+
+// P9 §4：后台房间事件白名单 —— 后台 router 只放行这些里程碑。前端用同一集合判定
+// 「这条 envelope 是否可能来自后台房」：在集合内且 envelope.room_id 非前台 → 当作
+// 后台里程碑分流（只更新房间列表徽标，不碰前台聊天 / 任务面板）。镜像
+// chahua/room_runtime.py::_BACKGROUND_WHITELIST。
+export const BACKGROUND_MILESTONE_TYPES = Object.freeze(new Set([
+  EventType.TURN_START,
+  EventType.TURN_END,
+  EventType.MESSAGE_END,
+  EventType.TASK_INFO,
+  EventType.TASK_ARTIFACT_ADDED,
+  EventType.MANAGED_SESSION_STARTED,
+  EventType.MANAGED_SESSION_ADVANCED,
+  EventType.MANAGED_SESSION_ENDED,
+  EventType.ROOM_BACKGROUND_FINISHED,
+]));
 
 // TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
 // 前端"采纳"按钮按 kind 分发对应 inbound 帧。
