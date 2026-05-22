@@ -144,6 +144,11 @@ const send = (payload) => ws.send(JSON.stringify(payload));
 // status=cancelled 时清；turn_end(next=ai) 不清（下个 turn_start 会刷新）。非 null 即
 // "AI 链在跑"，submit button 切到「停止」语义，submit handler 路由到 cancel 帧。
 let currentTurnId = null;
+// P9：切到一个后台正在跑 turn 的房间时，前端没有那个 turn 的真实 id（turn_start 在
+// 切房前就发过了）。用这个哨兵占位让「停止」按钮正确显示 —— updateSendButton 只看
+// currentTurnId 是否非空、cancel 帧服务端只认 type 不校验 turn_id。真实 turn_start
+// 到达会覆盖它，turn_end 清掉它。
+const FOREGROUND_BUSY_TURN_PLACEHOLDER = "turn_foreground_busy";
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
 // renderSidebar 上次渲染的房间 id —— 用来区分"真正切房" vs "同房 room_info 刷新"
@@ -580,6 +585,16 @@ function renderSidebar(roomInfo) {
     // P8.3：MTS 与 handoff 队列同瞬态——切房即清状态条。
     managedSession?.reset();
     handoffRoomId = nextRoomId;
+    // P9：切房后旧房在后台续跑 —— 它的 turn_end 不再回到本视图，currentTurnId
+    // 不会被旧房收尾事件清掉。必须按**新前台房间**的 busy 快照重置「发送/停止」
+    // 按钮：从忙房切到闲房 → 复原成「发送」；切进一个后台仍在跑的房 → 维持
+    // 「停止」（哨兵占位，真实 turn_start/turn_end 后续会校准）。同房刷新不进
+    // 此分支，currentTurnId 不动（本房 turn 仍在跑时不该误清）。
+    const nextRoom = (roomInfo.rooms_available ?? []).find(
+      (r) => r.room_id === nextRoomId,
+    );
+    currentTurnId = nextRoom?.busy ? FOREGROUND_BUSY_TURN_PLACEHOLDER : null;
+    updateSendButton();
   }
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
