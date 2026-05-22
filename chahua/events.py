@@ -146,6 +146,13 @@ class ChahuaEventType(str, Enum):
     MANAGED_SESSION_ADVANCED = "managed_session_advanced"
     MANAGED_SESSION_ENDED = "managed_session_ended"
 
+    # P9 切房后房间后台续跑（docs/P9-切房后房间后台续跑.md §4 / §5）。hint 型里程碑：
+    # 切走后仍 busy 的房间转后台续跑，其 turn / handoff drain 跑完、runtime 自毁时
+    # emit 一次。不进 transcript / 不触发 AI。阶段 9.2 后台 router 是 NOOP，本事件被
+    # 丢弃（靠切回快照）；阶段 9.3.1 后台白名单放行后才真送达前端更新房间列表徽标。
+    # 新增事件类型——旧前端遇未知 type WARN 后忽略（向前兼容），不 bump schema_version。
+    ROOM_BACKGROUND_FINISHED = "room_background_finished"
+
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。
 STATUS_OK = "ok"

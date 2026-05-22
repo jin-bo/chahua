@@ -27,6 +27,7 @@ import logging
 import operator
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, Optional
 
@@ -47,7 +48,12 @@ from .events import (
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
-from .room_runtime import RoomEventRouter, RoomRuntime
+from .room_runtime import (
+    ROUTER_MODE_BACKGROUND,
+    ROUTER_MODE_FOREGROUND,
+    RoomEventRouter,
+    RoomRuntime,
+)
 from .handoff import MANAGED_SESSION_REASON_USER_CANCEL
 from .orchestrator import OrchestratorConfig
 # Re-export 给测试 / 外部调用方（``from chahua.server import _llm_summary`` 路径不变）。
@@ -317,30 +323,47 @@ class ChahuaServer:
         cancel」的死调度；``end_managed_session`` 同时清 ``_handoff_queue``）。
 
         幂等：每个 runtime 清完即移出 ``_runtimes``，重复调用 → 空注册表 → noop。
-        ``_serve_one`` finally 与 ``server_entry`` 进程退出可能各清一次（§5.1）——
-        清理走 ``NOOP_SINK``（退出途中 ws sink 可能已不可写），MTS 收尾事件丢弃。
-
-        三步（end MTS / drain / close）**各自 try** —— 前两步抛错绝不能挡住
-        ``runtime.close()``，否则该房 agentao / MCP 子进程在进程退出时变孤儿泄漏。
+        ``_serve_one`` finally（清后台）与 ``server_entry`` 进程退出（清全部）可能
+        各清一次（§5.1）—— 清理走 ``NOOP_SINK``（退出途中 ws sink 可能已不可写）。
         """
         for runtime in list(self._runtimes.values()):
-            try:
-                orch = runtime.session.orchestrator
-                if orch.managed_session is not None:
-                    orch.end_managed_session(
-                        NOOP_SINK, reason=MANAGED_SESSION_REASON_USER_CANCEL,
-                    )
-            except Exception:
-                _log.exception("aclose: runtime %r 结束 MTS 出错", runtime.room_id)
-            try:
-                await runtime.cancel_and_drain_inflight()
-            except Exception:
-                _log.exception("aclose: runtime %r drain 出错", runtime.room_id)
-            try:
-                runtime.close()
-            except Exception:
-                _log.exception("aclose: runtime %r close 出错", runtime.room_id)
-            self._runtimes.pop(runtime.room_id, None)
+            await self._aclose_one_runtime(runtime)
+
+    async def _aclose_background_runtimes(self) -> None:
+        """ws 断开路径：拆除所有 **background** runtime（P9 §11 决策 1：ws 真正断开
+        时后台房间立即全清）。**前台** runtime 保留 —— 与 P9 之前「session 跨连接
+        复用」一致，下次连接重用。``_serve_one`` 的 finally 调用。
+        """
+        for runtime in list(self._runtimes.values()):
+            if runtime.room_id == self._foreground_id:
+                continue
+            await self._aclose_one_runtime(runtime)
+
+    async def _aclose_one_runtime(self, runtime: RoomRuntime) -> None:
+        """单个 runtime 的 async 拆除：end MTS → cancel drain → close → 移出注册表。
+
+        三步**各自 try** —— end MTS / drain 抛错绝不能挡住 ``runtime.close()``，否则
+        该房 agentao / MCP 子进程在进程退出时变孤儿泄漏。带 MTS 的 runtime 先
+        ``end_managed_session`` 再 cancel drain（§8 拆除顺序：绝不留「``_managed_session``
+        还在、drain 已 cancel」的死调度）。清完即移出 ``_runtimes``（幂等）。
+        """
+        try:
+            orch = runtime.session.orchestrator
+            if orch.managed_session is not None:
+                orch.end_managed_session(
+                    NOOP_SINK, reason=MANAGED_SESSION_REASON_USER_CANCEL,
+                )
+        except Exception:
+            _log.exception("aclose: runtime %r 结束 MTS 出错", runtime.room_id)
+        try:
+            await runtime.cancel_and_drain_inflight()
+        except Exception:
+            _log.exception("aclose: runtime %r drain 出错", runtime.room_id)
+        try:
+            runtime.close()
+        except Exception:
+            _log.exception("aclose: runtime %r close 出错", runtime.room_id)
+        self._runtimes.pop(runtime.room_id, None)
 
     def close(self) -> None:
         """同步兜底关停 —— 仅 close 所有 runtime 的 session，不 cancel/drain in-flight。
@@ -447,6 +470,9 @@ class ChahuaServer:
             # producer 写已"cancelling"的 writer 拿到的"task exception was never
             # retrieved"告警（websockets close 本身不依赖这条帧送达）。
             await self._cancel_and_drain_inflight()
+            # P9 §11 决策 1：ws 断开 → 切走后仍在后台续跑的房间立即全清（带 MTS 的
+            # 先 end_managed_session 再 cancel drain）。前台 runtime 保留供重连重用。
+            await self._aclose_background_runtimes()
             writer.cancel()
             try:
                 await writer
@@ -476,28 +502,68 @@ class ChahuaServer:
         _do_emit_room_history(self, sink)
 
     def _switch_room(self, room_id: str, sink: EnvelopeSink) -> None:
-        """换房：tear down 当前 session + 装配新房 + 重发 room_info / room_history。
+        """换房（P9 两阶段，docs/P9 §3）：准备目标 runtime → demote 旧前台 → 切前台
+        指针 → 重发快照。
 
-        失败（room_id 不存在、room.toml 坏、LLM 凭据缺）→ WARN + 保留当前 session +
-        重发当前 room_info 让前端把"切换到 X…"状态复位回"已连接"。proper 错误反馈
-        wire（错误码 + 用户可见原因）留给 P3.3 跟 cancel 事件一并设计。
+        **P9 起切房不再 cancel 旧前台**：旧前台若 busy（有 in-flight turn / handoff
+        drain / MTS）转**后台续跑** —— 留在注册表、router 转 ``background``，in-flight
+        turn 调用栈持的还是同一 router 对象，事件路由自动跟着 ``mode`` 变；旧前台若
+        idle 则照旧 close。
+
+        **两阶段顺序（切房失败原子性）**：阶段一先把目标 runtime 准备好（不在注册表
+        就 ``build_room_session``）；任何失败（目录不存在 / room.toml 坏 / LLM 凭据
+        缺）都在「未碰旧前台」时 ``return`` —— 旧前台 runtime / ``_foreground_id`` 一字
+        不动，用户停在原房。阶段二才 demote 旧前台、一次性切前台指针。
 
         ws 连接复用：``_serve_one`` 的 ``async for raw in ws`` 串行消费 inbound，
-        所以 switch_room 永远在上一条 user_message 的 submit 之后才到达 ——
-        天然无 race。（顺带 UX 注：长 turn 期间用户 click 切房会感觉"卡"，
-        要 P3.3 cancel 完才能即时切。）
+        switch_room 永远在上一条 user_message 的 submit 之后到达 —— 天然无 race。
         """
-        # 同房间忽略 —— 频繁 click 同一项不该 close + 重建。
-        if room_id == self._session.room_config.room_dir.name:
+        # 同房间忽略 —— 频繁 click 同一项不该重建。
+        if room_id == self._foreground_id:
             _log.info("switch_room: %r already current, noop", room_id)
             return
-        new_room_dir = self._paths.user_data_root / "rooms" / room_id
-        if not new_room_dir.is_dir():
-            _log.warning("switch_room: room_id=%r 目录不存在：%s", room_id, new_room_dir)
-            self._emit_room_info(sink)
-            return
-        if not self._replace_session(new_room_dir, sink, label=f"switch_room→{room_id!r}"):
-            return
+
+        # ── 阶段一：准备目标 runtime（失败即整体放弃，不碰旧前台）──
+        target = self._runtimes.get(room_id)
+        if target is None:
+            # 不在注册表 → 装配新 runtime。（之前切走时留下的后台 runtime 直接复用。）
+            new_room_dir = self._paths.user_data_root / "rooms" / room_id
+            if not new_room_dir.is_dir():
+                _log.warning(
+                    "switch_room: room_id=%r 目录不存在：%s", room_id, new_room_dir,
+                )
+                self._emit_room_info(sink)
+                return
+            try:
+                new_session = build_room_session(new_room_dir, paths=self._paths)
+            except Exception:
+                _log.exception("switch_room→%r: build_room_session 失败", room_id)
+                self._emit_room_info(sink)
+                return
+            target = RoomRuntime(
+                room_id=room_id,
+                session=new_session,
+                router=RoomEventRouter(NOOP_SINK),
+            )
+            self._runtimes[room_id] = target
+
+        # ── 阶段二：目标已就绪，demote 旧前台 ──
+        old = self._foreground_runtime
+        if old.inflight_alive():
+            # busy → 转后台续跑：留在注册表、router 转 background。
+            old.router.mode = ROUTER_MODE_BACKGROUND
+            old.background_since_ms = int(time.time() * 1000)
+            _log.info("switch_room: 旧前台 %r busy → 转后台续跑", old.room_id)
+        else:
+            # idle → close + 移出注册表（后台 runtime 仅在真有活时存在，§5）。
+            old.close()
+            self._runtimes.pop(old.room_id, None)
+            _log.info("switch_room: 旧前台 %r idle → close", old.room_id)
+
+        # ── 一次性切前台指针 ──
+        target.router.ws_sink = sink
+        target.router.mode = ROUTER_MODE_FOREGROUND
+        self._foreground_id = room_id
         _log.info("switch_room: → %r", room_id)
         self._emit_room_snapshot(sink)
 
@@ -509,8 +575,10 @@ class ChahuaServer:
         失败 → WARN + emit 当前 room_info（让前端 UI 状态复位）+ 返回 ``False``，
         调用方自行决定后续动作。
 
-        三处调用：换房（`_switch_room`）、加/删茶客（`_add_guest`/`_remove_guest`，
-        房间路径不变 但要重建 agentao instances）、新建房 + 切换（`_create_room`）。
+        调用方：加/删茶客 / 改 LLM / 权限 / trust / toml（**同房重建**，房间路径不变
+        但要重建 agentao instances）、新建房 + 切换（`_create_room`）。**P9 起跨房
+        切换走 `_switch_room`、不再经这里** —— 同房重建仍 cancel 在跑的 turn（不能在
+        运行的 turn 下重建 session），与切房「不 cancel、busy 转后台」分流。
         """
         try:
             new_session = build_room_session(new_room_dir, paths=self._paths)
@@ -600,6 +668,43 @@ class ChahuaServer:
         """cancel 前台 runtime 当前 turn task **并等它收尾**。"""
         await self._foreground_runtime.cancel_and_drain_inflight()
 
+    def _maybe_self_destruct_background_runtime(self, runtime: RoomRuntime) -> None:
+        """后台 runtime 的 turn / handoff drain 跑完后自毁（P9 §5.1）。
+
+        ``_run_turn`` / ``_run_handoff_turn`` 的 finally 在清掉 in-flight 槽后调。仅当
+        runtime 处于 ``background`` 且已彻底 idle —— in-flight 槽空、handoff 队列空、
+        无 MTS —— 才 emit ``room_background_finished`` 里程碑、close、移出 ``_runtimes``。
+
+        前台 runtime（``mode == foreground``）一律不动。**切回竞态（§5.2）**：用户在
+        后台 turn 收尾瞬间切回该房 —— ``_switch_room`` 先把 ``mode`` 翻 ``foreground``，
+        本判定随即不成立、runtime 不被回收。``_switch_room`` 与本方法都在事件循环单
+        线程内、各自无 await，不会交错执行，「先翻 mode 再走收尾」的顺序即保证正确。
+
+        里程碑经 ``runtime.router`` emit：阶段 9.2 后台 router 是 NOOP → 事件被丢
+        （后台续跑「静默可用」，靠切回快照）；阶段 9.3.1 后台白名单放行后才真送达。
+        """
+        if runtime.router.mode != ROUTER_MODE_BACKGROUND:
+            return  # 前台 runtime（或已被切回）不自毁。
+        orch = runtime.session.orchestrator
+        if (
+            runtime.inflight_alive()
+            or orch.has_pending_handoff
+            or orch.managed_session is not None
+        ):
+            return  # 还有活（handoff 队列 / MTS）—— 留着续跑。
+        runtime.router(
+            ChahuaEnvelope(
+                room_id=runtime.room_id, turn_id=None, guest_name=None,
+                message_id=None, type=ChahuaEventType.ROOM_BACKGROUND_FINISHED,
+                data={},
+            )
+        )
+        runtime.close()
+        self._runtimes.pop(runtime.room_id, None)
+        _log.info(
+            "room_background_finished: 后台房 %r 跑完，runtime 自毁", runtime.room_id,
+        )
+
     async def _run_turn(
         self, runtime: RoomRuntime, text: str, *, task_id: Optional[str],
     ) -> None:
@@ -630,6 +735,8 @@ class ChahuaServer:
             _log.exception("submit_user_message crashed")
         finally:
             runtime.set_inflight(None, None)
+            # P9：本 turn 跑完后，若 runtime 是切走后转后台的且已 idle → 自毁。
+            self._maybe_self_destruct_background_runtime(runtime)
 
     async def _run_handoff_turn(
         self, runtime: RoomRuntime, *, task_id: Optional[str],
@@ -649,6 +756,8 @@ class ChahuaServer:
             _log.exception("handoff drain crashed")
         finally:
             runtime.set_inflight(None, None)
+            # P9：handoff drain 跑完后，后台 runtime 已 idle → 自毁。
+            self._maybe_self_destruct_background_runtime(runtime)
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息到对应 handler。
@@ -709,7 +818,8 @@ class ChahuaServer:
         room_id = _require_str(data, "room_id", where=INBOUND_SWITCH_ROOM)
         if room_id is None:
             return
-        await self._cancel_and_drain_inflight()
+        # P9：切房不再 cancel —— 旧前台若 busy，由 _switch_room 转后台续跑（§3）。
+        # 同房重建（加/删茶客等）走 _replace_session，那条仍 cancel。
         self._switch_room(room_id, sink)
 
     async def _inbound_clear_room(self, data: dict, sink: EnvelopeSink) -> None:

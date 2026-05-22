@@ -283,7 +283,8 @@ async def test_switch_room_ok(srv: _SpyServer):
     await srv._handle_inbound(
         {"type": INBOUND_SWITCH_ROOM, "room_id": "p3"}, _sink
     )
-    assert srv.cancel_drain_count == 1
+    # P9：切房不再 cancel —— 旧前台若 busy 由 _switch_room 转后台续跑。
+    assert srv.cancel_drain_count == 0
     assert srv.calls == [("_switch_room", {"room_id": "p3"})]
 
 

@@ -161,7 +161,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 ### handoff（调度层）
 
-- **handoff 是调度层增量，不改对话原语**。delegate（确定性发言指派）仍走一根 `transcript.jsonl`。执行驱动是显式入口：`enqueue_handoff` 只入队，`run_pending_handoff` 才跑。`HandoffItem` 队列不落盘（瞬态，crash 即丢），`reset_room` / 切房清队列。`HandoffKind` enum / `SCORING_PATH_HANDOFF_*` 按阶段加。
+- **handoff 是调度层增量，不改对话原语**。delegate（确定性发言指派）仍走一根 `transcript.jsonl`。执行驱动是显式入口：`enqueue_handoff` 只入队，`run_pending_handoff` 才跑。`HandoffItem` 队列不落盘（瞬态，crash 即丢），`reset_room` 清队列；**切房（P9）旧前台 busy 时转后台续跑，`_handoff_queue` 随后台 runtime 继续 drain、不清**，ws 真正断开才清后台 runtime（连同队列）。`HandoffKind` enum / `SCORING_PATH_HANDOFF_*` 按阶段加。
 - **`run_pending_handoff` 与 `_run_ai_chain` 严格分流，不互相回落**。drain loop 队列空 / cap 撞顶就停 + emit `turn_end(next="user")`，不回落 scoring；下次 scoring 须用户消息触发。`@A` 完后回 scoring、`/delegate A` 完后不回落。
 - **drain loop 每轮 turn 末尾 5 步严格对齐 `_run_ai_chain`**：① peek 算 `cost` 比 cap 得 `next_state` → ② 一次性 `turn_end(next=next_state)` → ③ `flush_turn` → ④ `_kick_summarize` / `_tick_cooldown` / `_kick_detect_new_artifacts` → ⑤ `if not has_next: return`。三个 hook 不能放 `turn_end` 之前、要么一起加要么一起删。
 - **cap 检查按 item cost 算，不是 cap=1**。delegate / review cost=1，panel = `len(targets)(+summarizer)`；`_consecutive_ai_turns + cost > max` 不 pop、直接收尾。`run_pending_handoff` 入口清零计数一次，drain loop 内不再清零、不递归。
@@ -187,8 +187,8 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 ### 托管任务会话（MTS，P8.3）
 
-- **MTS 是瞬态运行态，单房间最多 1 个，不落盘**。`ManagedSession`（`task_id` / `manager_guest` / `budget`）挂 `Orchestrator._managed_session`，与 `_handoff_queue` 同语义：crash / 切房 / `reset_room` 即清，不跨重启恢复。`_managed_session is None` 即「无托管」，不另存 `enabled` bool。只经 `managed_session_start` inbound 开启，无自动 / 超时 / 茶客 propose 开启。
-- **断线即结束 MTS**。MTS 活着 ⟺ drain task 在跑；`_serve_one` 的 `finally`（断线 / 连接关闭必经）先 `_maybe_end_managed_session(user_cancel)` 再 `_cancel_and_drain_inflight()` cancel 掉 drain。否则 drain 被 cancel 后 MTS 既不自然推进也无人能停，重连快照还会让前端「托管中」按钮对着死调度复活（Codex review P2）。前端 ws close 已 `managedSession.reset()` 抹掉按钮态——服务端同步结束，两侧一致。MTS 不跨断线存活，故 `emit_room_snapshot` 不重投 MTS。
+- **MTS 是瞬态运行态，单房间最多 1 个，不落盘**。`ManagedSession`（`task_id` / `manager_guest` / `budget`）挂 `Orchestrator._managed_session`，与 `_handoff_queue` 同语义：crash / `reset_room` / ws 断开即清；**切房（P9）改为转后台续跑** —— 旧前台 busy 时 MTS 不随切房结束、留后台跑到 budget/task/cap 自然收尾。不跨重启恢复。`_managed_session is None` 即「无托管」，不另存 `enabled` bool。只经 `managed_session_start` inbound 开启，无自动 / 超时 / 茶客 propose 开启。
+- **断线即结束 MTS（切房不结束，P9）**。MTS 活着 ⟺ drain task 在跑；`_serve_one` 的 `finally`（断线 / 连接关闭必经）先 `_maybe_end_managed_session(user_cancel)` 再 `_cancel_and_drain_inflight()` cancel 掉前台 drain，随后 `_aclose_background_runtimes()` 把切走后仍在后台的 runtime（连同其 MTS）一并 end + cancel。否则 drain 被 cancel 后 MTS 既不自然推进也无人能停，重连快照还会让前端「托管中」按钮对着死调度复活（Codex review P2）。**P9 起切房不再结束 MTS** —— 旧前台 busy 转后台续跑，MTS 在后台自驱直到自然收尾；只有 ws 真正断开才强制结束（含后台 MTS）。`emit_room_snapshot` 暂不重投 MTS（切回托管中的后台房无法重建状态条，9.3.2 补）。
 - **MTS 跑在 handoff drain loop 上，不新开调度路径**。`run_pending_handoff` drain 每轮 turn 跑完调一次 `_advance_managed_session_after_turn(item, sink)`，再照常走既有 peek / turn_end / 收尾，既有「5 步」内部顺序一字不动；`_managed_session is None` 时该调用立即返回，非 MTS 房间零行为变化。`_advance` 按「刚跑完的是不是管理者回合」分流：管理者回合不做事（其 delegate/panel 提议已被 hook 入队）；worker 回合且队列空 → `budget-=1` + 回调 `delegate(manager)` + emit `managed_session_advanced`。停止守卫 `_managed_session_stop_reason()` 先判（budget → task_closed → cap，谁先命中报谁）。
 - **`manager_finished` 只由 drain 收尾兜底产生**（`run_pending_handoff` `has_next` 为假处），覆盖「管理者没派活 / 调用链续不下去（target 不在场被 drop、发言抛错）」；不公开 `target_missing` / `error` reason。6 个会 emit 的 reason：`manager_finished` / `budget_exhausted` / `task_closed` / `cap_reached` / `user_stopped` / `user_cancel`。
 - **结束 MTS 必清 `_handoff_queue`**。`end_managed_session(sink, reason)` 任意路径都清掉待跑 handoff 项 + 重发空队列快照——保证 MTS 结束后房间不再自动说话，也使 `budget_exhausted` / `task_closed` / `cap_reached` 不会多跑一个已入队的 worker。`managed_session_stop` 不取消当前 in-flight turn（自然跑完）；`handoff_clear` / `cancel` 中途介入时一并结束 MTS（`user_cancel`）。
