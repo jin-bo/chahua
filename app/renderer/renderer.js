@@ -61,6 +61,7 @@ import { createMessageFilter } from "./message_filter.js";
 import { createCommands } from "./commands.js";
 import { createConnection } from "./connection.js";
 import { createRoomList } from "./room_list.js";
+import { createTurnState } from "./turn_state.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -155,17 +156,12 @@ const roomList = createRoomList({
   setStatus,
 });
 
+// 当前 turn 状态 + 发送/停止按钮封在 ./turn_state.js —— renderer 经 isActive /
+// turnId / set / clear / syncToRoom 交互。
+const turnState = createTurnState({ submitBtn });
+
 // chat-stream（气泡 / 流式 / 历史回放）见 ./chat_stream.js；在途消息 Map 封装在
 // 该模块内，外部只通过 ``closeInFlightOnDisconnect`` 一键清。
-// 当前 turn 的 id —— P3.3 cancel 状态机：turn_start 时设、turn_end(next=user) 或
-// status=cancelled 时清；turn_end(next=ai) 不清（下个 turn_start 会刷新）。非 null 即
-// "AI 链在跑"，submit button 切到「停止」语义，submit handler 路由到 cancel 帧。
-let currentTurnId = null;
-// P9：切到一个后台正在跑 turn 的房间时，前端没有那个 turn 的真实 id（turn_start 在
-// 切房前就发过了）。用这个哨兵占位让「停止」按钮正确显示 —— updateSendButton 只看
-// currentTurnId 是否非空、cancel 帧服务端只认 type 不校验 turn_id。真实 turn_start
-// 到达会覆盖它，turn_end 清掉它。
-const FOREGROUND_BUSY_TURN_PLACEHOLDER = "turn_foreground_busy";
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
 // renderSidebar 上次渲染的房间 id —— 用来区分"真正切房" vs "同房 room_info 刷新"
@@ -230,11 +226,6 @@ function updateNewTaskBtn() {
   taskPanelNewBtn.title = "新建任务";
 }
 
-// 同一个按钮承担「发送 / 停止」双重职责；aria-label 同步切，屏读器读"发送"/"停止"而
-// 不是裸符号。颜色由 .stop 类 + style.css 控制。
-const SEND_ICON = "↑";
-const STOP_ICON = "■";
-
 // GUEST_CAPS_INFO envelope → system 气泡文案。view 决定列 tools 还是 skills 段
 // （permission / guest 两段共用）。description 取首行 + 截断，避免长描述刷屏。
 function formatGuestCaps(data, view) {
@@ -257,14 +248,6 @@ function formatGuestCaps(data, view) {
   }
   return lines.join("\n");
 }
-function updateSendButton() {
-  const busy = currentTurnId !== null;
-  submitBtn.textContent = busy ? STOP_ICON : SEND_ICON;
-  submitBtn.setAttribute("aria-label", busy ? "停止" : "发送");
-  submitBtn.title = busy ? "停止当前轮次" : "发送 (Enter)";
-  submitBtn.classList.toggle("stop", busy);
-}
-
 function stickToBottom(mutate) {
   const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
   mutate();
@@ -471,14 +454,12 @@ function renderSidebar(roomInfo) {
     handoffRoomId = nextRoomId;
     // P9：切房后旧房在后台续跑 —— 它的 turn_end 不再回到本视图，currentTurnId
     // 不会被旧房收尾事件清掉。必须按**新前台房间**的 busy 快照重置「发送/停止」
-    // 按钮：从忙房切到闲房 → 复原成「发送」；切进一个后台仍在跑的房 → 维持
-    // 「停止」（哨兵占位，真实 turn_start/turn_end 后续会校准）。同房刷新不进
-    // 此分支，currentTurnId 不动（本房 turn 仍在跑时不该误清）。
+    // 按钮（见 turn_state.syncToRoom）。同房刷新不进此分支，turn 状态不动（本房
+    // turn 仍在跑时不该误清）。
     const nextRoom = (roomInfo.rooms_available ?? []).find(
       (r) => r.room_id === nextRoomId,
     );
-    currentTurnId = nextRoom?.busy ? FOREGROUND_BUSY_TURN_PLACEHOLDER : null;
-    updateSendButton();
+    turnState.syncToRoom(!!nextRoom?.busy);
   }
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
@@ -603,8 +584,7 @@ function handleEnvelope(env) {
       console.debug("[turn_start]", scores);
       scoresByName = new Map(scores.map((r) => [r.guest_name, r]));
       applyScoresToSidebar();
-      currentTurnId = env.turn_id;
-      updateSendButton();
+      turnState.set(env.turn_id);
       return;
     }
     case EventType.MESSAGE_START:
@@ -623,8 +603,7 @@ function handleEnvelope(env) {
       // 「停止」按钮。next==='ai' 时维持，下一个 turn_start 立刻刷新 currentTurnId。
       const next = env.data?.next;
       if (env.status !== Status.OK || next === "user") {
-        currentTurnId = null;
-        updateSendButton();
+        turnState.clear();
         // AI 链收尾、无 in-flight turn —— 放开被 gate 的 handoff 采纳按钮（此刻采纳
         // 不会抢占截断任何 turn）。next==='ai' 时链未结束，不放。
         proposalCard.onTurnIdle();
@@ -780,8 +759,7 @@ function handleDisconnect(code) {
   // 拒绝所有等 echo 的上传，让 change handler 的 finally 清 isUploading + 启用附件按钮。
   upload.dropPending(`ws closed (${code})`);
   // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
-  currentTurnId = null;
-  updateSendButton();
+  turnState.clear();
 }
 
 // ── 添加茶客 / 新建房间 modal ─────────────────────────────────────────
@@ -1048,7 +1026,7 @@ const taskPanel = createTaskPanel({
 const proposalCard = createProposalCard({
   messagesEl,
   sendInbound: send,
-  isTurnActive: () => currentTurnId !== null,
+  isTurnActive: turnState.isActive,
 });
 
 // 调试抽屉。默认隐藏 —— 用户点 task panel header 的 🔬 切到；调试内 ← 切回。
@@ -1274,11 +1252,11 @@ composer.addEventListener("submit", (ev) => {
     return;
   }
   if (!connection.isConnected()) return;
-  // 「停止」分支：currentTurnId 非空表示 AI 链在跑，submit 按钮处于「停止」语义。
+  // 「停止」分支：turnState.isActive() 表示 AI 链在跑，submit 按钮处于「停止」语义。
   // 服务端收到后 task.cancel() 当前 turn task，turn_end(status=cancelled) 回来时
-  // 状态机会清掉 currentTurnId，按钮自动复原成「发送」。textInput 内容不动。
-  if (currentTurnId !== null) {
-    send({ type: Inbound.CANCEL, turn_id: currentTurnId });
+  // turn_state 会清掉，按钮自动复原成「发送」。textInput 内容不动。
+  if (turnState.isActive()) {
+    send({ type: Inbound.CANCEL, turn_id: turnState.turnId() });
     setStatus("", "已请求停止…");
     return;
   }
