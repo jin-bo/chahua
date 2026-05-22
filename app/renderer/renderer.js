@@ -16,9 +16,7 @@
 
 import {
   Inbound,
-  DEFAULT_PERMISSION,
   TASK_UNTITLED,
-  buildOwnerOptionData,
   isTaskClosed,
 } from "./events.js";
 import {
@@ -28,7 +26,7 @@ import {
 import { createSidebar } from "./sidebar.js";
 import { createMention } from "./mention.js";
 import { createUpload } from "./upload.js";
-import { renderPersonaPicker, createPersonaImport } from "./persona.js";
+import { wireModals } from "./modals.js";
 import { createSettings } from "./settings.js";
 import { createGuestSettings } from "./guest_settings.js";
 import { createRoomSettings } from "./room_settings.js";
@@ -69,19 +67,8 @@ const addGuestBtn = document.getElementById("add-guest");
 const importPersonaBtn = document.getElementById("import-persona");
 const assignHandoffBtn = document.getElementById("assign-handoff");
 const addRoomBtn = document.getElementById("add-room");
-const addGuestModal = document.getElementById("add-guest-modal");
-const addRoomModal = document.getElementById("add-room-modal");
-const importPersonaModal = document.getElementById("import-persona-modal");
-const addGuestListEl = document.getElementById("add-guest-list");
-const newRoomNameEl = document.getElementById("new-room-name");
-const newRoomTopicEl = document.getElementById("new-room-topic");
-const newRoomRulesEl = document.getElementById("new-room-rules");
-const newRoomGuestsEl = document.getElementById("new-room-guests");
-const newRoomSubmitEl = document.getElementById("new-room-submit");
-const importFolderPathEl = document.getElementById("import-folder-path");
-const importFolderPickBtn = document.getElementById("import-folder-pick");
-const importGithubUrlEl = document.getElementById("import-github-url");
-const importPersonaSubmitBtn = document.getElementById("import-persona-submit");
+// 添加茶客 / 新建房间 / 新建任务 / 导入 persona 四个 modal 的 DOM 节点在 ./modals.js
+// 内自取（仅那里用）。
 const avatarFileInput = document.getElementById("avatar-file-input");
 const editUserModal = document.getElementById("edit-user-modal");
 const userMdTextarea = document.getElementById("user-md-textarea");
@@ -107,11 +94,6 @@ const debugPanelBackBtn = document.getElementById("debug-panel-back");
 const debugPanelClearBtn = document.getElementById("debug-panel-clear");
 const composerTaskChipEl = document.getElementById("composer-task-chip");
 const handoffQueueBarEl = document.getElementById("handoff-queue-bar");
-const newTaskModal = document.getElementById("new-task-modal");
-const newTaskTitleEl = document.getElementById("new-task-title");
-const newTaskGoalEl = document.getElementById("new-task-goal");
-const newTaskOwnerEl = document.getElementById("new-task-owner");
-const newTaskSubmitBtn = document.getElementById("new-task-submit");
 const markDecisionModal = document.getElementById("mark-decision-modal");
 const markDecisionSummaryEl = document.getElementById("mark-decision-summary");
 const markDecisionSupportEl = document.getElementById("mark-decision-support");
@@ -424,8 +406,8 @@ function handleDisconnect(code) {
   turnState.clear();
 }
 
-// ── 添加茶客 / 新建房间 modal ─────────────────────────────────────────
-
+// ── modal ────────────────────────────────────────────────────────────
+// openModal / closeModal 是 modal 显隐的单点（modals.js 与 decision_support 共用）。
 function openModal(modal) {
   modal.hidden = false;
 }
@@ -434,87 +416,21 @@ function closeModal(modal) {
   modal.hidden = true;
 }
 
-addGuestBtn.addEventListener("click", () => {
-  if (!connection.isConnected()) return;
-  const inRoom = new Set(guests.map((g) => g.name));
-  renderPersonaPicker(addGuestListEl, {
-    personas: personasAvailable,
-    multi: false,
-    excludeNames: inRoom,
-    onPick: (p) => {
-      send({
-        type: Inbound.ADD_GUEST,
-        persona: p.persona,
-        name: p.name,
-        permission: DEFAULT_PERMISSION,
-      });
-      setStatus("", `添加茶客 ${p.name}…`);
-      closeModal(addGuestModal);
-    },
-  });
-  openModal(addGuestModal);
+// 添加茶客 / 新建房间 / 新建任务 / 导入 persona 四个 modal 的装配在 ./modals.js ——
+// 模块自取 DOM 节点，全 modal 的「点 backdrop / × / ESC 关闭」兜底也一并挂。
+wireModals({
+  isConnected: connection.isConnected,
+  send,
+  setStatus,
+  getGuests: () => guests,
+  getPersonas: () => personasAvailable,
+  pickFolder: window.chahua?.pickFolder,
+  openModal,
+  closeModal,
 });
 
 // composer 底栏「指派」按钮 —— 弹统一的指派 / 圆桌 popover。
 assignHandoffBtn.addEventListener("click", openAssignPopover);
-
-addRoomBtn.addEventListener("click", () => {
-  if (!connection.isConnected()) return;
-  newRoomNameEl.value = "";
-  newRoomTopicEl.value = "";
-  newRoomRulesEl.value = "";
-  renderPersonaPicker(newRoomGuestsEl, {
-    personas: personasAvailable,
-    multi: true,
-    excludeNames: null,
-  });
-  openModal(addRoomModal);
-  newRoomNameEl.focus();
-});
-
-createPersonaImport({
-  modal: importPersonaModal,
-  folderPathEl: importFolderPathEl,
-  folderPickBtn: importFolderPickBtn,
-  githubUrlEl: importGithubUrlEl,
-  submitBtn: importPersonaSubmitBtn,
-  importBtn: importPersonaBtn,
-  isConnected: connection.isConnected,
-  send,
-  setStatus,
-  pickFolder: window.chahua?.pickFolder,
-});
-
-newRoomSubmitEl.addEventListener("click", () => {
-  if (!connection.isConnected()) return;
-  const name = newRoomNameEl.value.trim();
-  if (!name) {
-    newRoomNameEl.focus();
-    return;
-  }
-  const selected = Array.from(newRoomGuestsEl.querySelectorAll("li.persona-item.selected"));
-  if (selected.length === 0) {
-    window.alert("至少选 1 位茶客");
-    return;
-  }
-  const guestsPayload = selected.map((li) => ({
-    persona: li.dataset.persona,
-    name: li.dataset.name,
-    permission: DEFAULT_PERMISSION,
-  }));
-  // room_id 用 name 直接当目录名 —— server 端 normalize_room_id 会再洗一遍非法字符；
-  // 暴露独立 id 字段会增加 UI 复杂度（用户难以理解 id vs name 的区别）。
-  send({
-    type: Inbound.CREATE_ROOM,
-    room_id: name,
-    name,
-    topic: newRoomTopicEl.value.trim(),
-    rules: newRoomRulesEl.value.trim(),
-    guests: guestsPayload,
-  });
-  setStatus("", `新建房间 ${name}…`);
-  closeModal(addRoomModal);
-});
 
 // ── 我（USER.md / 头像）─────────────────────────────────────────────
 
@@ -764,42 +680,6 @@ taskState.subscribe((state) => {
   managedSession?.refresh();
 });
 
-taskPanelNewBtn.addEventListener("click", () => {
-  if (!connection.isConnected() || taskPanelNewBtn.disabled) return;
-  newTaskTitleEl.value = "";
-  newTaskGoalEl.value = "";
-  // owner 选项与任务卡 owner 下拉同源 —— "" 表示全员，submit 时再 normalize 回 null。
-  newTaskOwnerEl.replaceChildren();
-  for (const data of buildOwnerOptionData(guests.map((g) => g.name))) {
-    const opt = document.createElement("option");
-    opt.value = data.value;
-    opt.textContent = data.label;
-    newTaskOwnerEl.appendChild(opt);
-  }
-  newTaskOwnerEl.value = "";
-  openModal(newTaskModal);
-  newTaskTitleEl.focus();
-});
-
-newTaskSubmitBtn.addEventListener("click", () => {
-  if (!connection.isConnected()) return;
-  const title = newTaskTitleEl.value.trim();
-  if (!title) {
-    newTaskTitleEl.focus();
-    return;
-  }
-  const ownerRaw = newTaskOwnerEl.value;
-  const payload = {
-    type: Inbound.OPEN_TASK,
-    title,
-    goal: newTaskGoalEl.value,
-    owner: ownerRaw === "" ? null : ownerRaw,
-  };
-  send(payload);
-  setStatus("", `新建任务「${title}」…`);
-  closeModal(newTaskModal);
-});
-
 // 决策入口：右键消息气泡 → action popover → modal。message_id 仅在 server 落盘后
 // 才挂到 li 上（用户自己 echo 的那条没有，直到下次 room_history 才补），所以未带
 // id 的 li 一律跳过 —— 决策必须能引回 transcript 里的真实 message。
@@ -821,25 +701,6 @@ messagesEl.addEventListener("contextmenu", (ev) => {
       onClick: () => decisionSupport.open(li, active.id),
     },
   ]);
-});
-
-// modal 关闭：点 backdrop（modal-backdrop 自身、不是内部 .modal）/ × 按钮 / ESC。
-const editGuestModal = document.getElementById("edit-guest-modal");
-const editRoomModal = document.getElementById("edit-room-modal");
-const ALL_MODALS = [
-  addGuestModal, addRoomModal, editUserModal, importPersonaModal,
-  editRoomTomlModal, editGuestModal, editRoomModal, newTaskModal,
-  markDecisionModal,
-];
-for (const modal of ALL_MODALS) {
-  modal.addEventListener("click", (ev) => {
-    if (ev.target === modal) closeModal(modal);
-    if (ev.target.matches("[data-close]")) closeModal(modal);
-  });
-}
-document.addEventListener("keydown", (ev) => {
-  if (ev.key !== "Escape") return;
-  for (const m of ALL_MODALS) if (!m.hidden) closeModal(m);
 });
 
 // 清空聊天：本地不抢先清 DOM，让回环一致 —— 服务端清完会重发 room_info +
