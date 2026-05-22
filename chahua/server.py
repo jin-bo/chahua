@@ -221,10 +221,8 @@ class ChahuaServer:
         port: int,
         paths: Paths,
     ) -> None:
-        # P9 阶段 9.1.2：server 从「持 1 个 session」升级为「持 RoomRuntime 注册表
-        # + 前台指针」。本阶段注册表恒单元素、router 恒 foreground —— 行为零变化。
-        # ``self._session`` 退化为读写前台 runtime.session 的兼容 property（见下），
-        # 这行赋值即走它的 setter 装好 ``_runtimes`` / ``_foreground_id``。
+        # P9：server 持 RoomRuntime 注册表（前台 1 + 切走后续跑的后台 N）+ 前台指针。
+        # 这行赋值走 ``_session`` setter 的 bootstrap 分支装好单元素注册表（见下）。
         self._session = session
         self._host = host
         self._port = port
@@ -240,10 +238,10 @@ class ChahuaServer:
 
     # ── P9：RoomRuntime 注册表 + 前台指针 ───────────────────────────────
     #
-    # 阶段 9.1.2 过渡设计：注册表恒单元素，``_session`` 是读写前台 runtime.session
-    # 的兼容 property —— 让 ``server.py`` / ``server_inbound_*.py`` 60+ 个旧读点
-    # （``self._session`` / ``self.server._session``）零改动继续走，行为完全不变。
-    # 多元素注册表 + ``_switch_room`` 不 cancel 留到阶段 9.2。
+    # ``_session`` 是读写**前台** runtime.session 的兼容 property —— 让 ``server.py``
+    # / ``server_inbound_*.py`` 60+ 个旧读点（``self._session`` /
+    # ``self.server._session``）零改动继续走。注册表可多元素（前台 1 + 切走后仍在
+    # 后台续跑的 N），setter 只动前台项、不碰后台。
 
     @property
     def _foreground_runtime(self) -> RoomRuntime:
@@ -257,25 +255,35 @@ class ChahuaServer:
 
     @_session.setter
     def _session(self, value: RoomSession) -> None:
-        """装/换前台 session。
+        """换**前台** runtime 的 session。两条调用路径：
 
-        阶段 9.1.2 单元素注册表过渡期：直接用 ``value`` 重建注册表（单元素）+
-        前台指针。room_id 取 ``room_dir.name``（与 :meth:`_switch_room` 同口径），
-        换房 / create_room 后 room_id 变也能正确 rekey。
+        - **bootstrap**（``__init__`` / ``object.__new__`` 测试夹具首次赋值）：
+          ``_runtimes`` 还不存在 → 装单元素注册表。
+        - **同房重建**（``_replace_session``：加/删茶客、改 LLM/权限/trust/toml）与
+          新建房（``_create_room``）：pop 掉旧前台 key、按 ``value`` 的
+          ``room_dir.name`` 建新 runtime 插回、移前台指针。
+
+        关键不变量：**只动前台那一条注册表项**。切走后留在注册表的 background
+        runtime 一概不动 —— 旧 setter 整体重建 ``_runtimes``，多 runtime 后会把后台
+        房间连同其未关的 session / in-flight task 一起静默丢掉（泄漏 bug）。
 
         旧 session 的 close 由调用方（:meth:`_replace_session`）负责 —— 这里只换
-        引用、不 close，避免双 close。router 此阶段是 NOOP_SINK 占位（turn 仍走
-        ``_serve_one`` 的 ws sink，9.1.3 才把 turn 接到 ``runtime.router``）。
+        引用、不 close，避免双 close。router 是 NOOP_SINK 占位，``_replace_session``
+        / ``_serve_one`` 随后接上真实 ws sink。
         """
-        room_id = value.room_config.room_dir.name
-        self._runtimes = {
-            room_id: RoomRuntime(
-                room_id=room_id,
-                session=value,
-                router=RoomEventRouter(NOOP_SINK),
-            )
-        }
-        self._foreground_id = room_id
+        new_room_id = value.room_config.room_dir.name
+        runtimes = getattr(self, "_runtimes", None)
+        if runtimes is None:  # bootstrap：首次赋值，注册表还没建。
+            runtimes = {}
+            self._runtimes = runtimes
+        else:  # 同房重建 / 新建房：只 pop 旧前台，background runtime 不动。
+            runtimes.pop(self._foreground_id, None)
+        runtimes[new_room_id] = RoomRuntime(
+            room_id=new_room_id,
+            session=value,
+            router=RoomEventRouter(NOOP_SINK),
+        )
+        self._foreground_id = new_room_id
 
     # P9 9.1.3：``_inflight_*`` 两槽下沉 RoomRuntime —— 这里是读写前台 runtime
     # 同名字段的兼容 property，让 ``server_inbound_*.py`` 各 handler 与既有测试
