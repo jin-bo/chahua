@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import chahua.server as server_mod
 from chahua.events import NOOP_SINK
 from chahua.room_runtime import (
@@ -311,23 +313,46 @@ def test_foreground_all_room_isolated(tmp_path) -> None:
     assert srv._foreground_session_has_global_guest() is False
 
 
+async def test_switch_away_global_guest_drains_then_closes(tmp_path) -> None:
+    """前台房有 global 茶客且 busy → _inbound_switch_room 先 cancel+drain，
+    _switch_room 据此把它当 idle 关掉（不转后台 —— 否则 share/task 软链撞车）。"""
+    fg = _runtime("A", guests=(_FakeGuest("global"),))
+    bg = _runtime("B", mode=ROUTER_MODE_BACKGROUND)
+    srv = _server(tmp_path, fg, bg)
+    task = asyncio.create_task(asyncio.sleep(3600))
+    fg.set_inflight(task, "user")
+
+    await srv._inbound_switch_room({"type": "switch_room", "room_id": "B"}, _sink)
+
+    assert task.cancelled()  # global 茶客房不后台续跑 —— in-flight turn 被 drain
+    assert fg.session.closed  # 切走即 close
+    assert "A" not in srv._runtimes
+    assert srv._foreground_id == "B"
+
+
 # ── _delete_room：拒删后台续跑中的房间 ──────────────────────────────────────
 
 
-def test_delete_room_rejects_background_runtime(tmp_path) -> None:
+def test_delete_room_rejects_background_runtime(tmp_path, monkeypatch) -> None:
     """切走后仍在后台续跑的房间不能删 —— rmtree 会抽走后台 turn 正在写的文件。"""
-    from chahua.server_inbound_admin import AdminHandlers
+    from chahua.server_inbound_admin import AdminHandlers, admin
 
     fg = _runtime("A")
     bg = _runtime("B", mode=ROUTER_MODE_BACKGROUND)
     srv = _server(tmp_path, fg, bg)
     notices: list[tuple[str, str]] = []
     srv._emit_notice = lambda sink, *, level, text: notices.append((level, text))  # type: ignore[method-assign]
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        admin, "delete_room",
+        lambda **kw: deleted.append(kw["room_id"]),
+    )
 
     AdminHandlers(srv)._delete_room(room_id="B", sink=_sink)
 
     assert notices and notices[0][0] == "error"  # 拒绝 + error notice
     assert "B" in srv._runtimes  # 后台 runtime 没被动
+    assert deleted == []  # admin.delete_room（rmtree）没被调到 —— 守卫在它之前拦下
 
 
 # ── _aclose_background_runtimes（ws 断开清后台、留前台）──────────────────────
