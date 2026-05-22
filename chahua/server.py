@@ -671,9 +671,16 @@ class ChahuaServer:
     def _maybe_self_destruct_background_runtime(self, runtime: RoomRuntime) -> None:
         """后台 runtime 的 turn / handoff drain 跑完后自毁（P9 §5.1）。
 
-        ``_run_turn`` / ``_run_handoff_turn`` 的 finally 在清掉 in-flight 槽后调。仅当
-        runtime 处于 ``background`` 且已彻底 idle —— in-flight 槽空、handoff 队列空、
-        无 MTS —— 才 emit ``room_background_finished`` 里程碑、close、移出 ``_runtimes``。
+        ``_run_turn`` / ``_run_handoff_turn`` 的 finally 在清掉 in-flight 槽后调。判定
+        极简：runtime 处于 ``background`` 且 **in-flight 槽空** → emit
+        ``room_background_finished`` 里程碑、close、移出 ``_runtimes``。
+
+        **为什么不再额外查 handoff 队列空 / 无 MTS**（与 P9 §5.1 草案的差异）：后台
+        房间**没有 inbound 驱动** —— in-flight task 一旦结束就不会再有任何执行。即便
+        ``_handoff_queue`` 还残留 cap 撞顶没跑的项，也无人 drain（re-drive 会让
+        ``max_consecutive_ai_turns`` cap 失效）；MTS 正常路径在 drain 结束时 ``_advance``
+        已把它收尾成 None。若仍按「队列非空就不回收」会留下一个**永远不会再动**的
+        runtime 泄漏到 ws 断开。残留项是瞬态（与 P9 前切房即弃队列同口径），丢弃可接受。
 
         前台 runtime（``mode == foreground``）一律不动。**切回竞态（§5.2）**：用户在
         后台 turn 收尾瞬间切回该房 —— ``_switch_room`` 先把 ``mode`` 翻 ``foreground``，
@@ -685,13 +692,8 @@ class ChahuaServer:
         """
         if runtime.router.mode != ROUTER_MODE_BACKGROUND:
             return  # 前台 runtime（或已被切回）不自毁。
-        orch = runtime.session.orchestrator
-        if (
-            runtime.inflight_alive()
-            or orch.has_pending_handoff
-            or orch.managed_session is not None
-        ):
-            return  # 还有活（handoff 队列 / MTS）—— 留着续跑。
+        if runtime.inflight_alive():
+            return  # in-flight turn / handoff drain 还在跑 —— 留着续跑。
         runtime.router(
             ChahuaEnvelope(
                 room_id=runtime.room_id, turn_id=None, guest_name=None,

@@ -232,11 +232,11 @@ def test_no_self_destruct_foreground(tmp_path) -> None:
     assert "A" in srv._runtimes
 
 
-def test_no_self_destruct_when_handoff_pending(tmp_path) -> None:
-    """后台 runtime 还有待跑 handoff → 不自毁，留着续跑。"""
+def test_no_self_destruct_when_inflight_alive(tmp_path) -> None:
+    """后台 runtime 的 in-flight turn / drain 还在跑 → 不自毁，留着续跑。"""
     fg = _runtime("A")
     bg = _runtime("B", mode=ROUTER_MODE_BACKGROUND)
-    bg.session.orchestrator.has_pending_handoff = True
+    _make_busy(bg)  # 后台 turn / handoff drain 仍在跑
     srv = _server(tmp_path, fg, bg)
 
     srv._maybe_self_destruct_background_runtime(bg)
@@ -245,17 +245,21 @@ def test_no_self_destruct_when_handoff_pending(tmp_path) -> None:
     assert "B" in srv._runtimes
 
 
-def test_no_self_destruct_when_mts_active(tmp_path) -> None:
-    """后台 runtime 有 MTS → 不自毁（后台 MTS 续跑直到自然收尾）。"""
+def test_self_destruct_reclaims_cap_stalled_queue(tmp_path) -> None:
+    """后台 runtime in-flight 槽空但 _handoff_queue 还有 cap 撞顶残留项 → 仍自毁。
+
+    后台房间无 inbound 驱动，残留项无人 drain；若因「队列非空」不回收会泄漏到
+    ws 断开。残留项是瞬态，丢弃可接受（code-review 跟进的 cap-stall 泄漏修复）。
+    """
     fg = _runtime("A")
     bg = _runtime("B", mode=ROUTER_MODE_BACKGROUND)
-    bg.session.orchestrator.managed_session = object()
+    bg.session.orchestrator.has_pending_handoff = True  # cap 撞顶残留
     srv = _server(tmp_path, fg, bg)
 
     srv._maybe_self_destruct_background_runtime(bg)
 
-    assert not bg.session.closed
-    assert "B" in srv._runtimes
+    assert bg.session.closed
+    assert "B" not in srv._runtimes
 
 
 def test_switch_back_race_no_destroy(tmp_path) -> None:
