@@ -123,8 +123,10 @@ async def _serve(args: argparse.Namespace) -> int:
     try:
         await server.serve_forever(stop)
     finally:
-        # 关 server 持有的当前 session（换房后 self._session 已不是局部 `session`）。
-        server.close()
+        # P9 §5.1：进程退出遍历**所有** RoomRuntime 做 async cancel+drain+close
+        # （含切走后仍在后台续跑的房间）；带 MTS 的 runtime 先 end_managed_session
+        # 再 cancel drain。aclose() 幂等 —— 与 _serve_one finally 的清理重叠也安全。
+        await server.aclose()
         if stdin_watcher_task and not stdin_watcher_task.done():
             stdin_watcher_task.cancel()
         if parent_watcher_task and not parent_watcher_task.done():

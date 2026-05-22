@@ -262,6 +262,34 @@
   cursor: default;
 }
 #rooms li .room-name { color: #444; font-weight: 500; }
+
+/* P9：房间「进行中」徽标 —— 切走后转后台续跑的房间在房间列表上的状态指示。
+   绿点 + 「进行中」文字小药丸，跟在房间名后；脉冲动画提示后台仍在跑。 */
+.room-busy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: #3a7d44;
+  background: #e3f1e4;
+  border-radius: 8px;
+  vertical-align: middle;
+}
+.room-busy-badge::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #4caf50;
+  animation: room-busy-pulse 1.4s ease-in-out infinite;
+}
+@keyframes room-busy-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 #rooms li .room-topic {
   font-size: 11px;
   color: #888;

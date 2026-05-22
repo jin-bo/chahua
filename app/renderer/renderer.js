@@ -22,6 +22,7 @@ import {
   NoticeLevel,
   DEFAULT_PERMISSION,
   TASK_UNTITLED,
+  BACKGROUND_MILESTONE_TYPES,
   buildOwnerOptionData,
   formatTaskLabel,
   formatTaskEventNotice,
@@ -143,11 +144,23 @@ const send = (payload) => ws.send(JSON.stringify(payload));
 // status=cancelled 时清；turn_end(next=ai) 不清（下个 turn_start 会刷新）。非 null 即
 // "AI 链在跑"，submit button 切到「停止」语义，submit handler 路由到 cancel 帧。
 let currentTurnId = null;
+// P9：切到一个后台正在跑 turn 的房间时，前端没有那个 turn 的真实 id（turn_start 在
+// 切房前就发过了）。用这个哨兵占位让「停止」按钮正确显示 —— updateSendButton 只看
+// currentTurnId 是否非空、cancel 帧服务端只认 type 不校验 turn_id。真实 turn_start
+// 到达会覆盖它，turn_end 清掉它。
+const FOREGROUND_BUSY_TURN_PLACEHOLDER = "turn_foreground_busy";
 // 当前 turn 的打分明细。turn_start replace / turn_end 清。
 let scoresByName = new Map();
 // renderSidebar 上次渲染的房间 id —— 用来区分"真正切房" vs "同房 room_info 刷新"
 // （改头像 / 改设置 / 增删茶客都会重发 room_info）。handoff 队列预览只在真正切房时清。
 let handoffRoomId = null;
+// P9：当前前台房间在 envelope 里的 room_id（= room.name，见 chahua/events.py）。
+// 从 room_info envelope 顶层 room_id 捕获。后台房间的里程碑事件 room_id 与此不同 ——
+// 据此把它们分流给 handleBackgroundMilestone，不让它们污染前台聊天 / 任务面板。
+let foregroundRoomId = null;
+// P9：当前判定「进行中」的后台房间 envelope room_id 集合。后台里程碑事件 add、
+// room_background_finished remove；renderRoomsList 据此渲染房间列表「进行中」徽标。
+const backgroundActiveRooms = new Set();
 // 茶客行 → 打分 span 的引用。sidebar 装好后填，turn_start/turn_end 直接改文字，
 // 不重建 DOM（避免头像 / 徽章闪烁）。
 const scoreSpansByName = new Map();
@@ -572,6 +585,16 @@ function renderSidebar(roomInfo) {
     // P8.3：MTS 与 handoff 队列同瞬态——切房即清状态条。
     managedSession?.reset();
     handoffRoomId = nextRoomId;
+    // P9：切房后旧房在后台续跑 —— 它的 turn_end 不再回到本视图，currentTurnId
+    // 不会被旧房收尾事件清掉。必须按**新前台房间**的 busy 快照重置「发送/停止」
+    // 按钮：从忙房切到闲房 → 复原成「发送」；切进一个后台仍在跑的房 → 维持
+    // 「停止」（哨兵占位，真实 turn_start/turn_end 后续会校准）。同房刷新不进
+    // 此分支，currentTurnId 不动（本房 turn 仍在跑时不该误清）。
+    const nextRoom = (roomInfo.rooms_available ?? []).find(
+      (r) => r.room_id === nextRoomId,
+    );
+    currentTurnId = nextRoom?.busy ? FOREGROUND_BUSY_TURN_PLACEHOLDER : null;
+    updateSendButton();
   }
   // sidebar 全量重渲会替掉头像 DOM —— 旧 anchor 一旦被 detach，popover 的"贴右侧"
   // 位置就指向虚空了，干脆关掉。
@@ -597,6 +620,16 @@ function renderSidebar(roomInfo) {
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
   maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 20;
   renderGuests();
+  // P9：从权威快照 rooms_available[].busy 重建「进行中」后台房集合 —— 切房 / 重连后
+  // 这帧是真理源（剔除已结束的、补上切走后转后台的）。后台房集合按 envelope room_id
+  // （= room.name）键，与 discover_rooms 的 r.name 同口径；当前房不计（自身活动由
+  // 聊天区体现，不需徽标）。随后到的后台里程碑事件再增量维护这个集合。
+  backgroundActiveRooms.clear();
+  for (const r of roomInfo.rooms_available ?? []) {
+    if (r.busy && r.room_id !== roomInfo.current_room_id) {
+      backgroundActiveRooms.add(r.name);
+    }
+  }
   renderRoomsList(roomInfo.rooms_available, roomInfo.current_room_id);
   // room_info 到达 → composer 解锁；之前 onopen 不再 enable，避免 userDisplayName
   // 跳变窗口（用户在 "我" 状态发了一条，第二条又变成实际显示名）。
@@ -612,6 +645,9 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
   for (const r of rooms) {
     const li = document.createElement("li");
     li.dataset.roomId = r.room_id;
+    // P9：后台房徽标按 envelope room_id（= room.name）匹配 —— 存 r.name 供
+    // refreshRoomBadges 查（envelope 顶层 room_id 用 room.name，不是目录名）。
+    li.dataset.roomName = r.name || r.room_id;
     if (r.room_id === currentRoomId) li.classList.add("current");
     // text 块外裹 .room-meta，方便 row-remove 用 margin-left:auto 推到右侧。
     const meta = document.createElement("div");
@@ -649,6 +685,30 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
       li.appendChild(remove);
     }
     roomsEl.appendChild(li);
+  }
+  refreshRoomBadges();
+}
+
+// P9：按 backgroundActiveRooms 集合刷新房间列表「进行中」徽标 —— 不重建整个列表
+// （避免后台事件高频到达时房间列表闪烁）。徽标只挂非当前房；当前房自身活动由聊天区
+// 体现。徽标元素增量挂 / 摘，不动其余 DOM。
+function refreshRoomBadges() {
+  // [...children] 快照 —— 当前循环只改 li 内的徽标 span、不增删 li，但 children 是
+  // live HTMLCollection，快照后即便将来改成增删 li 也不会漏元素。
+  for (const li of [...roomsEl.children]) {
+    const active =
+      !li.classList.contains("current") &&
+      backgroundActiveRooms.has(li.dataset.roomName);
+    let badge = li.querySelector(".room-busy-badge");
+    if (active && !badge) {
+      badge = document.createElement("span");
+      badge.className = "room-busy-badge";
+      badge.textContent = "进行中";
+      badge.title = "该房间正在后台续跑";
+      li.querySelector(".room-name")?.appendChild(badge);
+    } else if (!active && badge) {
+      badge.remove();
+    }
   }
 }
 
@@ -706,12 +766,44 @@ textInput.addEventListener("blur", () => {
 
 // ── envelope 分派 ────────────────────────────────────────────────
 
+// P9：后台房间里程碑事件 —— 只维护「进行中」房间集合 + 刷新房间列表徽标。
+// room_background_finished = 后台 runtime 跑完自毁 → 该房不再「进行中」；其余里程碑
+// （turn_* / message_end / task_* / managed_session_*）→ 标记该房后台仍在跑。
+function handleBackgroundMilestone(env) {
+  const roomId = env.room_id;
+  if (!roomId) return;
+  if (env.type === EventType.ROOM_BACKGROUND_FINISHED) {
+    backgroundActiveRooms.delete(roomId);
+    console.debug("[room_background_finished]", roomId);
+  } else {
+    backgroundActiveRooms.add(roomId);
+  }
+  refreshRoomBadges();
+}
+
 function handleEnvelope(env) {
+  // P9：后台房间里程碑分流 —— envelope.room_id 与前台不同、且属后台白名单类型
+  // （turn_* / message_end / task_info / task_artifact_added / managed_session_* /
+  // room_background_finished）→ 当作后台房间里程碑，只更新房间列表「进行中」徽标，
+  // 不让它污染前台聊天 / 任务面板 / 调试抽屉。控制面事件（room_info / room_history
+  // / notice 等）不在白名单内 —— 切房时新房 room_info 的 room_id 虽 ≠ 旧前台，仍
+  // 照常落到下面 switch 并由 ROOM_INFO 分支刷新 foregroundRoomId。
+  if (
+    foregroundRoomId !== null &&
+    env.room_id &&
+    env.room_id !== foregroundRoomId &&
+    BACKGROUND_MILESTONE_TYPES.has(env.type)
+  ) {
+    handleBackgroundMilestone(env);
+    return;
+  }
   // 调试抽屉旁路消费 —— 模块内部按 env.type dispatch；ROOM_INFO 的 reset 在
   // renderSidebar 里调（与 inFlight / proposalCard 同步清）。
   debugPanel.onEnvelope(env);
   switch (env.type) {
     case EventType.ROOM_INFO:
+      // 前台房间在 envelope 里的 room_id（= room.name）—— 后台分流的判定基准。
+      foregroundRoomId = env.room_id ?? null;
       renderSidebar(env.data ?? {});
       return;
     case EventType.ROOM_HISTORY:

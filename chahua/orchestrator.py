@@ -231,6 +231,19 @@ class Orchestrator:
         entry = self._guests.get(name)
         return entry.guest if entry is not None else None
 
+    def snapshot_inflight_message(self) -> Optional[dict]:
+        """房间里当前正在流式输出的那条消息快照；无则 ``None``。
+
+        P9 切回一个 turn 在后台续跑的房间时，``emit_room_snapshot`` 据此补发进行中
+        消息的 ``message_start`` + ``message_delta(partial_text)``。轮内发言串行
+        （含 panel），任一时刻至多一条 in-flight —— 遍历茶客取第一条非 None。
+        """
+        for entry in self._guests.values():
+            snap = entry.guest.inflight_snapshot()
+            if snap is not None:
+                return snap
+        return None
+
     # ── 清空 ──────────────────────────────────────────────────────────
 
     def reset_room(self) -> None:
@@ -314,6 +327,22 @@ class Orchestrator:
         """当前托管会话运行态；``None`` = 无托管。server inbound 校验 / 生命周期
         分支读这个公开访问器（``_managed_session`` 私有）。"""
         return self._managed_session
+
+    def emit_managed_session_snapshot(self, sink: EnvelopeSink) -> None:
+        """切回托管中的房间时重发 MTS 快照（P9 阶段 9.3.2）。
+
+        P9 之前「``emit_room_snapshot`` 不重投 MTS」成立的前提是「MTS 不跨断线
+        存活」；P9 让 MTS 能在后台续跑，前提被推翻 —— 切回一个「托管中」的后台
+        房间，前端「托管中」状态条 / 「停止托管」按钮要能自给自足重建，不能依赖
+        前端缓存早先收过的 ``managed_session_started``（那只在「MTS 启动时恰好在
+        前台」才成立，脆弱）。
+
+        无 MTS → 空操作。复用 ``managed_session_started`` envelope，``budget`` 是
+        **当前剩余**预算（已被 ``_advance`` 扣减过）—— 前端按收到的值复位倒计时。
+        """
+        ms = self._managed_session
+        if ms is not None:
+            self._emit_managed_session_started(sink, ms)
 
     def start_managed_session(
         self, sink: EnvelopeSink, *, task_id: str, manager_guest: str, budget: int,

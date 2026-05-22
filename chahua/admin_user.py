@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import tomllib
 from pathlib import Path
 from typing import Optional
 
 from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
-from .admin_room import _write_text_and_validate
-from .config import RoomConfig, read_avatar_data_uri
+from .admin_room import _other_room_names, _write_text_and_validate
+from .config import RoomConfig, RoomConfigError, read_avatar_data_uri
 
 
 # USER.md 体量上限：64KB —— USER.md 本质是几段偏好 + 自我介绍，正常用户写 1KB 不到。
@@ -92,6 +93,20 @@ def update_room_toml(room_dir: Path, content: str, *, paths: Paths) -> RoomConfi
     if len(encoded) > _ROOM_TOML_MAX_BYTES:
         raise ValueError(
             f"room.toml 太大（{len(encoded)} bytes，上限 {_ROOM_TOML_MAX_BYTES}）"
+        )
+    # P9：[room].name 跨房唯一 —— 同名会让后台房间里程碑分流（renderer.js）误判，
+    # 把后台房的事件污染进当前房。坏 toml 不在这里报，留给下面 _write_text_and_validate。
+    try:
+        new_name = tomllib.loads(content).get("room", {}).get("name")
+    except tomllib.TOMLDecodeError:
+        new_name = None
+    if (
+        isinstance(new_name, str)
+        and new_name.strip()
+        and new_name.strip() in _other_room_names(paths, exclude_room_id=room_dir.name)
+    ):
+        raise RoomConfigError(
+            f"房间名「{new_name.strip()}」已被占用 —— 房间名须跨房唯一"
         )
     return _write_text_and_validate(room_dir, content, paths=paths)
 

@@ -28,6 +28,9 @@ agentao 的原生 :class:`agentao.transport.AgentEvent` **不带** 这些字段�
 
 **room_id**：P2.2 没有稳定 room id（room.toml 没字段），envelope 里塞 ``room.name``。
 P4 加 ``[room].id`` 后换稳定 ID（display name 可变；envelope 路由不该依赖）。
+P9 起前端据 envelope ``room_id`` 分流前台 / 后台房间里程碑 —— 在 ``[room].id`` 落地前，
+``admin`` 层强制 ``[room].name`` 跨房唯一（建房 / raw 编辑 toml 两入口），让 ``room.name``
+当下可安全充当路由 id。
 
 **id mint**：:func:`new_message_id` 与 :func:`new_turn_id` 同根，由茶话室所有 ID 来源
 集中在本模块；``room.py`` 也走这个 helper（不再各自 ``secrets.token_hex``）。
@@ -145,6 +148,13 @@ class ChahuaEventType(str, Enum):
     MANAGED_SESSION_STARTED = "managed_session_started"
     MANAGED_SESSION_ADVANCED = "managed_session_advanced"
     MANAGED_SESSION_ENDED = "managed_session_ended"
+
+    # P9 切房后房间后台续跑（docs/P9-切房后房间后台续跑.md §4 / §5）。hint 型里程碑：
+    # 切走后仍 busy 的房间转后台续跑，其 turn / handoff drain 跑完、runtime 自毁时
+    # emit 一次。不进 transcript / 不触发 AI。阶段 9.2 后台 router 是 NOOP，本事件被
+    # 丢弃（靠切回快照）；阶段 9.3.1 后台白名单放行后才真送达前端更新房间列表徽标。
+    # 新增事件类型——旧前端遇未知 type WARN 后忽略（向前兼容），不 bump schema_version。
+    ROOM_BACKGROUND_FINISHED = "room_background_finished"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

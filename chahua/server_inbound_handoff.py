@@ -166,9 +166,12 @@ class HandoffHandlers:
 
         if self.server._inflight_turn_task is None:
             snapshot_task_id = self.server.task._snapshot_active_task_id()
-            self.server._set_inflight(
+            # P9 9.1.3：drain wrapper 绑到具体 runtime（此阶段只有前台一个）——
+            # turn 事件走 runtime.router、收尾清 runtime 自己的槽。
+            runtime = self.server._foreground_runtime
+            runtime.set_inflight(
                 asyncio.create_task(
-                    self.server._run_handoff_turn(sink, task_id=snapshot_task_id),
+                    self.server._run_handoff_turn(runtime, task_id=snapshot_task_id),
                     name="chahua-handoff-turn",
                 ),
                 INFLIGHT_KIND_HANDOFF,

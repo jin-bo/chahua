@@ -213,6 +213,13 @@ class TeaGuest:
             "skills": skills,
         }
 
+    def inflight_snapshot(self) -> Optional[dict]:
+        """本茶客当前正在流式输出的消息快照；不在 ``speak()`` 中 → ``None``。
+
+        P9 切回房间重发快照用（见 :meth:`ChahuaTransport.inflight_snapshot`）。
+        """
+        return self._transport.inflight_snapshot()
+
     # ── 主入口 ────────────────────────────────────────────────────────────
 
     async def speak(

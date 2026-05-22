@@ -80,6 +80,15 @@
   background: #e3dcc4;
   border-radius: 4px;
 }
+/* P9：切回房间时已在后台进行的 turn —— 明细不全提示。偏灰，与 handoff-note 区分。 */
+.debug-turn-partial-note {
+  margin-bottom: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #6a6a6a;
+  background: #ececec;
+  border-radius: 4px;
+}
 .debug-turn.debug-turn-collapsed .debug-turn-chevron {
   transform: rotate(-90deg);
 }

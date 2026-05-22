@@ -54,6 +54,8 @@ from chahua.server import (
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
 
+from chahua.events import NOOP_SINK
+from chahua.room_runtime import RoomEventRouter, RoomRuntime
 from chahua.server_inbound_admin import AdminHandlers
 from chahua.server_inbound_handoff import HandoffHandlers
 from chahua.server_inbound_io import IOHandlers
@@ -171,8 +173,19 @@ class _SpyServer(ChahuaServer):
     """
 
     def __init__(self) -> None:  # type: ignore[override]
-        self._inflight_turn_task: asyncio.Task | None = None
-        self._inflight_kind: str | None = None
+        # P9 9.1.3：``_inflight_*`` / ``_session`` 已是读写前台 runtime 的 property。
+        # 装一个 spy RoomRuntime（``session=None`` —— 路由测不该读 session，真读到
+        # ``None._xxx`` 仍 AttributeError 暴露依赖），让那些 property 有处可落。
+        self._runtimes = {
+            "spy": RoomRuntime(
+                room_id="spy",
+                session=None,  # type: ignore[arg-type]
+                router=RoomEventRouter(NOOP_SINK),
+            )
+        }
+        self._foreground_id = "spy"
+        self._inflight_turn_task = None
+        self._inflight_kind = None
         self.calls: list[tuple[str, dict]] = []
         self.cancel_drain_count = 0
         self.emit_room_info_count = 0
@@ -211,13 +224,18 @@ class _SpyServer(ChahuaServer):
 
     # ── core inbound workers 仍挂 ChahuaServer 自身：switch / clear。──────────
 
+    def _foreground_session_has_global_guest(self) -> bool:  # type: ignore[override]
+        # 路由 spy 不挂真 _session —— switch_room 路由测不关心 global 茶客分流。
+        return False
+
     def _switch_room(self, room_id, sink):  # type: ignore[override]
         self.calls.append(("_switch_room", {"room_id": room_id}))
 
     def _clear_room(self, sink):  # type: ignore[override]
         self.calls.append(("_clear_room", {}))
 
-    async def _run_turn(self, text, sink, *, task_id=None):  # type: ignore[override]
+    async def _run_turn(self, runtime, text, *, task_id=None):  # type: ignore[override]
+        # P9 9.1.3：_run_turn 改为「针对某 runtime」—— spy 同步签名。
         self.run_turn_args.append(text)
 
 
@@ -269,7 +287,8 @@ async def test_switch_room_ok(srv: _SpyServer):
     await srv._handle_inbound(
         {"type": INBOUND_SWITCH_ROOM, "room_id": "p3"}, _sink
     )
-    assert srv.cancel_drain_count == 1
+    # P9：切房不再 cancel —— 旧前台若 busy 由 _switch_room 转后台续跑。
+    assert srv.cancel_drain_count == 0
     assert srv.calls == [("_switch_room", {"room_id": "p3"})]
 
 

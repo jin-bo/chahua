@@ -144,6 +144,25 @@ class ChahuaTransport(SdkTransport):
         进 speak 时被 snapshot 的归属，与 message_* envelope 同源。"""
         return self._task_id
 
+    def inflight_snapshot(self) -> Optional[dict]:
+        """当前 bind 中的 in-flight 消息快照 —— 未 bind（无活动 ``speak()``）→ ``None``。
+
+        P9 切回一个 turn 在后台续跑的房间时，``emit_room_snapshot`` 据此补发那条
+        进行中消息的 ``message_start`` + ``message_delta(partial_text)``，让切回前
+        已流出的内容立即在聊天区 / 调试面板成形，不必干等 ``message_end``。
+        ``partial_text`` 是已 emit 过 delta 的 chunk 拼接 —— 与后续真实 delta 严格
+        续接（单事件循环线程，快照在 turn 恢复前同步发完）。
+        """
+        if self._message_id is None:
+            return None
+        return {
+            "turn_id": self._turn_id,
+            "message_id": self._message_id,
+            "guest_name": self._guest_name,
+            "task_id": self._task_id,
+            "partial_text": self.partial_text,
+        }
+
     # ── 给上层 emit 用（message_start / message_end 走这里） ───────────────
 
     def emit_chahua(
