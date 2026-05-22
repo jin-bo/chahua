@@ -678,7 +678,9 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
 // （避免后台事件高频到达时房间列表闪烁）。徽标只挂非当前房；当前房自身活动由聊天区
 // 体现。徽标元素增量挂 / 摘，不动其余 DOM。
 function refreshRoomBadges() {
-  for (const li of roomsEl.children) {
+  // [...children] 快照 —— 当前循环只改 li 内的徽标 span、不增删 li，但 children 是
+  // live HTMLCollection，快照后即便将来改成增删 li 也不会漏元素。
+  for (const li of [...roomsEl.children]) {
     const active =
       !li.classList.contains("current") &&
       backgroundActiveRooms.has(li.dataset.roomName);

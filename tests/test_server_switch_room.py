@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 
 import chahua.server as server_mod
-from chahua.events import NOOP_SINK
+from chahua.events import ChahuaEventType, NOOP_SINK
 from chahua.room_runtime import (
     ROUTER_MODE_BACKGROUND,
     ROUTER_MODE_FOREGROUND,
@@ -56,13 +56,18 @@ class _FakeGuest:
 
 
 class _FakeSession:
-    def __init__(self, name: str, *, guests: tuple = ()) -> None:
+    def __init__(
+        self, name: str, *, guests: tuple = (), room_name: str | None = None,
+    ) -> None:
+        # ``name`` 是房间目录名（注册表 key）；``room.name`` 默认同名，可经
+        # ``room_name`` 与目录名拉开 —— envelope 顶层 room_id 走 ``room.name``。
         self.room_config = type(
             "_RC", (), {
                 "room_dir": type("_D", (), {"name": name})(),
                 "guests": list(guests),
             },
         )()
+        self.room = type("_Room", (), {"name": room_name or name})()
         self.orchestrator = _FakeOrch()
         self.closed = False
 
@@ -72,10 +77,13 @@ class _FakeSession:
 
 def _runtime(
     room_id: str, *, mode: str = ROUTER_MODE_FOREGROUND, guests: tuple = (),
+    room_name: str | None = None,
 ) -> RoomRuntime:
     return RoomRuntime(
         room_id=room_id,
-        session=_FakeSession(room_id, guests=guests),  # type: ignore[arg-type]
+        session=_FakeSession(  # type: ignore[arg-type]
+            room_id, guests=guests, room_name=room_name,
+        ),
         router=RoomEventRouter(NOOP_SINK, mode=mode),
     )
 
@@ -234,6 +242,29 @@ def test_self_destruct_background_idle(tmp_path) -> None:
 
     assert bg.session.closed
     assert "B" not in srv._runtimes
+
+
+def test_self_destruct_emits_room_background_finished_with_room_name(tmp_path) -> None:
+    """room_background_finished 的 envelope room_id 必是 room.name，不是目录名。
+
+    所有里程碑事件（turn_* / message_end / managed_session_*）envelope 顶层 room_id
+    都用 room.name；room_background_finished 若用 runtime.room_id（目录名），目录名
+    ≠ room.name 时前端 backgroundActiveRooms 的 delete 会落空、徽标永不清除。
+    """
+    captured: list = []
+    fg = _runtime("A")
+    # 目录名 "p3-bg"、room.name "黄河路" —— 故意拉开（shipped 房间的常态）。
+    bg = _runtime("p3-bg", mode=ROUTER_MODE_BACKGROUND, room_name="黄河路")
+    bg.router.ws_sink = captured.append
+    srv = _server(tmp_path, fg, bg)
+
+    srv._maybe_self_destruct_background_runtime(bg)
+
+    assert len(captured) == 1
+    env = captured[0]
+    assert env.type is ChahuaEventType.ROOM_BACKGROUND_FINISHED
+    # room.name，不是注册表 key / 目录名 "p3-bg"。
+    assert env.room_id == "黄河路"
 
 
 def test_no_self_destruct_foreground(tmp_path) -> None:

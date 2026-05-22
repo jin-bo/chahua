@@ -698,9 +698,15 @@ class ChahuaServer:
             return  # 前台 runtime（或已被切回）不自毁。
         if runtime.inflight_alive():
             return  # in-flight turn / handoff drain 还在跑 —— 留着续跑。
+        # envelope 顶层 room_id 用 ``room.name`` —— 与 orchestrator / transport 发的
+        # turn_* / message_end / managed_session_* 等所有里程碑同口径（见
+        # chahua/events.py：envelope room_id 塞 room.name）。**不能**用
+        # ``runtime.room_id``（= 房间目录名）：前端 backgroundActiveRooms 集合按
+        # room.name 键，目录名 ≠ room.name 时 room_background_finished 的 delete 落空、
+        # 「进行中」徽标永不清除。
         runtime.router(
             ChahuaEnvelope(
-                room_id=runtime.room_id, turn_id=None, guest_name=None,
+                room_id=runtime.session.room.name, turn_id=None, guest_name=None,
                 message_id=None, type=ChahuaEventType.ROOM_BACKGROUND_FINISHED,
                 data={},
             )
