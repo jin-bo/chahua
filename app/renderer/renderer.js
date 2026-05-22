@@ -24,7 +24,6 @@ import {
   TASK_UNTITLED,
   BACKGROUND_MILESTONE_TYPES,
   buildOwnerOptionData,
-  formatTaskLabel,
   formatTaskEventNotice,
   formatManagedSessionNotice,
   isTaskClosed,
@@ -58,6 +57,8 @@ import { createSplitter } from "./splitter.js";
 import { createProposalCard } from "./proposal_card.js";
 import { createComposerTaskChip } from "./composer_task_chip.js";
 import { createChatStream } from "./chat_stream.js";
+import { createMessageFilter } from "./message_filter.js";
+import { createCommands } from "./commands.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -221,23 +222,6 @@ function updateNewTaskBtn() {
 const SEND_ICON = "↑";
 const STOP_ICON = "■";
 
-// ``/help`` 输出文案 —— 用 markdown 渲，居中系统气泡承载。**Web 与 CLI 两面 help 各
-// 自维护本面支持的命令**：CLI 端的 ``_HELP_LINES`` 含 ``/info`` / ``/quit``（REPL 才
-// 有意义），Web 端含 ``/task``（CLI 走 ``@<名字>`` 路径不开任务）。加 / 改命令时
-// 改本面的那份即可，不必试图 cross-runtime 同步。
-const HELP_TEXT = [
-  "**chahua 系统命令**",
-  "",
-  "- `/help` 或 `/?` —— 显示本帮助",
-  "- `/task <标题>` —— 新建任务（已有 active 时服务端会拒）",
-  "- `/clear` 或 `/new` —— 清空整间房间聊天（重置 transcript / 摘要 / 茶客会话窗口）",
-  "- `/clear task` —— 清空当前任务的全部产物（仅删 `artifacts/`，任务本身保留）",
-  "- `/tools <茶客名>` —— 查看某位茶客 agent 注册的工具",
-  "- `/skills <茶客名>` —— 查看某位茶客可用的 skills",
-  "",
-  "_本帮助是本地提示，不进 transcript；刷新 / 切房后消失。_",
-].join("\n");
-
 // GUEST_CAPS_INFO envelope → system 气泡文案。view 决定列 tools 还是 skills 段
 // （permission / guest 两段共用）。description 取首行 + 截断，避免长描述刷屏。
 function formatGuestCaps(data, view) {
@@ -335,123 +319,10 @@ function requestReview(messageId, anchorBtn) {
   })));
 }
 
-// ── 消息上的任务 chip + filter 视图（P5.2.10）─────────────────────────────
-//
-// chip 状态随 taskState 变 —— task_panel 没把消息 chip 文案当模块状态存（DOM 即真
-// 源），refresh 是幂等的"看一眼 taskState、按需改 chip"。新挂的 li 直接调一次
-// afterAppendMessage 而不是等 subscriber 全局 walk（walk N 条消息比单挂贵）。
-
-let _filterTaskId = null;
-let _filterBannerEl = null;
-
-function getLiTaskId(li) {
-  return li.dataset.taskId || null;
-}
-
-function refreshMessageTaskChip(li) {
-  const taskId = getLiTaskId(li);
-  let chip = li.querySelector(".message-task-chip");
-  const removeChip = () => { if (chip) { chip.remove(); chip = null; } };
-  if (!taskId) {
-    removeChip();
-    return;
-  }
-  const activeId = taskState.getState().activeTaskId;
-  // active 任务的消息不挂 chip —— 默认 chat 主流就是 active，挂了反而吵。
-  if (taskId === activeId) {
-    removeChip();
-    return;
-  }
-  // task 还没加载（room_history 先于 task_info）/ 被删了 —— 不挂；下次 subscriber 补。
-  const task = taskState.getTaskById(taskId);
-  if (!task) {
-    removeChip();
-    return;
-  }
-  const text = formatTaskLabel(task);
-  if (chip) {
-    if (chip.textContent !== text) chip.textContent = text;
-    return;
-  }
-  chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "message-task-chip";
-  chip.textContent = text;
-  chip.title = `进入任务「${task.title || TASK_UNTITLED}」的 filter 视图`;
-  chip.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    enterMessageFilter(taskId);
-  });
-  const bubble = li.querySelector(".bubble");
-  if (bubble) bubble.appendChild(chip);
-}
-
-function refreshAllMessageTaskChips() {
-  for (const li of messagesEl.querySelectorAll("li[data-task-id]")) {
-    refreshMessageTaskChip(li);
-  }
-}
-
-function applyMessageFilterTo(li) {
-  if (_filterTaskId === null) {
-    li.classList.remove("filtered-out");
-    return;
-  }
-  li.classList.toggle("filtered-out", getLiTaskId(li) !== _filterTaskId);
-}
-
-function applyMessageFilterAll() {
-  for (const li of messagesEl.querySelectorAll("li")) applyMessageFilterTo(li);
-}
-
-// 三处 append 调用站（appendBubble / startStreamingMessage / endStreamingMessage 的
-// 无 start 分支）的尾部都做一样的事 —— 刷 chip + 应用 filter。单出口，将来加 third
-// concern（搜索高亮 / 已读标记等）也只动这里。
-function afterAppendMessage(li) {
-  refreshMessageTaskChip(li);
-  applyMessageFilterTo(li);
-}
-
-function enterMessageFilter(taskId) {
-  _filterTaskId = taskId;
-  ensureFilterBanner();
-  updateFilterBannerText();
-  _filterBannerEl.hidden = false;
-  applyMessageFilterAll();
-}
-
-function exitMessageFilter() {
-  if (_filterTaskId === null) return;
-  _filterTaskId = null;
-  if (_filterBannerEl) _filterBannerEl.hidden = true;
-  applyMessageFilterAll();
-}
-
-function ensureFilterBanner() {
-  if (_filterBannerEl) return;
-  _filterBannerEl = document.createElement("div");
-  _filterBannerEl.className = "message-filter-banner";
-  _filterBannerEl.hidden = true;
-  const text = document.createElement("span");
-  text.className = "message-filter-banner-text";
-  _filterBannerEl.appendChild(text);
-  const exit = document.createElement("button");
-  exit.type = "button";
-  exit.className = "message-filter-banner-exit";
-  exit.textContent = "返回全部";
-  exit.addEventListener("click", exitMessageFilter);
-  _filterBannerEl.appendChild(exit);
-  // 插到 messagesEl 紧前 —— flex 容器 #main 里同级 sibling，挡不到聊天区域滚动。
-  messagesEl.parentNode.insertBefore(_filterBannerEl, messagesEl);
-}
-
-function updateFilterBannerText() {
-  if (!_filterBannerEl || _filterTaskId === null) return;
-  const task = taskState.getTaskById(_filterTaskId);
-  const title = task ? task.title || TASK_UNTITLED : _filterTaskId;
-  _filterBannerEl.querySelector(".message-filter-banner-text").textContent =
-    `仅显示任务「${title}」的消息 —— 其余隐起来`;
-}
+// 消息上的任务 chip + filter 视图（P5.2.10）—— 见 ./message_filter.js。filter 状态
+// 全封在模块内，renderer 只通过 afterAppendMessage / exitFilter / onTaskStateChange
+// 三个出口交互。
+const messageFilter = createMessageFilter({ messagesEl, taskState });
 
 // 打分写到 sidebar 各茶客行的 ``.guest-score`` span 上（不是主聊天区）。
 // scoresByName 没该茶客 → 清空 span（turn_end 走这条路径，统一清）。
@@ -490,7 +361,7 @@ const {
   makeAvatar,
   makeUserAvatar,
   stickToBottom,
-  afterAppendMessage,
+  afterAppendMessage: messageFilter.afterAppendMessage,
   onRequestReview: requestReview,
 });
 
@@ -567,7 +438,7 @@ function renderSidebar(roomInfo) {
   scoresByName = new Map();
   scoreSpansByName.clear();
   // 切房 / 重连 / 清空 → filter 视图无意义，强 exit 让新房间从全量视角起步。
-  exitMessageFilter();
+  messageFilter.exitFilter();
   messagesEl.replaceChildren();
   upload.clear();
   // propose 卡片去重指纹也按房间边界清 —— 否则跨房间同 proposer/kind/payload 会被错误折叠。
@@ -1359,12 +1230,8 @@ createSplitter(
 // 丢失时仍 disable，防止悄悄允许开第二个（docs §7.1 实现项第 4 条）。
 //
 // 任务房间消息 chip + filter banner 文案也跟着 taskState 走 —— 任务改名 / 切 active /
-// 关任务都靠这条 subscriber 顺着重刷。filter banner 自身的可见性由 enter / exit 控制；
-// 这里只刷文案。
-taskState.subscribe(() => {
-  refreshAllMessageTaskChips();
-  if (_filterTaskId !== null) updateFilterBannerText();
-});
+// 关任务都靠这条 subscriber 顺着重刷（见 ./message_filter.js）。
+taskState.subscribe(messageFilter.onTaskStateChange);
 
 taskState.subscribe((state) => {
   const active = taskState.getActiveTask();
@@ -1523,6 +1390,22 @@ roomNameEl.addEventListener("dblclick", (ev) => {
   showRoomActionsPopover(roomNameEl);
 });
 
+// 斜杠命令处理器 —— composer submit 时 tryHandle(text) 优先拦截。clearInput 复刻
+// 原内联的"清空 textarea + 重算高度"两步。
+const commands = createCommands({
+  isConnected: () => connected,
+  send,
+  setStatus,
+  appendBubble,
+  taskState,
+  upload,
+  clearRoom: clearCurrentRoom,
+  clearInput: () => {
+    textInput.value = "";
+    autoResizeTextarea();
+  },
+});
+
 composer.addEventListener("submit", (ev) => {
   ev.preventDefault();
   if (!dropdownEl.hidden) {
@@ -1544,92 +1427,9 @@ composer.addEventListener("submit", (ev) => {
     return;
   }
   const text = textInput.value.trim();
-  // /help（或 /?）—— 在聊天区里以系统气泡显示可用斜杠命令清单。本地 UI 行为，不
-  // 走 server 帧、不进 transcript；刷新 / 切房 / clear 都会消失。
-  if (text === "/help" || text === "/?") {
-    appendBubble({ kind: "system", text: HELP_TEXT });
-    textInput.value = "";
-    autoResizeTextarea();
-    return;
-  }
-  // /tools <茶客名> / /skills <茶客名> —— 查某位茶客 agent 的 tools / 可用 skills。
-  // 两者走同一只读 inbound list_guest_caps；view 随帧发出、回包原样带回，前端按它
-  // 裁剪显示哪段（不靠全局态，多查询并发不串台）。本地查询，不进 transcript。
-  {
-    const isTools = text === "/tools" || text.startsWith("/tools ");
-    const isSkills = text === "/skills" || text.startsWith("/skills ");
-    if (isTools || isSkills) {
-      const cmd = isTools ? "/tools" : "/skills";
-      const guest = text.slice(cmd.length).trim();
-      if (!guest) {
-        setStatus("error", `${cmd} 后面要跟茶客名`);
-        return;
-      }
-      if (!connected) {
-        setStatus("error", "未连接服务端");
-        return;
-      }
-      send({
-        type: Inbound.LIST_GUEST_CAPS,
-        guest,
-        view: isTools ? "tools" : "skills",
-      });
-      textInput.value = "";
-      autoResizeTextarea();
-      return;
-    }
-  }
-  // 斜杠命令 —— /task <title> 走 open_task inbound 而非 user_message。已有任务等
-  // server 端拒绝（NOTICE error），前端不重复判定，让两条路径决断口径完全同源。
-  if (text.startsWith("/task ") || text === "/task") {
-    const title = text.slice("/task".length).trim();
-    if (!title) {
-      setStatus("error", "/task 后面要跟任务标题");
-      return;
-    }
-    if (upload.hasPending()) {
-      setStatus("error", "新建任务前先 × 掉待发文件 —— 任务不接附件");
-      return;
-    }
-    send({ type: Inbound.OPEN_TASK, title, goal: "", owner: null });
-    setStatus("", `新建任务「${title}」…`);
-    textInput.value = "";
-    autoResizeTextarea();
-    return;
-  }
-  // /clear task：清空当前 active 任务的全部产物（仅删 artifacts/，任务本身保留）。
-  // 必须排在 /clear / /new 之前 —— 否则 startsWith 边界让 "/clear task" 被前缀吞掉。
-  if (text === "/clear task" || text === "/clear-task") {
-    const active = taskState.getActiveTask();
-    if (!active) {
-      setStatus("error", "/clear task 需要先选中一个任务");
-      return;
-    }
-    const count = Array.isArray(active.artifacts) ? active.artifacts.length : 0;
-    if (count === 0) {
-      setStatus("", `任务「${active.title}」没有产物`);
-      textInput.value = "";
-      autoResizeTextarea();
-      return;
-    }
-    if (!window.confirm(
-      `确定清空任务「${active.title}」的全部产物（${count} 个文件）？\n任务本身（决策 / 状态 / 摘要）保留，仅删 artifacts/ 下的文件。`,
-    )) return;
-    send({ type: Inbound.CLEAR_TASK_ARTIFACTS, task_id: active.id });
-    setStatus("", `清空任务「${active.title}」的产物…`);
-    textInput.value = "";
-    autoResizeTextarea();
-    return;
-  }
-  // /clear 与 /new：键盘快捷的"清空聊天"，与房间菜单同入口共用 confirm —— 滑指误打
-  // /task 边界（如想 /task 打成 /clear）有 confirm 兜底；clearCurrentRoom 内部不连接
-  // 时 noop，所以此处不再判 connected。
-  if (text === "/clear" || text === "/new") {
-    textInput.value = "";
-    autoResizeTextarea();
-    clearCurrentRoom();
-    return;
-  }
+  // 斜杠命令（/help /tools /skills /task /clear task /clear /new）—— 见 ./commands.js。
+  // 命中即在模块内执行并返回 true，普通发送路径不再走。
+  if (commands.tryHandle(text)) return;
   // 文件不空时即使 text 为空也允许发送 —— 用户拖了文件就是有意图。
   if (!text && !upload.hasPending()) return;
   const files = upload.snapshotRels();
