@@ -11,6 +11,7 @@
 - 后台 runtime turn 跑完自毁；前台 / 仍有活（handoff 队列 / MTS）的不自毁。
 - 切回竞态：mode 先翻 foreground，自毁判定随即不成立。
 - ``_aclose_background_runtimes``：ws 断开清后台、留前台。
+- ``max_background_rooms`` 软上限：超限淘汰最早转入后台的房间（9.4.1）。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 import asyncio
 
 import chahua.server as server_mod
-from chahua.events import ChahuaEventType, NOOP_SINK
+from chahua.events import ChahuaEventType, NOOP_SINK, NOTICE_LEVEL_INFO
 from chahua.room_runtime import (
     ROUTER_MODE_BACKGROUND,
     ROUTER_MODE_FOREGROUND,
@@ -401,3 +402,114 @@ async def test_aclose_background_keeps_foreground(tmp_path) -> None:
     assert "A" in srv._runtimes and not fg.session.closed
     assert "B" not in srv._runtimes and bg1.session.closed
     assert "C" not in srv._runtimes and bg2.session.closed
+
+
+# ── max_background_rooms 软上限（9.4.1）────────────────────────────────────────
+
+
+def _bg_runtimes(n: int) -> list[RoomRuntime]:
+    """n 个后台 runtime，``background_since_ms`` 递增 —— ``B0`` 最早转入后台。"""
+    out: list[RoomRuntime] = []
+    for i in range(n):
+        rt = _runtime(f"B{i}", mode=ROUTER_MODE_BACKGROUND, room_name=f"房{i}")
+        rt.background_since_ms = 1000 + i
+        out.append(rt)
+    return out
+
+
+async def test_enforce_background_limit_evicts_oldest(tmp_path) -> None:
+    """后台 runtime 数超 MAX_BACKGROUND_ROOMS → 淘汰 background_since_ms 最小者。
+
+    被淘汰房（B0）带一个真实 in-flight task —— 生产中后台 runtime 恒 busy；这样
+    淘汰真的走 _aclose_one_runtime 的 cancel+drain（而非空槽短路），覆盖 drain 路径。
+    """
+    cap = server_mod.MAX_BACKGROUND_ROOMS
+    fg = _runtime("FG")
+    bgs = _bg_runtimes(cap + 1)  # 超 1 个
+    # B0（将被淘汰）挂真实 task —— 淘汰须 cancel+drain 它。
+    b0_task = asyncio.create_task(asyncio.sleep(3600))
+    bgs[0].set_inflight(b0_task, "user")
+    srv = _server(tmp_path, fg, *bgs)
+    captured: list = []
+    notices: list[tuple[str, str]] = []
+    srv._emit_notice = (  # type: ignore[method-assign]
+        lambda sink, *, level, text: notices.append((level, text))
+    )
+
+    await srv._enforce_background_room_limit(captured.append)
+
+    # B0（ts 最小）被淘汰 + close + in-flight task 被 cancel+drain；其余一字不动。
+    assert "B0" not in srv._runtimes and bgs[0].session.closed
+    assert b0_task.cancelled()
+    for i in range(1, cap + 1):
+        assert f"B{i}" in srv._runtimes
+    assert "FG" in srv._runtimes and not fg.session.closed
+    # 一帧 room_background_finished（room_id = room.name，不是注册表 key）。
+    assert len(captured) == 1
+    assert captured[0].type is ChahuaEventType.ROOM_BACKGROUND_FINISHED
+    assert captured[0].room_id == "房0"
+    # 一条 info 级 NOTICE。
+    assert len(notices) == 1 and notices[0][0] == NOTICE_LEVEL_INFO
+
+
+async def test_enforce_background_limit_under_cap_noop(tmp_path) -> None:
+    """后台数恰好 == MAX → 不淘汰、不 emit envelope、不 emit NOTICE。"""
+    cap = server_mod.MAX_BACKGROUND_ROOMS
+    fg = _runtime("FG")
+    bgs = _bg_runtimes(cap)
+    srv = _server(tmp_path, fg, *bgs)
+    captured: list = []
+    notices: list = []
+    srv._emit_notice = (  # type: ignore[method-assign]
+        lambda sink, *, level, text: notices.append((level, text))
+    )
+
+    await srv._enforce_background_room_limit(captured.append)
+
+    assert len(srv._runtimes) == cap + 1  # 全留
+    assert captured == []  # 无 room_background_finished
+    assert notices == []  # 无 NOTICE
+    for rt in bgs:
+        assert not rt.session.closed
+
+
+async def test_switch_room_over_limit_evicts_via_inbound(tmp_path, monkeypatch) -> None:
+    """切到全新房间把 busy 旧前台转后台、后台超限 → _inbound_switch_room 触发淘汰。
+
+    旧前台 busy → 转后台续跑（ts 最新）—— 不该被淘汰；最早的后台房 B0 才是。
+    """
+    cap = server_mod.MAX_BACKGROUND_ROOMS
+    fg = _runtime("FG")
+    task = _make_busy(fg)  # busy → 切走时转后台、不 close
+    bgs = _bg_runtimes(cap)  # 已满 MAX 个后台
+    srv = _server(tmp_path, fg, *bgs)
+    notices: list = []
+    srv._emit_notice = (  # type: ignore[method-assign]
+        lambda sink, *, level, text: notices.append((level, text))
+    )
+    (tmp_path / "rooms" / "NEW").mkdir(parents=True)
+    monkeypatch.setattr(
+        server_mod, "build_room_session",
+        lambda room_dir, *, paths: _FakeSession("NEW"),
+    )
+    captured: list = []
+
+    await srv._inbound_switch_room(
+        {"type": "switch_room", "room_id": "NEW"}, captured.append,
+    )
+
+    assert srv._foreground_id == "NEW"
+    # 旧前台转后台续跑，ts 最新 → 不被淘汰。
+    assert "FG" in srv._runtimes and not fg.session.closed and not task.done()
+    # 最早的后台房 B0 被淘汰，后台数回落到 MAX。
+    assert "B0" not in srv._runtimes
+    bg_count = sum(1 for rid in srv._runtimes if rid != srv._foreground_id)
+    assert bg_count == cap
+    assert len(notices) == 1 and notices[0][0] == NOTICE_LEVEL_INFO
+    # 淘汰发出了面向前端的 room_background_finished（room.name = "房0"）——
+    # 经 _inbound_switch_room 全链路验证 emit 没被吞。
+    finished = [
+        e for e in captured
+        if e.type is ChahuaEventType.ROOM_BACKGROUND_FINISHED
+    ]
+    assert len(finished) == 1 and finished[0].room_id == "房0"

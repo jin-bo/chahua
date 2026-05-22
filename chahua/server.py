@@ -136,6 +136,12 @@ DEFAULT_HOST = "127.0.0.1"
 # 去是中途挂掉，排查噩梦）。
 _WS_MAX_INBOUND_BYTES = 300 * 1024 * 1024
 
+# P9 §5.3：后台续跑房间的软上限。后台 runtime「仅在真有 in-flight 活时存在」——
+# 并发 session 数 = 1 前台 + N 个真正在跑的后台，N 自然不大；5 对桌面 App 既宽松
+# 又不至于失控。**软上限**：超限不拒绝切房，而是淘汰最早转入后台的 runtime
+# （``background_since_ms`` 最小者）+ emit NOTICE。要调直接改本常量（P9 §11 决策 3）。
+MAX_BACKGROUND_ROOMS = 5
+
 # 客户端 → 服务端 message type 字段值。
 INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
@@ -365,6 +371,65 @@ class ChahuaServer:
         except Exception:
             _log.exception("aclose: runtime %r close 出错", runtime.room_id)
         self._runtimes.pop(runtime.room_id, None)
+
+    async def _enforce_background_room_limit(self, sink: EnvelopeSink) -> None:
+        """P9 §5.3：后台 runtime 数超 :data:`MAX_BACKGROUND_ROOMS` 时淘汰最早转入
+        后台的房间。换房（busy 旧前台转后台）后由 :meth:`_inbound_switch_room` 调。
+
+        「最早」按 ``background_since_ms`` 最小判定（每次转后台时写时间戳，§5.3）——
+        不引 LRU 数据结构。淘汰走 9.2.1 强制拆除路径 :meth:`_aclose_one_runtime`
+        （带 MTS 的先 ``end_managed_session`` 再 cancel drain），随后补一帧
+        ``room_background_finished`` 让前端清「进行中」徽标。
+
+        **emit 顺序（避免徽标闪烁）**：``room_background_finished`` 在
+        :meth:`_aclose_one_runtime` **之后** 发。强制拆除会 cancel 被淘汰 runtime 的
+        in-flight turn，被 cancel 的 turn 收尾时 orchestrator 补 ``turn_end`` + turn
+        wrapper finally 自毁补 ``room_background_finished``（两者经后台 router 白名单
+        放行）。若本方法**先**发 ``room_background_finished`` 再拆除，前端徽标会经历
+        「灭 → 被 turn_end 点亮 → 再灭」的可见闪烁；放到拆除后发则只「亮 → 灭」，与
+        后台房正常跑完一致。生产中后台 runtime 恒 busy（idle 即已自毁），自毁那帧已
+        清掉徽标，本方法补发的是同 room.name 的重复帧 —— 前端 delete 幂等、无害；补发
+        只为覆盖「runtime 已 idle、_aclose_one_runtime 不触发自毁」的极端情形。
+
+        ``while`` 每轮重算后台集合：一次切房通常只超 1 个，循环是为多 runtime 异常
+        累积时的兜底收敛。:meth:`_aclose_one_runtime` 末尾无条件 pop，每轮 pop 掉一个，
+        必然终止。
+        """
+        while True:
+            background = [
+                rt for rt in self._runtimes.values()
+                if rt.room_id != self._foreground_id
+            ]
+            if len(background) <= MAX_BACKGROUND_ROOMS:
+                return
+            # background_since_ms 最小 = 最早转入后台。后台 runtime 理论上恒有时间戳
+            # （§3 阶段二 demote 时写）；缺失按 0 排，优先淘汰。
+            oldest = min(background, key=lambda rt: rt.background_since_ms or 0)
+            # room.name 在 close 后仍可读（纯属性）—— 但仍先取，与 envelope 口径一致。
+            room_name = oldest.session.room.name
+            _log.info(
+                "max_background_rooms 超限（%d > %d）：淘汰最早后台房 %r",
+                len(background), MAX_BACKGROUND_ROOMS, oldest.room_id,
+            )
+            await self._aclose_one_runtime(oldest)
+            # 拆除后补一帧 room_background_finished —— 前端 backgroundActiveRooms 按
+            # room.name 键，淘汰后「进行中」徽标要随之清掉。envelope room_id 用
+            # room.name（与所有里程碑同口径，见 _maybe_self_destruct_background_runtime
+            # 的同款注释）。顺序见上：放拆除之后避免徽标闪烁。
+            sink(
+                ChahuaEnvelope(
+                    room_id=room_name, turn_id=None, guest_name=None,
+                    message_id=None,
+                    type=ChahuaEventType.ROOM_BACKGROUND_FINISHED, data={},
+                )
+            )
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_INFO,
+                text=(
+                    f"后台续跑的房间已达上限（{MAX_BACKGROUND_ROOMS} 个），"
+                    f"已停止最早转入后台的房间「{room_name}」"
+                ),
+            )
 
     def close(self) -> None:
         """同步兜底关停 —— 仅 close 所有 runtime 的 session，不 cancel/drain in-flight。
@@ -852,6 +917,10 @@ class ChahuaServer:
         if self._foreground_session_has_global_guest():
             await self._cancel_and_drain_inflight()
         self._switch_room(room_id, sink)
+        # P9 §5.3：切房可能把旧前台转入后台 —— 超 MAX_BACKGROUND_ROOMS 即淘汰最早者。
+        # 放在 _switch_room（同步、含 _emit_room_snapshot）之后：快照里被淘汰房仍标
+        # busy，紧随的 room_background_finished 把它纠正掉（单 ws 队列保序）。
+        await self._enforce_background_room_limit(sink)
 
     async def _inbound_clear_room(self, data: dict, sink: EnvelopeSink) -> None:
         await self._cancel_and_drain_inflight()
