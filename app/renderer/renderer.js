@@ -16,7 +16,6 @@
 
 import {
   Inbound,
-  ScoreKind,
   DEFAULT_PERMISSION,
   TASK_UNTITLED,
   buildOwnerOptionData,
@@ -26,12 +25,7 @@ import {
   closeActionPopover,
   openActionPopover,
 } from "./ui_popover.js";
-import {
-  makeAvatarImg,
-  scoreText,
-  makeBadge,
-  makePermissionBadge,
-} from "./chat_view.js";
+import { createSidebar } from "./sidebar.js";
 import { createMention } from "./mention.js";
 import { createUpload } from "./upload.js";
 import { renderPersonaPicker, createPersonaImport } from "./persona.js";
@@ -159,38 +153,31 @@ const turnState = createTurnState({ submitBtn });
 
 // chat-stream（气泡 / 流式 / 历史回放）见 ./chat_stream.js；在途消息 Map 封装在
 // 该模块内，外部只通过 ``closeInFlightOnDisconnect`` 一键清。
-// 当前 turn 的打分明细。turn_start replace / turn_end 清。
-let scoresByName = new Map();
 // renderSidebar 上次渲染的房间 id —— 用来区分"真正切房" vs "同房 room_info 刷新"
 // （改头像 / 改设置 / 增删茶客都会重发 room_info）。handoff 队列预览只在真正切房时清。
 let handoffRoomId = null;
-// 茶客行 → 打分 span 的引用。sidebar 装好后填，turn_start/turn_end 直接改文字，
-// 不重建 DOM（避免头像 / 徽章闪烁）。
-const scoreSpansByName = new Map();
-// 茶客名单（room_info 来时装）—— @ 补全候选 + 头像查找 + 用户显示名 / 头像。
+// 茶客名单（room_info 来时装）—— @ 补全候选 + 一众模块（mention / assign / 任务卡
+// owner …）读取。头像 / 打分 / 用户行渲染在 ./sidebar.js，经 getGuests 取这份名单。
 let guests = []; // [{name, permission, isolation, avatar_data_uri}, ...]
-let userDisplayName = "我";
-let userAvatarDataUri = null;
 // 可用 persona 候选（room_info 来时装）—— "添加茶客" / "新建房间"的 picker 用。
 let personasAvailable = []; // [{persona, name, avatar_data_uri}, ...]
 // 房间生效的 max_consecutive_ai_turns（room_info.orchestrator 来时装）—— 圆桌
 // cap 预校验用；缺省 20 与 OrchestratorConfig 默认一致。
 let maxAiTurns = 20;
 
-// 茶客头像 —— 按名字在 guests 数组里 find；茶客 ≤ 个位数，线性查比维护并行 Map 简单
-// （且任何 guests 变更都自动跟上）。
-function makeAvatar(name, className) {
-  return makeAvatarImg(
-    guests.find((g) => g.name === name)?.avatar_data_uri,
-    className,
-    name,
-  );
-}
-
-// 用户头像 —— 走 userAvatarDataUri（room_info 时装）。
-function makeUserAvatar(className) {
-  return makeAvatarImg(userAvatarDataUri, className, userDisplayName);
-}
+// 侧栏茶客列表 + 头像 + 打分 + 「我」那一行 —— 见 ./sidebar.js。打分明细 / 用户显示名
+// 封在模块内；茶客名单仍归 renderer，sidebar 经 getGuests 取数。makeAvatar /
+// makeUserAvatar 下文喂 chat_stream。
+const sidebar = createSidebar({
+  guestsEl,
+  userNameEl,
+  userAvatarWrapEl,
+  isConnected: connection.isConnected,
+  send,
+  setStatus,
+  getGuests: () => guests,
+  showPermissionPopover: (anchor, g) => showPermissionPopover(anchor, g),
+});
 
 function setStatus(kind, text) {
   statusEl.className = `status ${kind}`;
@@ -223,21 +210,6 @@ function stickToBottom(mutate) {
   const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
   mutate();
   if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-// 头像 + 右上角 V 标的组合节点。默认 permission 直接返 img；显著 permission 用
-// .avatar-wrap 包起来让 badge 浮右上角。
-function makeAvatarWithPermission(g, avatarClassName, badgeClassName) {
-  const img = makeAvatar(g.name, avatarClassName);
-  const showBadge = g.permission && g.permission !== DEFAULT_PERMISSION;
-  if (!showBadge) return img;
-  const wrap = document.createElement("span");
-  wrap.className = "avatar-wrap";
-  wrap.appendChild(img);
-  const badge = makePermissionBadge(g.permission, badgeClassName);
-  badge.classList.add("on-avatar");
-  wrap.appendChild(badge);
-  return wrap;
 }
 
 // 权限 popover（点 sidebar 头像）—— factory 实例化在 guestSettings 之后（依赖它的 open）。
@@ -291,34 +263,7 @@ function requestReview(messageId, anchorBtn) {
 // 三个出口交互。
 const messageFilter = createMessageFilter({ messagesEl, taskState });
 
-// 打分写到 sidebar 各茶客行的 ``.guest-score`` span 上（不是主聊天区）。
-// scoresByName 没该茶客 → 清空 span（turn_end 走这条路径，统一清）。
-function applyScoresToSidebar() {
-  for (const [name, span] of scoreSpansByName) {
-    const r = scoresByName.get(name);
-    if (!r) {
-      span.textContent = "";
-      delete span.dataset.kind;
-      continue;
-    }
-    span.textContent = scoreText(r);
-    // kind=scored 走默认浅灰（数字打分），其余 kind 给 [data-kind=...] 语义色。
-    if (r.kind && r.kind !== ScoreKind.SCORED) {
-      span.dataset.kind = r.kind;
-    } else {
-      delete span.dataset.kind;
-    }
-  }
-}
-
-// turn_start / turn_end 经 envelope_router 调 —— 用打分列表（turn_end 传空）替换
-// scoresByName 并刷 sidebar。renderSidebar 切房也调一次空列表清残留。
-function applyScores(scoresList) {
-  scoresByName = new Map((scoresList ?? []).map((r) => [r.guest_name, r]));
-  applyScoresToSidebar();
-}
-
-// chat-stream 工厂 —— 在所有依赖（messagesEl / makeAvatar / stickToBottom /
+// chat-stream 工厂 —— 在所有依赖（messagesEl / sidebar 头像 / stickToBottom /
 // afterAppendMessage）都已定义之后实例化。返回的 6 个方法是 envelope 分派与
 // 连接生命周期的唯一对接面，老的 makeGuestRow / makeUserRow / inFlight Map 都封在
 // 模块内不外泄。
@@ -332,85 +277,20 @@ const {
   renderHistory,
 } = createChatStream({
   messagesEl,
-  makeAvatar,
-  makeUserAvatar,
+  makeAvatar: sidebar.makeAvatar,
+  makeUserAvatar: sidebar.makeUserAvatar,
   stickToBottom,
   afterAppendMessage: messageFilter.afterAppendMessage,
   onRequestReview: requestReview,
 });
 
-// ── 茶客列表渲染 ──────────────────────────────────────────────────
-// 茶客行：头像 / 名字（权限 anchor）+ 打分小数字 + × 请离。指派 / 圆桌入口已挪到
-// composer 底栏「指派」按钮（见 assign_popover.js），不再挂在茶客行上。
-function renderGuestRowNormal(li, g, lastGuestLock) {
-  // 头像 / 名字都是「设置权限」的 anchor —— popover 锚在头像更直观，但点名字也能开。
-  const node = makeAvatarWithPermission(g, "avatar", "permission-badge");
-  node.classList.add("permission-anchor");
-  node.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
-  node.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    if (!connection.isConnected()) return;
-    showPermissionPopover(node, g);
-  });
-  li.appendChild(node);
-  const nameBadge = makeBadge("guest-name", null, g.name);
-  nameBadge.classList.add("permission-anchor");
-  nameBadge.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
-  nameBadge.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    if (!connection.isConnected()) return;
-    showPermissionPopover(node, g);
-  });
-  li.appendChild(nameBadge);
-  if (g.isolation && g.isolation !== "room") {
-    li.appendChild(makeBadge("isolation-badge", "isolation", g.isolation));
-  }
-  // 打分小数字（turn_start 时填，turn_end 时清）。margin-left:auto 推到右侧；
-  // 空 textContent 时占位不可见，文字一来就显示，不引发布局抖动（min-width）。
-  const score = document.createElement("span");
-  score.className = "guest-score";
-  li.appendChild(score);
-  scoreSpansByName.set(g.name, score);
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "row-icon-btn row-remove";
-  remove.textContent = "×";
-  if (lastGuestLock) {
-    remove.disabled = true;
-    remove.title = "至少要保留一位茶客";
-  } else {
-    remove.title = `请离 ${g.name}`;
-    remove.addEventListener("click", () => {
-      if (!connection.isConnected()) return;
-      if (!window.confirm(`请离茶客「${g.name}」？\n房间历史不动，guests/${g.name}/ 工作目录也不会被删，但不会再参与对话。`)) return;
-      send({ type: Inbound.REMOVE_GUEST, name: g.name });
-      setStatus("", `请离 ${g.name}…`);
-    });
-  }
-  li.appendChild(remove);
-}
-
-function renderGuests() {
-  guestsEl.replaceChildren();
-  scoreSpansByName.clear();
-  // 最后一位茶客不能删（与 server 端 admin.remove_guest 硬约束一致）—— 前端禁用按钮，
-  // 用户少踩一次"提交后才发现不行"的坑。
-  const lastGuestLock = guests.length <= 1;
-  for (const g of guests) {
-    const li = document.createElement("li");
-    renderGuestRowNormal(li, g, lastGuestLock);
-    guestsEl.appendChild(li);
-  }
-}
-
 // ── sidebar 装配（room_info）────────────────────────────────────────
 
 function renderSidebar(roomInfo) {
-  // 进新房（首次连接 / 换房）的全量重置：清 in-flight 流 + 当前 turn 打分残留 + 消息
-  // 容器 + 待发文件 pills（pill 的 rel 是按房间 share/ 计的相对路径，换房后挂别房不通）。
+  // 进新房（首次连接 / 换房）的全量重置：清 in-flight 流 + 消息容器 + 待发文件 pills
+  // （pill 的 rel 是按房间 share/ 计的相对路径，换房后挂别房不通）。打分残留由下文
+  // sidebar.renderGuests 重建时清。
   clearInFlight();
-  scoresByName = new Map();
-  scoreSpansByName.clear();
   // 切房 / 重连 / 清空 → filter 视图无意义，强 exit 让新房间从全量视角起步。
   messageFilter.exitFilter();
   messagesEl.replaceChildren();
@@ -446,8 +326,6 @@ function renderSidebar(roomInfo) {
   setStatus("ok", `已连接 ${wsUrl}`);
   roomNameEl.textContent = roomInfo.room_name || "—";
   roomTopicEl.textContent = roomInfo.topic || "";
-  userDisplayName = roomInfo.user_display_name || "我";
-  userAvatarDataUri = roomInfo.user_avatar_data_uri || null;
   settings.setSnapshot({
     userMdContent: roomInfo.user_md_content,
     userMdSource: roomInfo.user_md_source,
@@ -458,11 +336,14 @@ function renderSidebar(roomInfo) {
     roomDefaultLlmModel: roomInfo.room_default_llm?.model || null,
   });
   roomSettings.setSnapshot(roomInfo);
-  renderUserRow();
+  sidebar.setUser({
+    displayName: roomInfo.user_display_name,
+    avatarDataUri: roomInfo.user_avatar_data_uri,
+  });
   guests = Array.isArray(roomInfo.guests) ? roomInfo.guests : [];
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
   maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 20;
-  renderGuests();
+  sidebar.renderGuests();
   // 房间列表 + P9「进行中」后台房徽标（见 ./room_list.js）—— render 内部从权威快照
   // rooms_available[].busy 重建后台房集合再渲染。
   roomList.render(roomInfo.rooms_available, roomInfo.current_room_id);
@@ -636,11 +517,6 @@ newRoomSubmitEl.addEventListener("click", () => {
 });
 
 // ── 我（USER.md / 头像）─────────────────────────────────────────────
-
-function renderUserRow() {
-  userNameEl.textContent = userDisplayName;
-  userAvatarWrapEl.replaceChildren(makeUserAvatar("user-avatar"));
-}
 
 const settings = createSettings({
   userMd: {
@@ -828,7 +704,7 @@ const envelopeRouter = createEnvelopeRouter({
   debugPanel,
   renderSidebar,
   renderHistory,
-  applyScores,
+  applyScores: sidebar.applyScores,
   turnState,
   proposalCard,
   startStreamingMessage,
@@ -1081,7 +957,7 @@ composer.addEventListener("submit", (ev) => {
   // task_id snapshot at submit —— server 端在 inbound 接帧时按当前 active 打 tag，与
   // 这里 active 通常一致（单客户端串行 inbound + 用户改 active 也走 inbound 排队）。
   appendBubble({
-    speaker: userDisplayName,
+    speaker: sidebar.getUserDisplayName(),
     text: echo,
     kind: "user",
     taskId: taskState.getActiveTask()?.id ?? null,
