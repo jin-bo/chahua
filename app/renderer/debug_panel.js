@@ -291,12 +291,58 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
     }
   }
 
+  // P9：切回一个 turn 在后台续跑的房间 —— 该 turn 的 turn_start（乃至当下在打字
+  // 那条消息的 message_start）已在后台被丢弃（后台只推里程碑）。下面两个 ensure*
+  // 据切回后到达的事件兜底建桩，让当前 turn 仍在调试视图里成形：turn 标 partial
+  // （切回前的打分候选 / prompt 拿不到），完整取证仍在 debug/turns.jsonl，下次切房
+  // turns_index 会带出完整记录。
+  function ensureTurn(turnId) {
+    let turn = turns.get(turnId);
+    if (turn) return turn;
+    turn = {
+      ts_ms: Date.now(),
+      scores: [],
+      scoring_prompts: null,
+      scoring_path: null,
+      messages: new Map(),
+      task_id: null,
+      partial: true,
+    };
+    turns.set(turnId, turn);
+    evictOldest();
+    rerenderTurn(turnId);
+    return turn;
+  }
+
+  // 解析 envelope 所属的 {turn, msg} 记录；turn / message 桩缺失即兜底建。
+  // message_id / turn_id 任一缺 → null（调用方跳过）。
+  function ensureMessage(env) {
+    const messageId = env.message_id;
+    if (!messageId) return null;
+    const turnId = messageTurn.get(messageId) || env.turn_id;
+    if (!turnId) return null;
+    const turn = ensureTurn(turnId);
+    let msg = turn.messages.get(messageId);
+    if (!msg) {
+      msg = {
+        guest: env.guest_name || "?",
+        speak_prompt: null,
+        tool_calls: new Map(),
+        artifact_paths: new Set(),
+        status: "running",
+        seq: null,
+      };
+      turn.messages.set(messageId, msg);
+      messageTurn.set(messageId, turnId);
+    }
+    return { turnId, turn, msg };
+  }
+
   function handleMessageStart(env) {
     const turnId = env.turn_id;
     const messageId = env.message_id;
     if (!turnId || !messageId) return;
-    const turn = turns.get(turnId);
-    if (!turn) return;
+    const turn = ensureTurn(turnId);
     const data = env.data || {};
     // task_id 只在 message_start.data 里带（envelope 顶层不动）—— 取首条非 null 即够。
     if (turn.task_id == null && typeof data.task_id === "string") {
@@ -318,22 +364,18 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
   }
 
   function handleMessageEnd(env) {
-    const turnId = messageTurn.get(env.message_id);
-    if (!turnId) return;
-    const turn = turns.get(turnId);
-    const msg = turn && turn.messages.get(env.message_id);
-    if (!msg) return;
+    const found = ensureMessage(env);
+    if (!found) return;
+    const { turnId, msg } = found;
     msg.status = env.status || Status.OK;
     msg.seq = typeof env.seq === "number" ? env.seq : null;
     rerenderTurn(turnId);
   }
 
   function handleToolStart(env) {
-    const turnId = messageTurn.get(env.message_id);
-    if (!turnId) return;
-    const turn = turns.get(turnId);
-    const msg = turn && turn.messages.get(env.message_id);
-    if (!msg) return;
+    const found = ensureMessage(env);
+    if (!found) return;
+    const { turnId, turn, msg } = found;
     const data = env.data || {};
     const tool = data.tool || "";
     const callId = data.call_id || `_anon_${msg.tool_calls.size}`;
@@ -354,11 +396,9 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
   }
 
   function handleToolComplete(env) {
-    const turnId = messageTurn.get(env.message_id);
-    if (!turnId) return;
-    const turn = turns.get(turnId);
-    const msg = turn && turn.messages.get(env.message_id);
-    if (!msg) return;
+    const found = ensureMessage(env);
+    if (!found) return;
+    const { turnId, msg } = found;
     const data = env.data || {};
     const callId = data.call_id;
     // call_id 缺时无法合并 —— 跳过（不引入"按 tool 名匹配最近一条 started"的脆弱启发式）。
@@ -689,6 +729,17 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
       note.className = "debug-turn-handoff-note";
       note.textContent = HANDOFF_NOTE_TEXT[turn.scoring_path]
         || "由用户" + scoringPathLabel(turn.scoring_path);
+      section.appendChild(note);
+    }
+
+    // P9：兜底建桩的 turn（切回房间时已在后台进行）—— 顶部提示「明细不全」，
+    // 避免用户把空候选当成打分坏了。
+    if (turn.partial) {
+      const note = document.createElement("div");
+      note.className = "debug-turn-partial-note";
+      note.textContent =
+        "切回房间时这一轮已在后台进行 —— 切回前的打分候选 / prompt 不可见，"
+        + "完整取证见 debug/turns.jsonl";
       section.appendChild(note);
     }
 

@@ -128,30 +128,45 @@ export function createChatStream({
     });
   }
 
+  // 建一条流式 in-flight 气泡 + entry。startStreamingMessage 正常路径调；appendDelta
+  // 在「message_start 缺失」时兜底也调（见下）。调用方负责包 stickToBottom。
+  function beginStream(messageId, speaker, taskId) {
+    const { li, textEl, bubble } = makeGuestRow(speaker, {
+      streaming: true,
+      messageId,
+      taskId,
+    });
+    messagesEl.appendChild(li);
+    afterAppendMessage(li);
+    // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
+    // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
+    const entry = { textEl, li, bubble, accumulated: "" };
+    inFlight.set(messageId, entry);
+    // 闭包持 entry 引用，click 时读最新 accumulated（流式过程中也能复制到当前为止的全部）。
+    attachCopyButton(bubble, () => entry.accumulated);
+    return entry;
+  }
+
   function startStreamingMessage(env) {
     stickToBottom(() => {
-      const speaker = env.guest_name || "?";
-      const taskId = env.data?.task_id ?? null;
-      const { li, textEl, bubble } = makeGuestRow(speaker, {
-        streaming: true,
-        messageId: env.message_id,
-        taskId,
-      });
-      messagesEl.appendChild(li);
-      afterAppendMessage(li);
-      // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
-      // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
-      const entry = { textEl, li, bubble, accumulated: "" };
-      inFlight.set(env.message_id, entry);
-      // 闭包持 entry 引用，click 时读最新 accumulated（流式过程中也能复制到当前为止的全部）。
-      attachCopyButton(bubble, () => entry.accumulated);
+      beginStream(env.message_id, env.guest_name || "?", env.data?.task_id ?? null);
     });
   }
 
   function appendDelta(env) {
-    const m = inFlight.get(env.message_id);
-    if (!m) return;
+    let m = inFlight.get(env.message_id);
     const chunk = env.data?.chunk ?? "";
+    if (!m) {
+      // P9：切回一个 turn 在后台续跑的房间 —— 这条消息的 message_start 在后台被
+      // 丢弃（后台只推里程碑），切回后到达的首个 delta 这里兜底建流式气泡，从切回
+      // 点起逐字流式；切回前已流出的部分由 message_end 的权威全文一次性校正。
+      if (!env.message_id || !chunk) return;
+      stickToBottom(() => {
+        m = beginStream(
+          env.message_id, env.guest_name || "?", env.data?.task_id ?? null,
+        );
+      });
+    }
     if (!chunk) return;
     m.accumulated += chunk;
     // 选区在 textEl 内 → 跳渲，让用户的拖选 / Cmd+C 不被擦；下一个 chunk 来时如果选区
@@ -196,6 +211,13 @@ export function createChatStream({
       return;
     }
     inFlight.delete(env.message_id);
+    // 最终渲染优先用 server 的权威全文（OK 走 data.text、失败走 data.partial_text）
+    // 而非本地 m.accumulated —— 切回房间兜底建的流式气泡（见 appendDelta）只攒到
+    // 切回点之后的 delta，accumulated 不完整，message_end 全文在此把它补齐。
+    const serverText = env.status === Status.OK
+      ? env.data?.text
+      : env.data?.partial_text;
+    const finalText = typeof serverText === "string" ? serverText : m.accumulated;
     stickToBottom(() => {
       removeStreamingCursor(m.bubble);
       // 仅 OK 时消息已落 transcript，请审按钮此刻才有合法锚点（见 makeGuestRow）；
@@ -220,12 +242,12 @@ export function createChatStream({
           }
           if (isSelectionInside(m.textEl)) return;
           document.removeEventListener("selectionchange", finalize);
-          m.textEl.innerHTML = renderMarkdown(m.accumulated);
+          m.textEl.innerHTML = renderMarkdown(finalText);
         };
         document.addEventListener("selectionchange", finalize);
         return;
       }
-      m.textEl.innerHTML = renderMarkdown(m.accumulated);
+      m.textEl.innerHTML = renderMarkdown(finalText);
     });
   }
 
