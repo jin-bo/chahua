@@ -21,7 +21,7 @@ from ._server_helpers import (
     require_list,
     require_str,
 )
-from .events import EnvelopeSink
+from .events import EnvelopeSink, NOTICE_LEVEL_ERROR
 from .permissions import DEFAULT_MODE
 from .persona_assets import persona_relative
 
@@ -321,8 +321,22 @@ class AdminHandlers:
         self.server._emit_room_snapshot(sink)
 
     def _delete_room(self, *, room_id: str, sink: EnvelopeSink) -> None:
-        """删除一个非当前房间。当前房间在 admin.delete_room 那层硬拒。"""
+        """删除一个非当前、且未在后台续跑的房间。
+
+        当前前台房在 ``admin.delete_room`` 那层硬拒。**P9**：切走后仍在
+        ``_runtimes`` 里后台续跑的房间同样不能删 —— ``rmtree`` 会把后台 turn 正在
+        写的 ``transcript.jsonl`` / ``debug/`` / ``tasks/`` 抽走（Codex review）。
+        要删这类房间，用户得等它后台跑完自毁、或重启 app（ws 断开清后台 runtime）。
+        """
         current = self.server._session.room_config.room_dir.name
+        if room_id != current and room_id in self.server._runtimes:
+            _log.warning("delete_room: %r 仍在后台续跑，拒绝删除", room_id)
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"房间「{room_id}」仍在后台运行，无法删除 —— 等它跑完再删。",
+            )
+            self.server._emit_room_info(sink)
+            return
         try:
             admin.delete_room(
                 paths=self.server._paths, room_id=room_id, current_room_id=current

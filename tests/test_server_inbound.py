@@ -224,6 +224,10 @@ class _SpyServer(ChahuaServer):
 
     # ── core inbound workers 仍挂 ChahuaServer 自身：switch / clear。──────────
 
+    def _foreground_session_has_global_guest(self) -> bool:  # type: ignore[override]
+        # 路由 spy 不挂真 _session —— switch_room 路由测不关心 global 茶客分流。
+        return False
+
     def _switch_room(self, room_id, sink):  # type: ignore[override]
         self.calls.append(("_switch_room", {"room_id": room_id}))
 

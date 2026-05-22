@@ -48,10 +48,18 @@ class _FakeOrch:
         self.managed_session: object | None = None
 
 
+class _FakeGuest:
+    def __init__(self, isolation: str) -> None:
+        self.isolation = isolation
+
+
 class _FakeSession:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, guests: tuple = ()) -> None:
         self.room_config = type(
-            "_RC", (), {"room_dir": type("_D", (), {"name": name})()},
+            "_RC", (), {
+                "room_dir": type("_D", (), {"name": name})(),
+                "guests": list(guests),
+            },
         )()
         self.orchestrator = _FakeOrch()
         self.closed = False
@@ -60,10 +68,12 @@ class _FakeSession:
         self.closed = True
 
 
-def _runtime(room_id: str, *, mode: str = ROUTER_MODE_FOREGROUND) -> RoomRuntime:
+def _runtime(
+    room_id: str, *, mode: str = ROUTER_MODE_FOREGROUND, guests: tuple = (),
+) -> RoomRuntime:
     return RoomRuntime(
         room_id=room_id,
-        session=_FakeSession(room_id),  # type: ignore[arg-type]
+        session=_FakeSession(room_id, guests=guests),  # type: ignore[arg-type]
         router=RoomEventRouter(NOOP_SINK, mode=mode),
     )
 
@@ -131,12 +141,15 @@ def test_switch_reuses_background_runtime(tmp_path) -> None:
     """切到注册表里已有的（之前切走留下的）后台 runtime → 复用、不重建。"""
     fg = _runtime("A")
     bg = _runtime("B", mode=ROUTER_MODE_BACKGROUND)
+    bg.background_since_ms = 12345  # 之前转后台时记的时间戳
     srv = _server(tmp_path, fg, bg)
 
     srv._switch_room("B", _sink)
 
     assert srv._runtimes["B"] is bg  # 同一对象，没被重建
     assert bg.router.mode == ROUTER_MODE_FOREGROUND
+    # 切回前台 → background_since_ms 清回 None（前台房恒 None 的不变量）。
+    assert bg.background_since_ms is None
 
 
 def test_switch_builds_new_runtime(tmp_path, monkeypatch) -> None:
@@ -277,6 +290,44 @@ def test_switch_back_race_no_destroy(tmp_path) -> None:
 
     assert not bg.session.closed
     assert "B" in srv._runtimes
+
+
+# ── global-isolation 茶客：不后台续跑 ───────────────────────────────────────
+
+
+def test_foreground_global_guest_detected(tmp_path) -> None:
+    """前台房含 isolation=global 茶客 → _foreground_session_has_global_guest True。"""
+    fg = _runtime("A", guests=(_FakeGuest("room"), _FakeGuest("global")))
+    srv = _server(tmp_path, fg)
+
+    assert srv._foreground_session_has_global_guest() is True
+
+
+def test_foreground_all_room_isolated(tmp_path) -> None:
+    """前台房茶客全 room-isolated → False（可后台续跑）。"""
+    fg = _runtime("A", guests=(_FakeGuest("room"), _FakeGuest("room")))
+    srv = _server(tmp_path, fg)
+
+    assert srv._foreground_session_has_global_guest() is False
+
+
+# ── _delete_room：拒删后台续跑中的房间 ──────────────────────────────────────
+
+
+def test_delete_room_rejects_background_runtime(tmp_path) -> None:
+    """切走后仍在后台续跑的房间不能删 —— rmtree 会抽走后台 turn 正在写的文件。"""
+    from chahua.server_inbound_admin import AdminHandlers
+
+    fg = _runtime("A")
+    bg = _runtime("B", mode=ROUTER_MODE_BACKGROUND)
+    srv = _server(tmp_path, fg, bg)
+    notices: list[tuple[str, str]] = []
+    srv._emit_notice = lambda sink, *, level, text: notices.append((level, text))  # type: ignore[method-assign]
+
+    AdminHandlers(srv)._delete_room(room_id="B", sink=_sink)
+
+    assert notices and notices[0][0] == "error"  # 拒绝 + error notice
+    assert "B" in srv._runtimes  # 后台 runtime 没被动
 
 
 # ── _aclose_background_runtimes（ws 断开清后台、留前台）──────────────────────

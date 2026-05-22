@@ -36,6 +36,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from ._paths import Paths
+from .config import ISOLATION_GLOBAL
 from ._server_helpers import (
     check_keys_whitelist as _check_keys_whitelist,
     require_str as _require_str,
@@ -563,6 +564,9 @@ class ChahuaServer:
         # ── 一次性切前台指针 ──
         target.router.ws_sink = sink
         target.router.mode = ROUTER_MODE_FOREGROUND
+        # 复用的后台 runtime 切回前台 —— 清掉转后台时记的时间戳（前台房恒 None，
+        # 否则 9.4.1 超限淘汰会把一个前台房误判成「最早的后台房」）。
+        target.background_since_ms = None
         self._foreground_id = room_id
         _log.info("switch_room: → %r", room_id)
         self._emit_room_snapshot(sink)
@@ -816,12 +820,31 @@ class ChahuaServer:
         if orch.managed_session is not None:
             orch.end_managed_session(sink, reason=reason)
 
+    def _foreground_session_has_global_guest(self) -> bool:
+        """前台房间是否有 ``isolation="global"`` 的茶客。
+
+        global 茶客的 cwd 是跨房共享的 ``<user_data_root>/guests/<name>/``，其
+        ``./share`` / ``./task`` 软链在**任何**含该茶客的房间 ``build_room_session``
+        时被 ``link_dir_idempotent`` retarget 到那个房间。这类房间**不能后台续跑**
+        —— 切到别的房会 retarget 软链、与后台 turn 撞车（Codex review）。故
+        ``_inbound_switch_room`` 切走前先 cancel+drain，让 ``_switch_room`` 把它当
+        idle 关掉。结论：注册表里的 background runtime 永远不含 global 茶客。
+        """
+        return any(
+            gc.isolation == ISOLATION_GLOBAL
+            for gc in self._session.room_config.guests
+        )
+
     async def _inbound_switch_room(self, data: dict, sink: EnvelopeSink) -> None:
         room_id = _require_str(data, "room_id", where=INBOUND_SWITCH_ROOM)
         if room_id is None:
             return
-        # P9：切房不再 cancel —— 旧前台若 busy，由 _switch_room 转后台续跑（§3）。
-        # 同房重建（加/删茶客等）走 _replace_session，那条仍 cancel。
+        # P9：切房一般不再 cancel —— 旧前台若 busy 由 _switch_room 转后台续跑（§3）。
+        # 例外：前台房有 global-isolation 茶客时，其跨房共享 cwd 的 share/task 软链
+        # 会被目标房 build_room_session retarget、与后台 turn 撞车 —— 先 cancel+drain，
+        # 让 _switch_room 把它当 idle 关掉而非转后台。
+        if self._foreground_session_has_global_guest():
+            await self._cancel_and_drain_inflight()
         self._switch_room(room_id, sink)
 
     async def _inbound_clear_room(self, data: dict, sink: EnvelopeSink) -> None:
