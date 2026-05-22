@@ -135,6 +135,23 @@ async def test_aclose_continues_past_failing_runtime() -> None:
     assert srv._runtimes == {}  # bad 也被移出（finally 兜底）
 
 
+async def test_aclose_closes_session_when_end_mts_raises() -> None:
+    """end_managed_session 抛错不该挡住 runtime.close() —— 否则该房 agentao /
+    MCP 子进程在进程退出时变孤儿泄漏（三步各自 try）。"""
+    rt = _runtime("fg", has_managed_session=True)
+
+    def _boom(sink: object, *, reason: str) -> None:
+        raise RuntimeError("end MTS failed")
+
+    rt.session.orchestrator.end_managed_session = _boom  # type: ignore[method-assign]
+    srv = _server(rt)
+
+    await srv.aclose()
+
+    assert rt.session.closed  # end MTS 抛错后 close 仍跑到
+    assert srv._runtimes == {}
+
+
 # ── 同步 close 兜底 ────────────────────────────────────────────────────────
 
 

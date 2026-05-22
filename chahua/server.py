@@ -311,6 +311,9 @@ class ChahuaServer:
         幂等：每个 runtime 清完即移出 ``_runtimes``，重复调用 → 空注册表 → noop。
         ``_serve_one`` finally 与 ``server_entry`` 进程退出可能各清一次（§5.1）——
         清理走 ``NOOP_SINK``（退出途中 ws sink 可能已不可写），MTS 收尾事件丢弃。
+
+        三步（end MTS / drain / close）**各自 try** —— 前两步抛错绝不能挡住
+        ``runtime.close()``，否则该房 agentao / MCP 子进程在进程退出时变孤儿泄漏。
         """
         for runtime in list(self._runtimes.values()):
             try:
@@ -319,12 +322,17 @@ class ChahuaServer:
                     orch.end_managed_session(
                         NOOP_SINK, reason=MANAGED_SESSION_REASON_USER_CANCEL,
                     )
+            except Exception:
+                _log.exception("aclose: runtime %r 结束 MTS 出错", runtime.room_id)
+            try:
                 await runtime.cancel_and_drain_inflight()
+            except Exception:
+                _log.exception("aclose: runtime %r drain 出错", runtime.room_id)
+            try:
                 runtime.close()
             except Exception:
-                _log.exception("aclose: runtime %r 清理出错", runtime.room_id)
-            finally:
-                self._runtimes.pop(runtime.room_id, None)
+                _log.exception("aclose: runtime %r close 出错", runtime.room_id)
+            self._runtimes.pop(runtime.room_id, None)
 
     def close(self) -> None:
         """同步兜底关停 —— 仅 close 所有 runtime 的 session，不 cancel/drain in-flight。
