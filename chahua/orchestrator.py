@@ -315,6 +315,22 @@ class Orchestrator:
         分支读这个公开访问器（``_managed_session`` 私有）。"""
         return self._managed_session
 
+    def emit_managed_session_snapshot(self, sink: EnvelopeSink) -> None:
+        """切回托管中的房间时重发 MTS 快照（P9 阶段 9.3.2）。
+
+        P9 之前「``emit_room_snapshot`` 不重投 MTS」成立的前提是「MTS 不跨断线
+        存活」；P9 让 MTS 能在后台续跑，前提被推翻 —— 切回一个「托管中」的后台
+        房间，前端「托管中」状态条 / 「停止托管」按钮要能自给自足重建，不能依赖
+        前端缓存早先收过的 ``managed_session_started``（那只在「MTS 启动时恰好在
+        前台」才成立，脆弱）。
+
+        无 MTS → 空操作。复用 ``managed_session_started`` envelope，``budget`` 是
+        **当前剩余**预算（已被 ``_advance`` 扣减过）—— 前端按收到的值复位倒计时。
+        """
+        ms = self._managed_session
+        if ms is not None:
+            self._emit_managed_session_started(sink, ms)
+
     def start_managed_session(
         self, sink: EnvelopeSink, *, task_id: str, manager_guest: str, budget: int,
     ) -> None:

@@ -99,6 +99,24 @@ def _orchestrator_effective_dict(config: OrchestratorConfig) -> dict[str, object
     return {k: getattr(config, k) for k in ORCH_FIELD_BOUNDS}
 
 
+def _rooms_available_with_busy(server: "ChahuaServer") -> list[dict]:
+    """``discover_rooms`` 结果叠加每房 ``busy`` 标志（P9 阶段 9.3.2）。
+
+    ``busy`` ⟺ 该 ``room_id`` 在 ``server._runtimes`` 注册表里且其 runtime
+    ``inflight_alive()``。``discover_rooms`` 的 ``room_id`` 与注册表 key 同口径
+    （都是房间目录名）。前台房间正在跑 turn 时也会标 ``busy``。
+    """
+    busy_ids = {
+        rid
+        for rid, rt in server._runtimes.items()
+        if rt.inflight_alive()
+    }
+    rooms = discover_rooms(server._paths)
+    for room in rooms:
+        room["busy"] = room["room_id"] in busy_ids
+    return rooms
+
+
 # ── envelope 装配 / 下发 ─────────────────────────────────────────────────
 
 
@@ -205,7 +223,11 @@ def emit_room_info(server: "ChahuaServer", sink: EnvelopeSink) -> None:
                     source="room" if rc.summary_llm is not None else "default",
                 ),
                 "current_room_id": rc.room_dir.name,
-                "rooms_available": discover_rooms(server._paths),
+                # ``rooms_available`` 每房带 ``busy`` 标志（P9 阶段 9.3.2）——
+                # 前端房间列表「进行中」徽标用。``busy=True`` ⟺ 该房有 runtime
+                # 且其 turn / handoff drain 正在跑（含切走后转后台续跑的房间；
+                # 后台 runtime「仅在有活时存在」，故注册表里的后台房几乎恒 busy）。
+                "rooms_available": _rooms_available_with_busy(server),
                 # 已在场茶客的 name 也在 personas_available 里 —— 前端按
                 # guests[].name 去重显示，避免 picker 列出重复人选。
                 "personas_available": admin.discover_personas(server._paths),
@@ -263,9 +285,13 @@ def emit_room_snapshot(server: "ChahuaServer", sink: EnvelopeSink) -> None:
 
     P5.2.6 起末尾追发 ``TasksStore`` 加载期累积的 warnings（如"多 task 但无 active"），
     每条转 NOTICE info envelope。warning 是 consume 一次性的，不会重复 emit。
+
+    P9 阶段 9.3.2：前台房间若有托管会话（MTS）在跑，末尾补发一帧 ``managed_session_started``
+    —— 让「切回托管中的后台房间」能自给自足重建前端「托管中」状态条（设计文档 §8）。
     """
     emit_room_info(server, sink)
     emit_room_history(server, sink)
     server.task._emit_task_info(sink)
     for warning in server._session.tasks_store.consume_load_warnings():
         server._emit_notice(sink, level=NOTICE_LEVEL_INFO, text=warning)
+    server._session.orchestrator.emit_managed_session_snapshot(sink)
