@@ -231,16 +231,9 @@ class ChahuaServer:
         self._paths = paths
         # 当前在线的客户端句柄。``None`` 表示空闲；非 ``None`` 时第二个连接被拒。
         self._active: Optional[ServerConnection] = None
-        # 当前在跑的 turn task —— P3.3 cancel 入口对这个 task 做 ``task.cancel()``。
-        # 单 client + 单 in-flight 策略下（``user_message`` 在 task 未结束前 drop），
-        # 同时只会有一个。
-        self._inflight_turn_task: Optional[asyncio.Task[None]] = None
-        # P7.1.6 in-flight 类型标签——与 ``_inflight_turn_task`` 同生命周期，wrapper
-        # finally 同槽清两个。**仅** ``_inbound_handoff_delegate`` 用来判"in-flight
-        # 是否已是 handoff drain"，决定 cancel + 启 wrapper 还是只 append 队尾
-        # （docs §4.4 反向评审 v3-#1：drain 中再 delegate 走 append 不抢占，否则
-        # 队列语义崩——连点 N 次只剩最后一个执行）。
-        self._inflight_kind: Optional[Literal["user", "handoff"]] = None
+        # P9 9.1.3：in-flight turn task / kind 两槽下沉到 :class:`RoomRuntime`
+        # （per-room），server 侧 ``_inflight_turn_task`` / ``_inflight_kind`` 退化为
+        # 读写前台 runtime 同名字段的兼容 property（见下）。
         # P5.2 inbound handler 五个 slot + 一次性把 wire 路由解析成 bound-method 字典。
         _install_handler_slots(self)
         self._inbound_handlers = _bind_inbound_handlers(self)
@@ -283,6 +276,28 @@ class ChahuaServer:
             )
         }
         self._foreground_id = room_id
+
+    # P9 9.1.3：``_inflight_*`` 两槽下沉 RoomRuntime —— 这里是读写前台 runtime
+    # 同名字段的兼容 property，让 ``server_inbound_*.py`` 各 handler 与既有测试
+    # 夹具的 ``self.server._inflight_turn_task`` / ``= None`` 等读写零改动继续走。
+    # 配对不变量（task 与 kind 同生同灭）由 :meth:`RoomRuntime.set_inflight` 守，
+    # 直接逐字段写（测试夹具 / cancel fixup）保持与 P9 之前一致、不过 assertion。
+
+    @property
+    def _inflight_turn_task(self) -> Optional[asyncio.Task[None]]:
+        return self._foreground_runtime.inflight_task
+
+    @_inflight_turn_task.setter
+    def _inflight_turn_task(self, value: Optional[asyncio.Task[None]]) -> None:
+        self._foreground_runtime.inflight_task = value
+
+    @property
+    def _inflight_kind(self) -> Optional[Literal["user", "handoff"]]:
+        return self._foreground_runtime.inflight_kind
+
+    @_inflight_kind.setter
+    def _inflight_kind(self, value: Optional[Literal["user", "handoff"]]) -> None:
+        self._foreground_runtime.inflight_kind = value
 
     def close(self) -> None:
         """关停**当前**活动 session。
@@ -351,6 +366,11 @@ class ChahuaServer:
         # 客户端 loopback 不会拥塞，无界队列简单。
         outbound: asyncio.Queue[dict] = asyncio.Queue()
         sink: EnvelopeSink = lambda env: outbound.put_nowait(env.to_dict())
+        # P9 9.1.3：把前台 runtime 的 router 接到本连接的 ws sink —— turn 事件经
+        # ``runtime.router`` 转发（router 恒 foreground = 全量透传），控制面事件
+        # （``_emit_room_snapshot`` / ``_emit_notice``）仍直接用 ``sink``。换房 /
+        # 重建后新 runtime 的 router 由 ``_replace_session`` 同样接上。
+        self._foreground_runtime.router.ws_sink = sink
 
         writer = asyncio.create_task(self._writer(ws, outbound), name="ws-writer")
         try:
@@ -461,6 +481,9 @@ class ChahuaServer:
                 sink, reason=MANAGED_SESSION_REASON_USER_CANCEL,
             )
         self._session = new_session
+        # P9 9.1.3：``_session`` setter 给新 runtime 装的 router 是 NOOP_SINK 占位
+        # —— 重新接到本连接的 ws sink，否则换房 / 重建后该房 turn 事件被丢。
+        self._foreground_runtime.router.ws_sink = sink
         try:
             old.close()
         except Exception:
@@ -506,54 +529,35 @@ class ChahuaServer:
         self._emit_room_snapshot(sink)
 
     # ── cancel / in-flight task 生命周期 ────────────────────────────────
+    #
+    # P9 9.1.3：实现下沉到 :class:`RoomRuntime`（per-room）；server 侧四个方法
+    # 退化为对**前台 runtime** 的转发，让 ``server_inbound_*.py`` 各 handler 与
+    # 测试夹具的 ``self.server._cancel_and_drain_inflight()`` 等调用零改动继续走。
 
     def _inflight_alive(self) -> bool:
-        return self._inflight_turn_task is not None and not self._inflight_turn_task.done()
+        return self._foreground_runtime.inflight_alive()
 
     def _set_inflight(
         self,
         task: Optional[asyncio.Task[None]],
         kind: Optional[Literal["user", "handoff"]],
     ) -> None:
-        """单点设/清 ``(_inflight_turn_task, _inflight_kind)`` 这对耦合状态。
-
-        两字段必须 same-time live or same-time None——否则 ``_inbound_handoff_delegate``
-        里"in-flight 是 user-turn 才 cancel"判定会因 kind 滞后 / task 滞后
-        产生与设计意图相反的行为。assertion 把漂移在写入点炸出来。
-        """
-        assert (task is None) == (kind is None), (task, kind)
-        self._inflight_turn_task = task
-        self._inflight_kind = kind
+        """单点设/清前台 runtime 的 ``(inflight_task, inflight_kind)`` 耦合状态。"""
+        self._foreground_runtime.set_inflight(task, kind)
 
     def _cancel_inflight(self) -> None:
-        """通知当前在跑的 turn task 退场，不 await —— cancel 入口要尽快返回让 inbound
-        循环继续消费帧。task 完成由 ``_run_turn.finally`` 清 ``_inflight_turn_task``。
-        """
-        task = self._inflight_turn_task
-        if task is not None and not task.done():
-            task.cancel()
+        """通知前台 runtime 当前在跑的 turn task 退场，不 await。"""
+        self._foreground_runtime.cancel_inflight()
 
     async def _cancel_and_drain_inflight(self) -> None:
-        """cancel 当前 turn task **并等它收尾**。switch_room / clear_room / 连接断开走这
-        条路径 —— 它们要在 task 完全退出后再继续操作 session，否则 orchestrator 还在写
-        transcript / cursor，新 session 装配会撞上。
-        """
-        task = self._inflight_turn_task
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            # ``_run_turn`` 自己 swallow 了 Cancelled / Exception，正常情况这里 await
-            # 不会再抛；保留 CancelledError 兜底是为 cancel→reraise 极小竞态窗口。
-            pass
+        """cancel 前台 runtime 当前 turn task **并等它收尾**。"""
+        await self._foreground_runtime.cancel_and_drain_inflight()
 
     async def _run_turn(
-        self, text: str, sink: EnvelopeSink, *, task_id: Optional[str],
+        self, runtime: RoomRuntime, text: str, *, task_id: Optional[str],
     ) -> None:
-        """承载一条 user_message 的整个 AI 链。挂在 ``_inflight_turn_task`` 上让 cancel
-        入口能 ``task.cancel()`` 它。
+        """承载一条 user_message 的整个 AI 链。挂在 ``runtime.inflight_task`` 上让
+        cancel 入口能 ``task.cancel()`` 它。
 
         - CancelledError：``orchestrator._run_ai_chain`` 在补完 ``turn_end(cancelled)``
           后 reraise；这里 swallow 让 task 正常完成。
@@ -563,34 +567,41 @@ class ChahuaServer:
         ``task_id`` 由 :meth:`_inbound_user_message` 在接帧同步上下文里快照后传入 —— 不能
         在本协程里读 ``tasks_store.active_task_id`` 兜底，那样会与 inbound 队列里排在后面
         的 ``open_task`` 帧形成 race。
+
+        P9 9.1.3：turn 事件投到 ``runtime.router``（不是裸 ws sink）—— router 此阶段
+        恒 ``foreground`` = 全量透传 ws_sink，行为与之前一致；9.2 后台续跑靠翻
+        router.mode 改路由，无需触碰运行中的 turn。``finally`` 清的是**本 turn 自己
+        的 runtime** 的槽，不是 ``_foreground_runtime`` —— 切房后仍清对房间。
         """
         try:
-            await self._session.orchestrator.submit_user_message(
-                text, sink=sink, task_id=task_id,
+            await runtime.session.orchestrator.submit_user_message(
+                text, sink=runtime.router, task_id=task_id,
             )
         except asyncio.CancelledError:
             _log.info("turn cancelled by user")
         except Exception:
             _log.exception("submit_user_message crashed")
         finally:
-            self._set_inflight(None, None)
+            runtime.set_inflight(None, None)
 
     async def _run_handoff_turn(
-        self, sink: EnvelopeSink, *, task_id: Optional[str],
+        self, runtime: RoomRuntime, *, task_id: Optional[str],
     ) -> None:
         """承载一次 handoff drain。结构照搬 :meth:`_run_turn`：cancel-safe + finally
         同槽清两个，让 cancel / busy 判定与 user-turn 同口径（docs §3.4 反向评审 v3-#3）。
+
+        P9 9.1.3：与 :meth:`_run_turn` 同口径走 ``runtime.router`` + 清本 runtime 槽。
         """
         try:
-            await self._session.orchestrator.run_pending_handoff(
-                sink, task_id=task_id,
+            await runtime.session.orchestrator.run_pending_handoff(
+                runtime.router, task_id=task_id,
             )
         except asyncio.CancelledError:
             _log.info("handoff drain cancelled by user")
         except Exception:
             _log.exception("handoff drain crashed")
         finally:
-            self._set_inflight(None, None)
+            runtime.set_inflight(None, None)
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息到对应 handler。
@@ -807,9 +818,12 @@ class ChahuaServer:
             _log.warning("user_message dropped: previous turn still in flight")
             return
         snapshot_task_id = self.task._snapshot_active_task_id()
-        self._set_inflight(
+        # P9 9.1.3：把 turn 绑到具体 runtime（此阶段只有前台一个）—— turn 事件走
+        # runtime.router、收尾清 runtime 自己的槽，9.2 后台续跑无需再改这里。
+        runtime = self._foreground_runtime
+        runtime.set_inflight(
             asyncio.create_task(
-                self._run_turn(text, sink, task_id=snapshot_task_id),
+                self._run_turn(runtime, text, task_id=snapshot_task_id),
                 name="chahua-turn",
             ),
             INFLIGHT_KIND_USER,

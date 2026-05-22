@@ -57,7 +57,7 @@ async def test_run_handoff_turn_normal_completion_clears_both_slots(
 
     monkeypatch.setattr(Orchestrator, "run_pending_handoff", _noop_drain)
     task = asyncio.create_task(
-        srv._run_handoff_turn(lambda _e: None, task_id=None),
+        srv._run_handoff_turn(srv._foreground_runtime, task_id=None),
     )
     srv._set_inflight(task, INFLIGHT_KIND_HANDOFF)
     await task
@@ -79,7 +79,7 @@ async def test_run_handoff_turn_cancel_swallow_clears_both_slots(
     monkeypatch.setattr(Orchestrator, "run_pending_handoff", _block_drain)
 
     task = asyncio.create_task(
-        srv._run_handoff_turn(lambda _e: None, task_id=None),
+        srv._run_handoff_turn(srv._foreground_runtime, task_id=None),
     )
     srv._set_inflight(task, INFLIGHT_KIND_HANDOFF)
 
@@ -107,7 +107,7 @@ async def test_run_handoff_turn_exception_swallow_clears_both_slots(
 
     caplog.set_level(logging.ERROR)
     task = asyncio.create_task(
-        srv._run_handoff_turn(lambda _e: None, task_id=None),
+        srv._run_handoff_turn(srv._foreground_runtime, task_id=None),
     )
     srv._set_inflight(task, INFLIGHT_KIND_HANDOFF)
 

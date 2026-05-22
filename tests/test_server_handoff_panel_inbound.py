@@ -254,7 +254,7 @@ async def test_panel_during_user_turn_cancels_and_starts_drain(
     monkeypatch.setattr(Orchestrator, "run_pending_handoff", _block_drain)
 
     user_turn = asyncio.create_task(
-        srv._run_turn("你好", lambda _e: None, task_id=None),
+        srv._run_turn(srv._foreground_runtime, "你好", task_id=None),
     )
     srv._set_inflight(user_turn, INFLIGHT_KIND_USER)
     await asyncio.wait_for(user_turn_started.wait(), timeout=2.0)

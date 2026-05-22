@@ -54,6 +54,8 @@ from chahua.server import (
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
 
+from chahua.events import NOOP_SINK
+from chahua.room_runtime import RoomEventRouter, RoomRuntime
 from chahua.server_inbound_admin import AdminHandlers
 from chahua.server_inbound_handoff import HandoffHandlers
 from chahua.server_inbound_io import IOHandlers
@@ -171,8 +173,19 @@ class _SpyServer(ChahuaServer):
     """
 
     def __init__(self) -> None:  # type: ignore[override]
-        self._inflight_turn_task: asyncio.Task | None = None
-        self._inflight_kind: str | None = None
+        # P9 9.1.3：``_inflight_*`` / ``_session`` 已是读写前台 runtime 的 property。
+        # 装一个 spy RoomRuntime（``session=None`` —— 路由测不该读 session，真读到
+        # ``None._xxx`` 仍 AttributeError 暴露依赖），让那些 property 有处可落。
+        self._runtimes = {
+            "spy": RoomRuntime(
+                room_id="spy",
+                session=None,  # type: ignore[arg-type]
+                router=RoomEventRouter(NOOP_SINK),
+            )
+        }
+        self._foreground_id = "spy"
+        self._inflight_turn_task = None
+        self._inflight_kind = None
         self.calls: list[tuple[str, dict]] = []
         self.cancel_drain_count = 0
         self.emit_room_info_count = 0
@@ -217,7 +230,8 @@ class _SpyServer(ChahuaServer):
     def _clear_room(self, sink):  # type: ignore[override]
         self.calls.append(("_clear_room", {}))
 
-    async def _run_turn(self, text, sink, *, task_id=None):  # type: ignore[override]
+    async def _run_turn(self, runtime, text, *, task_id=None):  # type: ignore[override]
+        # P9 9.1.3：_run_turn 改为「针对某 runtime」—— spy 同步签名。
         self.run_turn_args.append(text)
 
 

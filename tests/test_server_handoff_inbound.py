@@ -226,7 +226,7 @@ async def test_delegate_after_cancelled_handoff_starts_fresh_wrapper(
     # 启一个真实 wrapper（带 finally），让它进 drain 后阻塞——模拟"已在跑的 handoff"。
     snapshot_task_id = srv.task._snapshot_active_task_id()
     real_wrapper = asyncio.create_task(
-        srv._run_handoff_turn(lambda _e: None, task_id=snapshot_task_id),
+        srv._run_handoff_turn(srv._foreground_runtime, task_id=snapshot_task_id),
     )
     srv._set_inflight(real_wrapper, INFLIGHT_KIND_HANDOFF)
     await asyncio.wait_for(block_gate.wait(), timeout=2.0)
