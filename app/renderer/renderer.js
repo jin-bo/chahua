@@ -59,6 +59,7 @@ import { createComposerTaskChip } from "./composer_task_chip.js";
 import { createChatStream } from "./chat_stream.js";
 import { createMessageFilter } from "./message_filter.js";
 import { createCommands } from "./commands.js";
+import { createConnection } from "./connection.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -131,13 +132,18 @@ if (!wsUrl) {
   throw new Error("missing wsUrl");
 }
 
-let ws = null;
-let connected = false;
-
-// 闭包读最新 ws —— 重连时 ws 变量会被重赋值，闭包每次调用读到当前绑定。所有
-// feature module（upload / persona / settings）共享同一份 ref，留单点未来加
-// readyState 守卫。
-const send = (payload) => ws.send(JSON.stringify(payload));
+// WebSocket 连接 + 重连退避封在 ./connection.js —— renderer 经 send / isConnected
+// 读写连接、经 onConnecting / onMessage / onClose 回调接生命周期。回调引用的
+// handleEnvelope / handleDisconnect / setInputEnabled 都是 hoisted 函数声明，故可在
+// 此处提前装配（feature module 工厂在下文要拿 send，必须早于它们就绪）。
+const connection = createConnection({
+  wsUrl,
+  setStatus,
+  onConnecting: () => setInputEnabled(false),
+  onMessage: handleEnvelope,
+  onClose: handleDisconnect,
+});
+const send = connection.send;
 
 // chat-stream（气泡 / 流式 / 历史回放）见 ./chat_stream.js；在途消息 Map 封装在
 // 该模块内，外部只通过 ``closeInFlightOnDisconnect`` 一键清。
@@ -213,7 +219,7 @@ function setInputEnabled(enabled) {
 
 // "+ 新任务" 只受 connected 制约（多任务允许任意时刻新建）。
 function updateNewTaskBtn() {
-  taskPanelNewBtn.disabled = !connected;
+  taskPanelNewBtn.disabled = !connection.isConnected();
   taskPanelNewBtn.title = "新建任务";
 }
 
@@ -294,7 +300,7 @@ function closeAssignPopover() {
   assignPopover?.close();
 }
 function openAssignPopover() {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   closeActionPopover();
   assignPopover?.show(assignHandoffBtn);
 }
@@ -303,7 +309,7 @@ function openAssignPopover() {
 // 每位茶客一项（含被审消息作者自己——自审合法、不屏蔽），选中即发 handoff_review。
 // anchor 是请审按钮本身；message_id 由 chat_stream 经 attachReviewButton 透传上来。
 function requestReview(messageId, anchorBtn) {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   if (guests.length === 0) {
     setStatus("error", "房间里没有茶客 —— 无法请审");
     return;
@@ -312,7 +318,7 @@ function requestReview(messageId, anchorBtn) {
     label: g.name,
     onClick: () => {
       // 菜单是异步的——用户从弹出菜单里选茶客时连接可能已断，落点再查一次。
-      if (!connected) return;
+      if (!connection.isConnected()) return;
       send({ type: Inbound.HANDOFF_REVIEW, target: g.name, message_id: messageId });
       setStatus("", `已请「${g.name}」审阅这条发言`);
     },
@@ -375,7 +381,7 @@ function renderGuestRowNormal(li, g, lastGuestLock) {
   node.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
   node.addEventListener("click", (ev) => {
     ev.stopPropagation();
-    if (!connected) return;
+    if (!connection.isConnected()) return;
     showPermissionPopover(node, g);
   });
   li.appendChild(node);
@@ -384,7 +390,7 @@ function renderGuestRowNormal(li, g, lastGuestLock) {
   nameBadge.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
   nameBadge.addEventListener("click", (ev) => {
     ev.stopPropagation();
-    if (!connected) return;
+    if (!connection.isConnected()) return;
     showPermissionPopover(node, g);
   });
   li.appendChild(nameBadge);
@@ -407,9 +413,9 @@ function renderGuestRowNormal(li, g, lastGuestLock) {
   } else {
     remove.title = `请离 ${g.name}`;
     remove.addEventListener("click", () => {
-      if (!connected) return;
+      if (!connection.isConnected()) return;
       if (!window.confirm(`请离茶客「${g.name}」？\n房间历史不动，guests/${g.name}/ 工作目录也不会被删，但不会再参与对话。`)) return;
-      ws.send(JSON.stringify({ type: Inbound.REMOVE_GUEST, name: g.name }));
+      send({ type: Inbound.REMOVE_GUEST, name: g.name });
       setStatus("", `请离 ${g.name}…`);
     });
   }
@@ -536,8 +542,8 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
     li.appendChild(meta);
     if (r.room_id !== currentRoomId) {
       li.addEventListener("click", () => {
-        if (!connected) return;
-        ws.send(JSON.stringify({ type: Inbound.SWITCH_ROOM, room_id: r.room_id }));
+        if (!connection.isConnected()) return;
+        send({ type: Inbound.SWITCH_ROOM, room_id: r.room_id });
         setStatus("", `切换到 ${r.name || r.room_id}…`);
       });
       // 删除房间按钮 —— 只对非当前房显示。当前房不能删（先切走再删，与 server 端约束一致）。
@@ -548,9 +554,9 @@ function renderRoomsList(roomsAvailable, currentRoomId) {
       remove.title = `删除房间 ${r.name || r.room_id}`;
       remove.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        if (!connected) return;
+        if (!connection.isConnected()) return;
         if (!window.confirm(`删除房间「${r.name || r.room_id}」？\n房间目录及其全部历史 / 摘要 / 茶客工作区会被永久删除，无法撤销。`)) return;
-        ws.send(JSON.stringify({ type: Inbound.DELETE_ROOM, room_id: r.room_id }));
+        send({ type: Inbound.DELETE_ROOM, room_id: r.room_id });
         setStatus("", `删除 ${r.name || r.room_id}…`);
       });
       li.appendChild(remove);
@@ -849,78 +855,24 @@ function handleEnvelope(env) {
   }
 }
 
-// ── ws 连接 + 重连退避 ─────────────────────────────────────────────
-
-// 退避梯度（ms）。超过梯度长度后稳定在最后一档，永远尝试 —— 桌面 App 无云端账号，
-// 用户没退就接着连；不退指数到分钟级避免长时间断线后用户等不及。
-const RECONNECT_BACKOFF_MS = [1000, 2000, 5000, 10000];
-
-// 这些 close code 表示对端"主动且无意挽回"，不自动重连：
-//   1000 normal closure（双方约定关）
-//   1001 going away（页面切走 / 后端 quit）
-//   1008 policy violation（server.py 拒第二客户端 —— 重连只会再次被拒）
-const NO_RECONNECT_CODES = new Set([1000, 1001, 1008]);
-
-let reconnectAttempt = 0;
-
-function reconnectDelayMs() {
-  const i = Math.min(reconnectAttempt, RECONNECT_BACKOFF_MS.length - 1);
-  return RECONNECT_BACKOFF_MS[i];
-}
-
-function scheduleReconnect() {
-  const delay = reconnectDelayMs();
-  reconnectAttempt += 1;
-  setStatus("error", `连接断开 —— 第 ${reconnectAttempt} 次重试，${delay / 1000}s 后…`);
-  // P3.3 加"立即重连 / 停止重连"按钮时再持有 timer 引用便于 clearTimeout。
-  setTimeout(connect, delay);
-}
-
-function connect() {
-  // 重试中文案 vs 首次连接区分开 —— 首次空白，重试带次数。
-  const tag = reconnectAttempt > 0 ? `（第 ${reconnectAttempt} 次重试）` : "";
-  setStatus("", `连接中… ${wsUrl}${tag}`);
+// ── ws 断线清理 ────────────────────────────────────────────────────
+// connection.js 在 ws close 时回调本函数 —— 重连决策（退避 / NO_RECONNECT_CODES）
+// 留在模块内，这里只做 renderer 侧状态归位。
+function handleDisconnect(code) {
   setInputEnabled(false);
-  ws = new WebSocket(wsUrl);
-  ws.addEventListener("open", () => {
-    connected = true;
-    reconnectAttempt = 0;
-    setStatus("ok", `已连接 ${wsUrl}（等 room_info）`);
-    // composer 解锁延迟到 renderSidebar —— 让 user echo 名字、@ 候选都准备就绪
-    // 后再让用户能输入；避免 "我" → 真名跳变 + @ 候选空白窗口。
-  });
-  ws.addEventListener("message", (ev) => {
-    try {
-      handleEnvelope(JSON.parse(ev.data));
-    } catch (e) {
-      console.error("envelope parse failed:", e, ev.data);
-    }
-  });
-  ws.addEventListener("close", (ev) => {
-    connected = false;
-    setInputEnabled(false);
-    closeInFlightOnDisconnect();
-    // handoff 队列预览是 per-connection 瞬态：断线期间漏收的 handoff_consumed /
-    // handoff_cleared 不会补发，服务端也可能已重启换了空队列 —— 留着旧预览会误导，
-    // 且点 ✕ 会发 handoff_clear 误取消正在跑的 turn。断线即清，与"刷新即清"同口径；
-    // 重连后 renderSidebar 房间 id 不变不会再清，靠这里兜底。
-    handoffState.reset();
-    // P8.3：MTS 状态条同断线即清（与 handoff 预览同口径）。
-    managedSession?.reset();
-    // 拒绝所有等 echo 的上传，让 change handler 的 finally 清 isUploading + 启用附件按钮。
-    upload.dropPending(`ws closed (${ev.code})`);
-    // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
-    currentTurnId = null;
-    updateSendButton();
-    if (NO_RECONNECT_CODES.has(ev.code)) {
-      setStatus("error", `连接断开 (${ev.code} ${ev.reason || ""})`);
-      return;
-    }
-    scheduleReconnect();
-  });
-  ws.addEventListener("error", (ev) => {
-    console.error("ws error", ev);
-  });
+  closeInFlightOnDisconnect();
+  // handoff 队列预览是 per-connection 瞬态：断线期间漏收的 handoff_consumed /
+  // handoff_cleared 不会补发，服务端也可能已重启换了空队列 —— 留着旧预览会误导，
+  // 且点 ✕ 会发 handoff_clear 误取消正在跑的 turn。断线即清，与"刷新即清"同口径；
+  // 重连后 renderSidebar 房间 id 不变不会再清，靠这里兜底。
+  handoffState.reset();
+  // P8.3：MTS 状态条同断线即清（与 handoff 预览同口径）。
+  managedSession?.reset();
+  // 拒绝所有等 echo 的上传，让 change handler 的 finally 清 isUploading + 启用附件按钮。
+  upload.dropPending(`ws closed (${code})`);
+  // 断线时 turn_end 不会再来；本地清"停止"状态，让重连成功后按钮回到"发送"。
+  currentTurnId = null;
+  updateSendButton();
 }
 
 // ── 添加茶客 / 新建房间 modal ─────────────────────────────────────────
@@ -934,19 +886,19 @@ function closeModal(modal) {
 }
 
 addGuestBtn.addEventListener("click", () => {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   const inRoom = new Set(guests.map((g) => g.name));
   renderPersonaPicker(addGuestListEl, {
     personas: personasAvailable,
     multi: false,
     excludeNames: inRoom,
     onPick: (p) => {
-      ws.send(JSON.stringify({
+      send({
         type: Inbound.ADD_GUEST,
         persona: p.persona,
         name: p.name,
         permission: DEFAULT_PERMISSION,
-      }));
+      });
       setStatus("", `添加茶客 ${p.name}…`);
       closeModal(addGuestModal);
     },
@@ -958,7 +910,7 @@ addGuestBtn.addEventListener("click", () => {
 assignHandoffBtn.addEventListener("click", openAssignPopover);
 
 addRoomBtn.addEventListener("click", () => {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   newRoomNameEl.value = "";
   newRoomTopicEl.value = "";
   newRoomRulesEl.value = "";
@@ -978,14 +930,14 @@ createPersonaImport({
   githubUrlEl: importGithubUrlEl,
   submitBtn: importPersonaSubmitBtn,
   importBtn: importPersonaBtn,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
   pickFolder: window.chahua?.pickFolder,
 });
 
 newRoomSubmitEl.addEventListener("click", () => {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   const name = newRoomNameEl.value.trim();
   if (!name) {
     newRoomNameEl.focus();
@@ -1003,14 +955,14 @@ newRoomSubmitEl.addEventListener("click", () => {
   }));
   // room_id 用 name 直接当目录名 —— server 端 normalize_room_id 会再洗一遍非法字符；
   // 暴露独立 id 字段会增加 UI 复杂度（用户难以理解 id vs name 的区别）。
-  ws.send(JSON.stringify({
+  send({
     type: Inbound.CREATE_ROOM,
     room_id: name,
     name,
     topic: newRoomTopicEl.value.trim(),
     rules: newRoomRulesEl.value.trim(),
     guests: guestsPayload,
-  }));
+  });
   setStatus("", `新建房间 ${name}…`);
   closeModal(addRoomModal);
 });
@@ -1036,19 +988,19 @@ const settings = createSettings({
     submitBtn: roomTomlSubmitBtn,
   },
   avatarFileInput,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
 });
 
 const guestSettings = createGuestSettings({
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
 });
 
 const roomSettings = createRoomSettings({
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
   openGuestSettings: (g) => guestSettings.open(g),
@@ -1058,14 +1010,14 @@ const roomSettings = createRoomSettings({
 permissionPopover = createPermissionPopover({
   send,
   setStatus,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   openGuestSettings: (g) => guestSettings.open(g),
 });
 
 assignPopover = createAssignPopover({
   send,
   setStatus,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   getGuests: () => guests.map((g) => g.name),
   getMaxAiTurns: () => maxAiTurns,
 });
@@ -1075,7 +1027,7 @@ assignPopover = createAssignPopover({
 const handoffQueueBar = createHandoffQueueBar({
   barEl: handoffQueueBarEl,
   send,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
 });
 handoffState.subscribe((queue) => handoffQueueBar.render(queue));
 
@@ -1083,7 +1035,7 @@ handoffState.subscribe((queue) => handoffQueueBar.render(queue));
 // managed_session_* envelope；与 handoff 队列同瞬态——切房 / 断线即 reset。
 managedSession = createManagedSession({
   send,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   setStatus,
   getGuests: () => guests.map((g) => g.name),
   getActiveTask: () => taskState.getActiveTask(),
@@ -1096,7 +1048,7 @@ const upload = createUpload({
   pendingFilesEl,
   fileInputEl,
   attachFileBtn,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
   onAttachToTask: (rel) => attachArtifact(rel),
@@ -1111,7 +1063,7 @@ const decisionSupport = createDecisionSupport({
   setStatus,
   openModal,
   closeModal,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
 });
 
 function attachArtifact(rel) {
@@ -1134,7 +1086,7 @@ function attachArtifact(rel) {
 // dropdown 里切 active"走完全同一行 wire 帧。
 const composerTaskChip = createComposerTaskChip({
   chipEl: composerTaskChipEl,
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
   taskState,
@@ -1155,7 +1107,7 @@ const taskPanel = createTaskPanel({
   // 终结态在本层 smart-route 到 close_task vs update_task wire frame。task_panel.js 对
   // wire 协议零感知。
   onPatchTask: (taskId, patch) => {
-    if (!connected) return;
+    if (!connection.isConnected()) return;
     if (patch.status && isTaskClosed(patch.status)) {
       send({ type: Inbound.CLOSE_TASK, task_id: taskId, status: patch.status });
       setStatus("", patch.status === "done" ? "标记完成…" : "放弃任务…");
@@ -1173,7 +1125,7 @@ const taskPanel = createTaskPanel({
   // 产物 li 点击：发 download_file inbound，等 FILE_DOWNLOAD envelope 回吐后 Blob 触发
   // 浏览器原生下载。断网时早返避免 send 抛。
   onDownloadArtifact: (rel) => {
-    if (!connected) return;
+    if (!connection.isConnected()) return;
     send({ type: Inbound.DOWNLOAD_FILE, rel });
     setStatus("", `下载「${rel}」…`);
   },
@@ -1249,7 +1201,7 @@ taskState.subscribe((state) => {
 });
 
 taskPanelNewBtn.addEventListener("click", () => {
-  if (!connected || taskPanelNewBtn.disabled) return;
+  if (!connection.isConnected() || taskPanelNewBtn.disabled) return;
   newTaskTitleEl.value = "";
   newTaskGoalEl.value = "";
   // owner 选项与任务卡 owner 下拉同源 —— "" 表示全员，submit 时再 normalize 回 null。
@@ -1266,7 +1218,7 @@ taskPanelNewBtn.addEventListener("click", () => {
 });
 
 newTaskSubmitBtn.addEventListener("click", () => {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   const title = newTaskTitleEl.value.trim();
   if (!title) {
     newTaskTitleEl.focus();
@@ -1289,7 +1241,7 @@ newTaskSubmitBtn.addEventListener("click", () => {
 // id 的 li 一律跳过 —— 决策必须能引回 transcript 里的真实 message。
 // 标为决策 modal —— 见 ./decision_support.js（factory 实例化在 createUpload 之后）。
 messagesEl.addEventListener("contextmenu", (ev) => {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   const li = ev.target.closest("li[data-message-id]");
   if (!li) return;
   ev.preventDefault();
@@ -1330,10 +1282,10 @@ document.addEventListener("keydown", (ev) => {
 // room_history(空)，renderSidebar 一帧 messagesEl.replaceChildren；失败 / 服务端拒收
 // 时 UI 不会出现"明明清了又冒出来"的诡异状态。
 function clearCurrentRoom() {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   const roomName = roomNameEl.textContent;
   if (!window.confirm(`确定清空「${roomName}」的全部聊天记录？\n茶客在场，但本房间的 transcript / 摘要 / 游标会被重置。`)) return;
-  ws.send(JSON.stringify({ type: Inbound.CLEAR_ROOM }));
+  send({ type: Inbound.CLEAR_ROOM });
   // 服务端 reset_room 会清 handoff 队列，但回环的 room_info 房间 id 不变 ——
   // renderSidebar 的切房判定不会触发，这里显式 reset 让预览跟上。
   handoffState.reset();
@@ -1350,7 +1302,7 @@ function showActionPopover(anchor, title, items) {
 }
 
 function showUserActionsPopover(anchor) {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   showActionPopover(anchor, "我（设置）", [
     { label: "编辑配置", desc: "改 USER.md（显示名 / 个人偏好）", onClick: settings.openEditUserMd },
     { label: "换头像", desc: "PNG / JPG / WebP / GIF，自动裁方 + 压到 256px PNG", onClick: settings.pickAvatarFile },
@@ -1358,7 +1310,7 @@ function showUserActionsPopover(anchor) {
 }
 
 function showRoomActionsPopover(anchor) {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   const roomName = roomNameEl.textContent || "本房间";
   showActionPopover(anchor, `房间「${roomName}」`, [
     { label: "详细设置", desc: "编排参数 / 打分 / 摘要模型 / 茶客一览", onClick: () => roomSettings.open() },
@@ -1369,7 +1321,7 @@ function showRoomActionsPopover(anchor) {
 }
 
 function exportCurrentRoom() {
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   send({ type: Inbound.EXPORT_ROOM });
   setStatus("", "导出中…");
 }
@@ -1393,7 +1345,7 @@ roomNameEl.addEventListener("dblclick", (ev) => {
 // 斜杠命令处理器 —— composer submit 时 tryHandle(text) 优先拦截。clearInput 复刻
 // 原内联的"清空 textarea + 重算高度"两步。
 const commands = createCommands({
-  isConnected: () => connected,
+  isConnected: connection.isConnected,
   send,
   setStatus,
   appendBubble,
@@ -1412,12 +1364,12 @@ composer.addEventListener("submit", (ev) => {
     // dropdown 开着时 Enter 已在 keydown 里被消费；这里防御性 noop。
     return;
   }
-  if (!connected) return;
+  if (!connection.isConnected()) return;
   // 「停止」分支：currentTurnId 非空表示 AI 链在跑，submit 按钮处于「停止」语义。
   // 服务端收到后 task.cancel() 当前 turn task，turn_end(status=cancelled) 回来时
   // 状态机会清掉 currentTurnId，按钮自动复原成「发送」。textInput 内容不动。
   if (currentTurnId !== null) {
-    ws.send(JSON.stringify({ type: Inbound.CANCEL, turn_id: currentTurnId }));
+    send({ type: Inbound.CANCEL, turn_id: currentTurnId });
     setStatus("", "已请求停止…");
     return;
   }
@@ -1446,11 +1398,11 @@ composer.addEventListener("submit", (ev) => {
     kind: "user",
     taskId: taskState.getActiveTask()?.id ?? null,
   });
-  ws.send(JSON.stringify({
+  send({
     type: Inbound.USER_MESSAGE,
     text,
     ...(files.length > 0 ? { files } : {}),
-  }));
+  });
   textInput.value = "";
   upload.clear();
   autoResizeTextarea();
@@ -1467,4 +1419,4 @@ messagesEl.addEventListener("click", (ev) => {
 // 浏览器对 rows="1" 的默认高度算法有 1~2 px 差异 —— 一次 resize 把 textarea
 // 锁到 CSS min-height (36px)，与发送 / 附件按钮单行视图三者对齐。
 autoResizeTextarea();
-connect();
+connection.start();
