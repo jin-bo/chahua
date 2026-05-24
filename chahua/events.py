@@ -156,6 +156,25 @@ class ChahuaEventType(str, Enum):
     # 新增事件类型——旧前端遇未知 type WARN 后忽略（向前兼容），不 bump schema_version。
     ROOM_BACKGROUND_FINISHED = "room_background_finished"
 
+    # P11 后台 Agent run（docs/P11-后台 Agent.md §「envelope」）。4 个 hint 型事件 ——
+    # 不进 transcript、不触发 AI；旧前端遇未知 type WARN 后忽略，不 bump schema_version。
+    # 都不挂房间 turn（turn_id / message_id / guest_name 全 None；message_end(ok) 才挂
+    # 茶客发言气泡——那一帧的 ``data.run_id`` 是关联依据，不是这里的 4 个事件）。
+    # data 形状：
+    #   - AGENT_RUN_STARTED   ``{run_id, guest_name, task_id?, issued_by,
+    #                            source_guest?, instruction_preview?}`` —— inbound /
+    #                            工具校验通过后立即 emit；
+    #   - AGENT_RUN_FINISHED  同上字段（已写气泡，run_id 给前端关联）；
+    #   - AGENT_RUN_CANCELLED 同上字段（用户 / clear_room 取消）；
+    #   - AGENT_RUN_ERROR     同上 + ``{error: <reason>}`` —— wrapper 内 speak() 抛非
+    #                            CancelledError 异常被吞、msg 为 None 时走。
+    # 4 个事件都加入 P9 后台白名单（``room_runtime._BACKGROUND_WHITELIST``），
+    # 后台房 bg run 完成时前端「进行中」徽标 / sidebar 指示能即时更新。
+    AGENT_RUN_STARTED = "agent_run_started"
+    AGENT_RUN_FINISHED = "agent_run_finished"
+    AGENT_RUN_CANCELLED = "agent_run_cancelled"
+    AGENT_RUN_ERROR = "agent_run_error"
+
     # P10.2 非任务房间产物：茶客通过原生 ``write_file('./share/<x>')`` 落盘到房间公共
     # 桌面 ``<room>/share/``，或用户 UI 上传到 share/ —— 与 ``TASK_ARTIFACT_ADDED`` 平行
     # 的 hint。``data`` 形状 ``{rel, name, size, originated_message_id?}`` —— 无

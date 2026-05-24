@@ -57,6 +57,11 @@ _BACKGROUND_PASS = [
     ChahuaEventType.MANAGED_SESSION_ADVANCED,
     ChahuaEventType.MANAGED_SESSION_ENDED,
     ChahuaEventType.ROOM_BACKGROUND_FINISHED,
+    # P11：bg run 4 个里程碑加入后台白名单。
+    ChahuaEventType.AGENT_RUN_STARTED,
+    ChahuaEventType.AGENT_RUN_FINISHED,
+    ChahuaEventType.AGENT_RUN_CANCELLED,
+    ChahuaEventType.AGENT_RUN_ERROR,
 ]
 
 # 后台丢弃的高频流式 / 非里程碑事件。

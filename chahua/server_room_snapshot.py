@@ -99,6 +99,40 @@ def _orchestrator_effective_dict(config: OrchestratorConfig) -> dict[str, object
     return {k: getattr(config, k) for k in ORCH_FIELD_BOUNDS}
 
 
+def _project_agent_runs(runtime) -> list[dict]:  # type: ignore[no-untyped-def]
+    """前台 RoomRuntime 的 ``agent_runs.values()`` 投影 —— ``room_info.data.background_runs``
+    整批权威字段（P11 设计 §「envelope」）。
+
+    前端每次收到 ``room_info`` 即覆盖式 ``applyBackgroundRuns(...)``：实时
+    ``agent_run_started`` / ``*_terminal`` 只做增量，``room_info`` 是权威源。
+    切回房 / 重连 / clear 都重新到 ``room_info``，整批 set 清除幽灵指示（即便
+    实时 terminal 帧在断连中丢了）。
+
+    投影字段与 ``AGENT_RUN_*`` envelope ``data`` 同构（``run_id / guest_name /
+    task_id? / issued_by / source_guest? / instruction_preview``），让前端单点
+    渲染逻辑同时吃 envelope 与 snapshot。``instruction_preview`` 截 ≤30 字符
+    （与运行列表条 UI 同口径）。
+    """
+    out: list[dict] = []
+    for run in runtime.agent_runs.values():
+        preview = run.instruction
+        if len(preview) > 30:
+            preview = preview[:30]
+        item: dict = {
+            "run_id": run.run_id,
+            "guest_name": run.guest_name,
+            "issued_by": run.issued_by,
+            "instruction_preview": preview,
+            "created_at_ms": run.created_at_ms,
+        }
+        if run.task_id is not None:
+            item["task_id"] = run.task_id
+        if run.source_guest is not None:
+            item["source_guest"] = run.source_guest
+        out.append(item)
+    return out
+
+
 def _rooms_available_with_busy(server: "ChahuaServer") -> list[dict]:
     """``discover_rooms`` 结果叠加每房 ``busy`` 标志（P9 阶段 9.3.2）。
 
@@ -228,6 +262,11 @@ def emit_room_info(server: "ChahuaServer", sink: EnvelopeSink) -> None:
                 # 且其 turn / handoff drain 正在跑（含切走后转后台续跑的房间；
                 # 后台 runtime「仅在有活时存在」，故注册表里的后台房几乎恒 busy）。
                 "rooms_available": _rooms_available_with_busy(server),
+                # P11：前台 RoomRuntime 上 bg run 整批权威快照（设计 §「envelope」）。
+                # 切回房 / 重连 / clear 都重发；C3 时刻无入口创建 bg run，自然 ``[]``，
+                # C8 起 inbound 登记后该字段跟随。前端 ``applyBackgroundRuns(...)`` 单点
+                # 重建运行列表条 + sidebar.guest-bg-run 指示，幽灵指示靠它清。
+                "background_runs": _project_agent_runs(server._foreground_runtime),
                 # 已在场茶客的 name 也在 personas_available 里 —— 前端按
                 # guests[].name 去重显示，避免 picker 列出重复人选。
                 "personas_available": admin.discover_personas(server._paths),

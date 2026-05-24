@@ -53,6 +53,12 @@ _BACKGROUND_WHITELIST: frozenset[ChahuaEventType] = frozenset({
     ChahuaEventType.MANAGED_SESSION_ADVANCED,
     ChahuaEventType.MANAGED_SESSION_ENDED,
     ChahuaEventType.ROOM_BACKGROUND_FINISHED,
+    # P11：后台 Agent run 4 个里程碑。后台房上 bg run 完成时前端「进行中」徽标 /
+    # sidebar 指示需即时刷新；高频流式（message_start / delta / tool_*）仍丢。
+    ChahuaEventType.AGENT_RUN_STARTED,
+    ChahuaEventType.AGENT_RUN_FINISHED,
+    ChahuaEventType.AGENT_RUN_CANCELLED,
+    ChahuaEventType.AGENT_RUN_ERROR,
 })
 
 
