@@ -32,54 +32,38 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-# Sentinel for "task_id arg not passed" —— 区分 None（显式无任务）vs 缺省（要内部 snapshot）。
-_UNSET: Any = object()
-
+from ._orchestrator_chain import AIChainOps
+from ._orchestrator_consts import _UNSET
+from ._orchestrator_handoff_drain import HandoffDrainOps
+from ._orchestrator_handoff_queue import HandoffQueueOps
+from ._orchestrator_managed_session import ManagedSessionOps
+from ._orchestrator_scoring import ScoringOps
 from .artifact_detector import ArtifactDetector
-from .context_renderer import ContextRenderer, render_managed_session_block
+from .context_renderer import ContextRenderer
 from .cursor import GuestCursor
 from .debug_recorder import (
     NOOP_RECORDER,
-    SCORING_PATH_BROADCAST,
-    SCORING_PATH_HANDOFF_DELEGATE,
-    SCORING_PATH_HANDOFF_PANEL,
-    SCORING_PATH_HANDOFF_REVIEW,
-    SCORING_PATH_MENTION,
-    SCORING_PATH_SCORING,
     PickDebugMeta,
     TurnRecorder,
 )
 from .events import (
     NOOP_SINK,
-    STATUS_CANCELLED,
     STATUS_OK,
-    TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
-    TASK_PROPOSAL_KIND_HANDOFF_PANEL,
     ChahuaEnvelope,
     ChahuaEventType,
     EnvelopeSink,
-    emit_to_sink,
-    new_turn_id,
 )
 from .guest import TeaGuest
 from .message_artifacts import MessageArtifactRegistry
 from .handoff import (
-    MANAGED_SESSION_REASON_BUDGET_EXHAUSTED,
-    MANAGED_SESSION_REASON_CAP_REACHED,
-    MANAGED_SESSION_REASON_MANAGER_FINISHED,
-    MANAGED_SESSION_REASON_TASK_CLOSED,
-    MAX_PANEL_TARGETS,
     HandoffItem,
-    HandoffKind,
     ManagedSession,
 )
-from .mentions import BROADCAST_TOKENS, iter_at_positions, matches_at
 from .orchestrator_config import OrchestratorConfig
-from .room import Message, Room, format_messages
-from .scoring import IntentScorer, ScoreKind, ScoreResult
+from .room import Message, Room
+from .scoring import IntentScorer, ScoreResult
 from .summarizer import Summarizer, TaskSummaries
-from .task_rendering import score_to_dict as _score_to_dict, wrap_current_task as _wrap_current_task
-from .tasks_store import CLOSED_STATUSES, TasksStore
+from .tasks_store import TasksStore
 from .user_md import USER_SPEAKER_ID, UserConfig  # noqa: F401  # USER_SPEAKER_ID re-exported (used by tests / callers)
 
 _log = logging.getLogger(__name__)
@@ -87,28 +71,9 @@ _log = logging.getLogger(__name__)
 
 # ``OrchestratorConfig`` re-export 保留 —— server / session / 测试均走
 # ``from chahua.orchestrator import OrchestratorConfig``，定义已搬到 :mod:`.orchestrator_config`
-# 以避免与 :class:`ContextRenderer` 循环依赖。
+# 以避免与 :class:`ContextRenderer` 循环依赖。``_UNSET`` / ``_REVIEW_INSTRUCTION`` /
+# ``_PANEL_SUMMARY_BLOCK`` 见 :mod:`._orchestrator_consts`（slot 拆分 Step 1）。
 __all__ = ["Orchestrator", "OrchestratorConfig"]
-
-
-# P7.2 review：``<review_target>`` 块内的审阅指引文案。被审消息原文由
-# ``format_messages`` 包装后内联在指引之上（docs §4.2）。
-_REVIEW_INSTRUCTION = (
-    "请给出你的审阅意见：可以是「通过」「打回」或具体修改建议，并说明理由。"
-)
-
-# P7.3 panel：``<panel_summary_request>`` 块——summarizer 专属，模块常量（不含
-# per-item 数据）。summarizer 是 panel turn 的末位 speaker，N 位 panelist 的发言
-# 已串行 append 进 transcript、紧贴这一发之前，summarizer 的 ``<recent_messages>``
-# 自然包含——块只需告诉它"刚结束一轮圆桌、请汇总"（docs/P7.3 §4.3）。
-_PANEL_SUMMARY_BLOCK = (
-    "<panel_summary_request>\n"
-    "房间刚结束一轮圆桌平行讨论——多位茶客各自发表了一条独立观点。\n"
-    "请你把最近这几条圆桌发言汇总成一条简洁的综述：提炼共识、点出分歧、"
-    "列出仍待决定的问题。\n"
-    "不要逐条复述，要给出结构化的归纳。\n"
-    "</panel_summary_request>"
-)
 
 
 # ── 茶客注册项 ───────────────────────────────────────────────────────────────
@@ -199,15 +164,22 @@ class Orchestrator:
             message_artifacts=message_artifacts,
         )
 
-        # P7.1 显式 handoff 队列：FIFO，新指派 append 队尾，drain loop 取队首。
-        # 内存瞬态——crash/重启即丢，用户重指即可；落盘的复杂度（与 transcript
-        # 顺序一致性 / cancel 时机）不值（docs/P7 §3.1）。``reset_room`` 同清。
-        self._handoff_queue: deque[HandoffItem] = deque()
+        # slot 拆分：handoff 队列状态 + 队列相关 emit 搬到 :class:`HandoffQueueOps`
+        # （详见 :mod:`._orchestrator_handoff_queue`）。主类经 ``_handoff_queue``
+        # ``@property`` + 5 个薄转发方法保 API 兼容。slot 实例化在 ``__init__``
+        # 末尾的 ``_install_orchestrator_slots`` 内统一装配。
 
-        # P8.3 托管任务会话（MTS）运行态：``None`` = 无托管。与 ``_handoff_queue``
-        # 同瞬态语义——不落盘、crash / 切房 / reset_room 即清（docs/P8.3 §3.1）。
-        # 单房间最多一个。
-        self._managed_session: Optional[ManagedSession] = None
+        # slot 拆分：MTS 状态 + 12 个生命周期 / 推进 / proposal 拦截方法搬到
+        # :class:`ManagedSessionOps`（详见 :mod:`._orchestrator_managed_session`）。
+        # 主类经 ``_managed_session`` ``@property`` (含 setter, 测试直赋) +
+        # ``managed_session`` ``@property`` + 6 个薄转发方法保 API 兼容。
+
+        # slot 拆分骨架：按子域 slot 模块（handoff_queue / managed_session /
+        # scoring / handoff_drain / chain）的装配入口。Step 0 仅占位，后续 step
+        # 逐步把方法搬进各 slot 并在此装配。装配位必须在所有 ``self.xxx`` 初始化
+        # 之后 + ``register`` / ``set_task_proposal_hook`` 之前（hook 注入要求 slot
+        # 已就绪）。
+        _install_orchestrator_slots(self)
 
     # ── 注册 / 信息 ────────────────────────────────────────────────────
 
@@ -313,285 +285,85 @@ class Orchestrator:
             self._message_artifacts.clear()
 
     # ── handoff 队列（P7.1，docs/P7 §3.4）────────────────────────────────
+    # slot 拆分：实现搬到 :class:`HandoffQueueOps`；下列方法 / property 为
+    # 薄转发，保兼容外部调用方（server inbound / 测试 / MTS / drain）。
+
+    @property
+    def _handoff_queue(self) -> deque[HandoffItem]:
+        """返回 slot 内的 deque 引用 —— ``.append`` / ``.clear`` / ``.popleft`` /
+        ``len`` / ``[0]`` / bool 全部经引用直接作用于同一 deque，行为不变。"""
+        return self._handoff_ops._queue
+
+    @_handoff_queue.setter
+    def _handoff_queue(self, value: deque[HandoffItem]) -> None:
+        """rebind 兼容：原 plain field 支持 ``orch._handoff_queue = deque(items)``，
+        property 化后保留同语义 —— 整队替换为新 deque 实例（与 ``_managed_session``
+        setter 对称）。"""
+        self._handoff_ops._queue = value
 
     def enqueue_handoff(self, item: HandoffItem) -> list[HandoffItem]:
-        """append 到队尾；**不**启动执行 / 不 emit envelope。
-
-        envelope emit 职责由 server inbound handler 负责（P7.1.6 加）：handler
-        拿到本方法返回的队列快照后 emit ``HANDOFF_ENQUEUED``；orchestrator 持
-        sink 是 P7 反向评审 v3-#4 明确避免的越权耦合。
-        """
-        self._handoff_queue.append(item)
-        return list(self._handoff_queue)
+        return self._handoff_ops.enqueue_handoff(item)
 
     def clear_handoff_queue(self) -> list[HandoffItem]:
-        """清空队列；返回被丢项给 server emit ``HANDOFF_CLEARED``。"""
-        dropped = list(self._handoff_queue)
-        self._handoff_queue.clear()
-        return dropped
+        return self._handoff_ops.clear_handoff_queue()
 
     @property
     def has_pending_handoff(self) -> bool:
-        """``_handoff_queue`` 是否有待跑项。MTS 开启前的「调度起点干净」校验读它
-        （docs/P8.3 §3.2）—— 队列里残留的手动 delegate 会被 MTS 的 `_advance` 误当
-        worker 回合计入预算。"""
-        return bool(self._handoff_queue)
+        return self._handoff_ops.has_pending_handoff
 
-    # ── 托管任务会话（MTS，P8.3，docs/P8.3-原生自动推进.md §3 / §4 / §5）──────
+    # ── 托管任务会话（MTS，P8.3）────────────────────────────────────────
+    # slot 拆分：实现搬到 :class:`ManagedSessionOps`；下列 property / 方法为
+    # 薄转发。``_managed_session`` 走 getter + setter（测试直赋 ``orch._managed_session=...``
+    # 兼容）；session.py 经 ``orchestrator._intercept_task_proposal`` 注入 hook，
+    # 故主类必须保留同名薄转发。
+
+    @property
+    def _managed_session(self) -> Optional[ManagedSession]:
+        return self._mts_ops._managed_session
+
+    @_managed_session.setter
+    def _managed_session(self, value: Optional[ManagedSession]) -> None:
+        self._mts_ops._managed_session = value
+
+    @_managed_session.deleter
+    def _managed_session(self) -> None:
+        """``del orch._managed_session`` 语义：等同于 ``= None``（清空 MTS）。
+        原 plain field 支持 ``del``；property 化后 deleter 保 API 不变 —— 写盘
+        / emit 都不发生（与 setter 同口径，纯状态翻转）。"""
+        self._mts_ops._managed_session = None
 
     @property
     def managed_session(self) -> Optional[ManagedSession]:
-        """当前托管会话运行态；``None`` = 无托管。server inbound 校验 / 生命周期
-        分支读这个公开访问器（``_managed_session`` 私有）。"""
-        return self._managed_session
+        return self._mts_ops.managed_session
 
     def emit_managed_session_snapshot(self, sink: EnvelopeSink) -> None:
-        """切回托管中的房间时重发 MTS 快照（P9 阶段 9.3.2）。
-
-        P9 之前「``emit_room_snapshot`` 不重投 MTS」成立的前提是「MTS 不跨断线
-        存活」；P9 让 MTS 能在后台续跑，前提被推翻 —— 切回一个「托管中」的后台
-        房间，前端「托管中」状态条 / 「停止托管」按钮要能自给自足重建，不能依赖
-        前端缓存早先收过的 ``managed_session_started``（那只在「MTS 启动时恰好在
-        前台」才成立，脆弱）。
-
-        无 MTS → 空操作。复用 ``managed_session_started`` envelope，``budget`` 是
-        **当前剩余**预算（已被 ``_advance`` 扣减过）—— 前端按收到的值复位倒计时。
-        """
-        ms = self._managed_session
-        if ms is not None:
-            self._emit_managed_session_started(sink, ms)
+        self._mts_ops.emit_managed_session_snapshot(sink)
 
     def start_managed_session(
         self, sink: EnvelopeSink, *, task_id: str, manager_guest: str, budget: int,
     ) -> None:
-        """建立 MTS 运行态 + emit ``managed_session_started``（docs §3.2）。
-
-        kickoff 的 ``delegate(manager)`` 入队 + 启动 drain 由 server inbound handler
-        负责（走既有 ``_enqueue_handoff_and_maybe_start``）—— 本方法只管会话状态。
-        调用方已校验「当前无 MTS」（docs §6.6）。
-        """
-        self._managed_session = ManagedSession(
-            task_id=task_id, manager_guest=manager_guest, budget=budget,
+        self._mts_ops.start_managed_session(
+            sink, task_id=task_id, manager_guest=manager_guest, budget=budget,
         )
-        self._emit_managed_session_started(sink, self._managed_session)
 
     def end_managed_session(self, sink: EnvelopeSink, *, reason: str) -> None:
-        """结束 MTS（server inbound stop / clear / cancel 入口用，docs §3.3）。
-
-        守卫：无 MTS 时空操作。结束 = 清 ``_managed_session`` + 清 ``_handoff_queue``
-        + emit ``managed_session_ended``（docs §4.2 硬约束「结束 MTS 必清待跑队列」）。
-        """
-        if self._managed_session is None:
-            return
-        self._managed_session = None
-        # 结束 MTS = 不再自动说话：清掉所有待跑项（几乎都是 hook 自动入队的
-        # worker / panel）。清后重发空队列快照，前端队列预览不残留（docs §4.2）。
-        if self._handoff_queue:
-            self._handoff_queue.clear()
-            self._emit_handoff_queue_snapshot(sink)
-        self._emit_managed_session_ended(sink, reason)
+        self._mts_ops.end_managed_session(sink, reason=reason)
 
     def _managed_session_stop_reason(self) -> Optional[str]:
-        """按 docs §2.2 顺序返首个命中的停止 reason，或 ``None``（继续推进）。
-
-        budget → task_closed → cap，谁先命中报谁（docs §4.3「预算 vs cap」）。
-        """
-        ms = self._managed_session
-        if ms is None:
-            return None
-        if ms.budget <= 0:
-            return MANAGED_SESSION_REASON_BUDGET_EXHAUSTED
-        if self.tasks_store is not None:
-            task = self.tasks_store.get_task(ms.task_id)
-            if task is None or task.status in CLOSED_STATUSES:
-                return MANAGED_SESSION_REASON_TASK_CLOSED
-        if self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
-            return MANAGED_SESSION_REASON_CAP_REACHED
-        return None
+        return self._mts_ops.stop_reason()
 
     def _advance_managed_session_after_turn(
         self, item: HandoffItem, sink: EnvelopeSink,
     ) -> None:
-        """drain loop 每轮 turn 跑完后调一次：续队列 / 收尾（docs §4.1）。
-
-        ``_managed_session is None`` → 立即返回，对非 MTS 房间零行为变化。
-        按「刚跑完的是不是管理者回合」分流：管理者回合不做事（其 delegate / panel
-        提议已被 ``_intercept_task_proposal`` hook 在回合内入队）；worker 回合且队列
-        空 → ``budget-=1`` + 把管理者放回队列复查。停止条件优先（budget / task / cap）。
-        """
-        ms = self._managed_session
-        if ms is None:
-            return
-        stop = self._managed_session_stop_reason()
-        if stop:
-            self.end_managed_session(sink, reason=stop)
-            return
-        just_ran_manager = (
-            item.kind is HandoffKind.DELEGATE and item.target == ms.manager_guest
-        )
-        if just_ran_manager:
-            # 管理者回合：提议已在回合内由 hook 入队；没派活则队列此刻为空，drain
-            # 走到收尾、由 run_pending_handoff 收尾兜底归 manager_finished。
-            return
-        # worker 回合：worker 不会自动入队，队列空即「这一棒没有后续」→ 回调管理者。
-        if not self._handoff_queue:
-            ms.budget -= 1
-            self.enqueue_handoff(
-                HandoffItem(
-                    kind=HandoffKind.DELEGATE,
-                    target=ms.manager_guest,
-                    reason="托管复查",
-                )
-            )
-            self._emit_handoff_queue_snapshot(sink)
-            self._emit_managed_session_advanced(sink, ms)
+        self._mts_ops.advance_after_turn(item, sink)
 
     def _intercept_task_proposal(
         self, env: ChahuaEnvelope, sink: EnvelopeSink,
     ) -> bool:
-        """``ChahuaTransport.task_proposal_hook`` 实现（docs §5.1）。
-
-        MTS 内管理者的 ``handoff_delegate`` / ``handoff_panel`` 提议 → 直接
-        ``enqueue_handoff`` 并返回 ``True``（拦下该 ``TASK_PROPOSAL`` 不下发前端、
-        不渲采纳卡）。非 MTS / 非管理者 / review / decision / status 提议 → 返
-        ``False``，照 P7.4 既有路径渲采纳卡。
-        """
-        ms = self._managed_session
-        if ms is None:
-            return False
-        data = env.data
-        if data.get("proposer") != ms.manager_guest:
-            return False
-        kind = data.get("kind")
-        if kind not in (
-            TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
-            TASK_PROPOSAL_KIND_HANDOFF_PANEL,
-        ):
-            return False
-        item = self._handoff_item_from_proposal(
-            kind, data.get("payload"), manager=ms.manager_guest,
-        )
-        if item is None:
-            # 形状坏（工具已保证形状、理论不达）→ 不拦，照常渲卡兜底。
-            return False
-        if (
-            item.kind is HandoffKind.DELEGATE
-            and item.target == ms.manager_guest
-        ):
-            _log.warning("MTS 管理者 %r 自指派，跳过（不入队不渲卡）", ms.manager_guest)
-            return True
-        self.enqueue_handoff(item)
-        self._emit_handoff_queue_snapshot(sink)
-        return True
-
-    def _handoff_item_from_proposal(
-        self, kind: str, payload: object, *, manager: str,
-    ) -> Optional[HandoffItem]:
-        """``TASK_PROPOSAL.payload`` → ``HandoffItem``；形状 / 校验不过返 ``None``（docs §5.1）。
-
-        ``issued_by`` 恒 ``HANDOFF_ISSUED_BY_USER``（沿用 P7.4 §5.7，不为 MTS 加新
-        取值）；provenance 走 ``reason`` 前缀「托管 · <manager> 指派」保留。
-
-        delegate / panel 路径**自带 ``_inbound_handoff_*`` 的在场 / 形状校验**——
-        MTS 自动入队绕开了 inbound handler，不在这里校验则非法指派（target 不在场、
-        圆桌重复 / 超员 / summarizer 自指）会被直接拦截入队，drain 只能静默 drop、
-        且 MTS 收尾时给不出可操作的报错（Codex review P2）。任一校验不过返 ``None``
-        → 调用方不拦截、照常渲采纳卡，用户采纳时由 inbound 给出明确报错。
-
-        与前端 ``proposal_card.js::buildAcceptInbound`` 是同一份 payload 契约的两侧
-        实现（JS 拼 inbound 帧、本函数直接造 ``HandoffItem``，因 MTS 在 emit 前就拦截
-        故无法共用代码）—— 改 ``payload`` 形状两处同步。
-        """
-        if not isinstance(payload, dict):
-            return None
-        note = f"托管 · {manager} 指派"
-        if kind == TASK_PROPOSAL_KIND_HANDOFF_DELEGATE:
-            target = payload.get("target")
-            if not isinstance(target, str) or not target:
-                return None
-            # 与 _inbound_handoff_delegate 同口径：target 不在场 → 不拦截、渲采纳卡，
-            # 用户采纳时由 inbound 报「target 不在场」。否则 MTS 静默吞掉坏指派、
-            # drain drop 后无可操作报错地结束会话（Codex review P2）。
-            if target not in self._guests:
-                return None
-            extra = payload.get("reason")
-            if isinstance(extra, str) and extra:
-                note = f"{note}：{extra}"
-            return HandoffItem(
-                kind=HandoffKind.DELEGATE, target=target, reason=note,
-            )
-        if kind == TASK_PROPOSAL_KIND_HANDOFF_PANEL:
-            targets = payload.get("targets")
-            if not isinstance(targets, list) or not all(
-                isinstance(t, str) and t for t in targets
-            ):
-                return None
-            # 与 _inbound_handoff_panel 五道校验同口径（docs/P7.3 §3.3）：≥2 人 /
-            # 无重复 / 全在场 / summarizer 在场且不在 targets / cap 数学。
-            if len(targets) < 2 or len(set(targets)) != len(targets):
-                return None
-            if any(t not in self._guests for t in targets):
-                return None
-            summarizer = payload.get("summarizer")
-            if summarizer is not None:
-                if not isinstance(summarizer, str) or not summarizer:
-                    return None
-                if summarizer not in self._guests or summarizer in targets:
-                    return None
-            cap = min(
-                MAX_PANEL_TARGETS,
-                self.config.max_consecutive_ai_turns - (1 if summarizer else 0),
-            )
-            if len(targets) > cap:
-                return None
-            return HandoffItem(
-                kind=HandoffKind.PANEL,
-                targets=tuple(targets),
-                summarizer=summarizer,
-                reason=note,
-            )
-        return None
-
-    def _emit_managed_session_started(
-        self, sink: EnvelopeSink, ms: ManagedSession,
-    ) -> None:
-        self._emit_managed_session(
-            sink, ChahuaEventType.MANAGED_SESSION_STARTED,
-            {
-                "task_id": ms.task_id,
-                "manager_guest": ms.manager_guest,
-                "budget": ms.budget,
-            },
-        )
-
-    def _emit_managed_session_advanced(
-        self, sink: EnvelopeSink, ms: ManagedSession,
-    ) -> None:
-        self._emit_managed_session(
-            sink, ChahuaEventType.MANAGED_SESSION_ADVANCED,
-            {"manager_guest": ms.manager_guest, "remaining_budget": ms.budget},
-        )
-
-    def _emit_managed_session_ended(
-        self, sink: EnvelopeSink, reason: str,
-    ) -> None:
-        self._emit_managed_session(
-            sink, ChahuaEventType.MANAGED_SESSION_ENDED, {"reason": reason},
-        )
-
-    def _emit_managed_session(
-        self, sink: EnvelopeSink, type: ChahuaEventType, data: dict,
-    ) -> None:
-        """连接级 ``managed_session_*`` envelope（``turn_id`` / ``guest_name`` /
-        ``message_id`` 全 None —— MTS 是调度层瞬态，不属任一 turn）。"""
-        emit_to_sink(
-            sink,
-            ChahuaEnvelope(
-                room_id=self.room.name, turn_id=None,
-                guest_name=None, message_id=None,
-                type=type, data=data,
-            ),
-        )
+        """``ChahuaTransport.task_proposal_hook`` 注入点（``session.py`` 经
+        ``orchestrator._intercept_task_proposal`` 注入）。slot 拆分：实际逻辑在
+        :class:`ManagedSessionOps`，主类保留同名薄转发保证 bound method 引用稳定。"""
+        return self._mts_ops.intercept_task_proposal(env, sink)
 
     # ── 主入口 ─────────────────────────────────────────────────────────
 
@@ -646,277 +418,30 @@ class Orchestrator:
         await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
 
     # ── AI 链 ─────────────────────────────────────────────────────────
+    # slot 拆分：``_run_ai_chain`` 实现搬到 :class:`AIChainOps`。**主类必须保留
+    # 同名 method**：``tests/conftest.py`` / ``tests/test_orchestrator_run_pending_handoff.py``
+    # 经 ``monkeypatch.setattr(Orchestrator, "_run_ai_chain", ...)`` 替换本方法
+    # 拦截 ``submit_user_message`` 的调用 —— 主类必须是真正的实现位置（薄转发也可，
+    # 但符号要在 ``Orchestrator`` 上）。
 
     async def _run_ai_chain(
         self, *, sink: EnvelopeSink, active_task_id: Optional[str] = None
     ) -> None:
-        # 上一轮已经 emit ``turn_end(next='ai')``、UI 仍守在"停止"按钮等下一个 turn_start
-        # 的那个 turn_id；下一次 pick 成功（emit 新 turn_start / turn_end）就清零，pick 失败
-        # 则用这个 id 补一帧 ``turn_end(next='user')`` 让 UI 收回按钮。None = 无未结链。
-        last_open_turn_id: Optional[str] = None
-        while self._consecutive_ai_turns < self.config.max_consecutive_ai_turns:
-            # scoring 阶段被 cancel：上一轮已 emit turn_end(next='ai')，UI 守在「停止」
-            # 按钮等下一个 turn_start。不补 fixup 的话 UI 永远收不到链终态。first-iter
-            # （last_open_turn_id=None）UI 还在「发送」状态，无须补。
-            # **scoring 阶段无 recorder turn 在飞**：turn_id 在 pick 之后才 mint，所以
-            # 此处 cancel 不需要 flush_turn。要记本周期"为什么没说"得等 pick 跑完后。
-            try:
-                winners, scores, prompts_by_guest, debug_meta = await self._pick_next_speaker(
-                    respect_at_mention=self._consecutive_ai_turns == 0,
-                    active_task_id=active_task_id,
-                )
-            except asyncio.CancelledError:
-                if last_open_turn_id is not None:
-                    self._emit_cancel_fixup(sink, turn_id=last_open_turn_id)
-                raise
-
-            # 始终 mint turn_id + start_turn + record_scoring —— 无人接话也记一行
-            # （不变量"每个 pick 周期一行 turns.jsonl"，docs §数据模型 P6）。
-            turn_id = new_turn_id()
-            self._recorder.start_turn(
-                turn_id=turn_id,
-                task_id=active_task_id,
-                trigger=self._compute_trigger(),
-            )
-            self._recorder.record_scoring(
-                threshold=debug_meta.threshold,
-                scorables=debug_meta.scorables,
-                cooled=debug_meta.cooled,
-                results=[
-                    (r, prompts_by_guest.get(r.guest_name)) for r in scores
-                ],
-                winners=winners,
-                scoring_path=debug_meta.scoring_path,
-            )
-
-            if not winners:
-                # 没人想接话。两种子情况（envelope 协议不变 —— turn_start 不 emit）：
-                #   a) 本回合一上来就空（全员低分 / 全员冷却）—— UI 状态干净，直接返回。
-                #   b) AI 链中途空（前一轮 next='ai'）—— 补一帧 turn_end(next='user')。
-                # turns.jsonl 仍 flush 一行（最需调试的就是"为什么没人说话"）。
-                self._recorder.flush_turn()
-                if last_open_turn_id is not None:
-                    self._emit_turn(
-                        sink,
-                        turn_id=last_open_turn_id,
-                        type=ChahuaEventType.TURN_END,
-                        data={"next": "user"},
-                    )
-                return
-
-            # turn_start / turn_end 是轮级事件，跨多位茶客；guest_name=None。winners
-            # 都在 data.scores 里，前端按 turn_id 聚合。
-            # ``capture_prompts=True`` 时 piggyback scoring prompt（前端调试抽屉拿了即用，
-            # 不另开 envelope 类型 / 不 bump schema_version；老前端忽略未知字段）。
-            # ``False`` 时整字段不写 key（区分"prompt 捕获关了" vs "prompt 是空"两种
-            # 语义，docs §不变量）。
-            turn_data: dict[str, Any] = {
-                "scores": [_score_to_dict(s) for s in scores],
-                # 前端调试抽屉折叠态显示 scoring_path 徽标（与 room_history 索引行同款），
-                # 同时透给 piggyback 调试视图。schema_version 不 bump，老前端忽略未知字段。
-                "scoring_path": debug_meta.scoring_path,
-            }
-            if self._recorder.capture_prompts:
-                # 关键：``@guest`` / ``@all`` 路径绕过 LLM 打分 ⇒ ``prompts_by_guest`` 为空。
-                # 必须 **始终** 写 key（哪怕值是 ``{}``），让前端区分"capture 已关"（key
-                # 缺）与"capture 开但本 turn 无 LLM 打分"（空字典）—— 否则 mention /
-                # broadcast turn 会被误标"prompt 捕获已关"。
-                turn_data["scoring_prompts"] = {
-                    g: p for g, p in prompts_by_guest.items() if p
-                }
-            self._emit_turn(
-                sink,
-                turn_id=turn_id,
-                type=ChahuaEventType.TURN_START,
-                data=turn_data,
-            )
-
-            # 同回合"抢话"的多位茶客串行发言；第 2 位发言时，第 1 位的回复已经在
-            # transcript 里，靠 cursor 增量自然喂入。每位都计 1 轮（max 卡死整体上限）。
-            # @ 路径（单点 / broadcast）绕过本回合的内层 cap —— 用户已显式指定谁该说话，
-            # 不该被 max_consecutive_ai_turns 截断；下一次 outer while 检查时 cap 自然
-            # 终止 AI 链续接。
-            #
-            # 发言阶段被 cancel：本 turn 的 turn_start 已 emit、message_* 可能在流。
-            # scoring 阶段的 cancel 在外层 while 的 try 里独立处理。
-            # **P6.1 cancel 也 flush**：半截 prompt / 工具 / partial message 都是取证证据。
-            bypass_inner_cap = all(s.kind == ScoreKind.MENTION for s in scores)
-            try:
-                for guest_name in winners:
-                    if not bypass_inner_cap and self._consecutive_ai_turns >= self.config.max_consecutive_ai_turns:
-                        break
-                    await self._let_speak(
-                        guest_name, turn_id=turn_id, sink=sink,
-                        task_id=active_task_id,
-                    )
-                    self._consecutive_ai_turns += 1
-                    self._rounds_without_user_or_mention += 1
-            except asyncio.CancelledError:
-                self._cancel_fixup_and_flush(sink, turn_id=turn_id)
-                raise
-
-            next_state = (
-                "ai"
-                if self._consecutive_ai_turns < self.config.max_consecutive_ai_turns
-                else "user"
-            )
-            self._emit_turn(
-                sink,
-                turn_id=turn_id,
-                type=ChahuaEventType.TURN_END,
-                data={"next": next_state},
-            )
-            # next='ai' 时记下本 turn_id，下一轮 pick 若失败要回来补 fixup；
-            # next='user' 时 UI 已自行收回按钮，无 pending 状态。
-            last_open_turn_id = turn_id if next_state == "ai" else None
-
-            # 正常 turn 完结 —— flush 一行到 turns.jsonl 后清 in-flight（docs P6）。
-            self._recorder.flush_turn()
-
-            # 摘要 / 冷却递减每"pick 周期"一次（不是每个发言者一次）—— 否则同回合 2 位
-            # 同时说后第一位的冷却被立刻 tick 掉，下个 pick 就能再次入选，违背"刚发言不接自己"。
-            self._kick_summarize()
-            self._tick_cooldown()
-            # P5.4 自动归集：扫 active task 的 artifacts/，emit 新文件的 hint + task_info。
-            self._kick_detect_new_artifacts(sink, active_task_id)
+        await self._chain_ops.run_ai_chain(
+            sink=sink, active_task_id=active_task_id,
+        )
 
     # ── handoff drain（P7.1.5，docs/P7 §3.4）─────────────────────────────
 
     async def run_pending_handoff(
         self, sink: EnvelopeSink, *, task_id: Optional[str],
     ) -> None:
-        """专职消费 handoff 队列；与 :meth:`_run_ai_chain` **严格分流，不互相回落**。
+        """slot 拆分：薄转发到 :class:`HandoffDrainOps`。"""
+        await self._drain_ops.run_pending_handoff(sink, task_id=task_id)
 
-        队列空 / 下一项 cap 撞顶 → emit ``turn_end(next='user')`` 后 return，
-        **不回落到 scoring**——这是"delegate 仅本轮独占，下次用户触发才恢复打分"
-        的工程基础（docs §4.3 / §8 不变量）。
-
-        **入口清零计数一次**：handoff 是用户显式触发但不走 ``submit_user_message``，
-        上一轮 AI 到上限时不清零 while 会立刻挡掉 → handoff 永不执行。只清一次，
-        drain loop 内不再清。
-        """
-        if not self._handoff_queue:
-            return
-        self._consecutive_ai_turns = 0
-        self._rounds_without_user_or_mention = 0
-
-        while self._handoff_queue:
-            # 把跑不起来的队首项（死项 / panel 欠员 / winner 全失效）就地清掉，
-            # 返回第一个真能产出 turn 的项 + 过滤后 winners + scoring_path
-            # （docs §4.1.1 / §4.4）。
-            head = self._advance_to_runnable_handoff(sink)
-            if head is None:
-                break
-            item, winners, scoring_path = head
-            cost = self._handoff_cost(item)
-            # 档② 没超 max 本身、只是此刻 _consecutive_ai_turns 占了预算 → break、
-            #    留队首，下次用户触发 + drain 入口清零后能跑。
-            if (
-                self._consecutive_ai_turns + cost
-                > self.config.max_consecutive_ai_turns
-            ):
-                break
-            self._handoff_queue.popleft()
-
-            # winner_blocks 在过滤之后构造——panel 的 <panel_context> 必须按**存活**
-            # panelist 渲染，否则被移除的茶客会被列进名单（codex review P2）。winners
-            # 与 winner_blocks 由 _build_winner_blocks 逐 winner 构造、天然等长。
-            winner_blocks = self._build_winner_blocks(item, winners)
-            turn_id = new_turn_id()
-            item_dict = item.to_dict()
-            self._recorder.start_turn(
-                turn_id=turn_id, task_id=task_id,
-                trigger={"kind": "handoff", "handoff_item": item_dict},
-            )
-            # ``ScoreKind.MENTION`` 让 handoff 与 @ 路由在 inner cap / 调试抽屉
-            # 渲染上同口径（确定性单点 / 跳过打分 / 绕 cap）；``scoring_path`` 是
-            # 真正区分维度。
-            score_results = [
-                ScoreResult(
-                    guest_name=name, score=1.0,
-                    kind=ScoreKind.MENTION, raw=scoring_path,
-                )
-                for name in winners
-            ]
-            self._recorder.record_scoring(
-                threshold=None, scorables=[], cooled=[],
-                results=[(r, None) for r in score_results],
-                winners=winners,
-                scoring_path=scoring_path,
-            )
-            self._emit_turn(
-                sink, turn_id=turn_id, type=ChahuaEventType.TURN_START,
-                data={
-                    "scores": [_score_to_dict(r) for r in score_results],
-                    "scoring_path": scoring_path,
-                },
-            )
-            self._emit_handoff_consumed(sink, turn_id=turn_id, item_dict=item_dict)
-
-            try:
-                # panel = N(+1) 次串行 speak；每位 winner 取自己等长对齐的
-                # extra_blocks（panelist 共享 <panel_context>、summarizer 拿
-                # <panel_summary_request>；delegate / review 单元素与 P7.2 同）。
-                for name, blocks in zip(winners, winner_blocks):
-                    await self._let_speak(
-                        name, turn_id=turn_id, sink=sink, task_id=task_id,
-                        extra_blocks=blocks,
-                    )
-                    self._consecutive_ai_turns += 1
-            except asyncio.CancelledError:
-                self._cancel_fixup_and_flush(sink, turn_id=turn_id)
-                raise
-
-            # P8.3：MTS 续队列 / 收尾判定 —— 在既有 peek / turn_end / 收尾流程**之前**
-            # 调一次。可能往 _handoff_queue 续上 delegate(manager)、或结束 MTS；非 MTS
-            # 房间（_managed_session is None）该调用立即返回，零行为变化（docs §4）。
-            self._advance_managed_session_after_turn(item, sink)
-
-            # 末尾顺序对齐 _run_ai_chain（docs §8 不变量）：peek→turn_end→flush→hooks。
-            # lookahead 必须走与 drain 主体同一个 _advance_to_runnable_handoff——
-            # 否则死项 / 欠员 panel 会让 has_next 误判成"下一轮 AI"，但该项下一轮被
-            # 静默 drop、永远不产 turn，客户端卡在 turn_end(next='ai')（codex review P2）。
-            next_runnable = self._advance_to_runnable_handoff(sink)
-            if next_runnable is not None:
-                next_cost = self._handoff_cost(next_runnable[0])
-                has_next = (
-                    self._consecutive_ai_turns + next_cost
-                    <= self.config.max_consecutive_ai_turns
-                )
-            else:
-                has_next = False
-            next_state = "ai" if has_next else "user"
-            self._emit_turn(
-                sink, turn_id=turn_id, type=ChahuaEventType.TURN_END,
-                data={"next": next_state},
-            )
-            self._recorder.flush_turn()
-            self._kick_summarize()
-            self._tick_cooldown()
-            self._kick_detect_new_artifacts(sink, task_id)
-            if not has_next:
-                # P8.3 收尾兜底：队列空了、MTS 还活着 → manager_finished（唯一产生
-                # 该 reason 的地方，docs §4.2）。覆盖「管理者没派活 / 调用链续不下去
-                # （target 不在场被 drop、发言抛错）」。_advance 已显式结束的
-                # （budget / task / cap）此时 _managed_session 已 None，end_managed_session
-                # 的守卫使这里不重复触发。
-                # `not has_next` 还可能是「队首项 cost 撞顶」—— 此时 _handoff_queue 非空，
-                # 该项是管理者真派下的活，应留队等 cap reset 后续 drain，不能当
-                # manager_finished 结束并清队（Codex review P2）。
-                if self._managed_session is not None and not self._handoff_queue:
-                    self.end_managed_session(
-                        sink, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
-                    )
-                return
-
-        # P8.3：while 经 break 退出时（队首死项被 _advance_to_runnable_handoff drop
-        # 光 / cost 撞顶）上面 body 内的收尾兜底跑不到。补一处：MTS 还活着且队列已空
-        # → manager_finished（Codex review P2）。cost-break 留了能跑的队首项 → 队列
-        # 非空 → 不结束（那是「下次用户触发再续」的暂停，不是终止）。
-        if self._managed_session is not None and not self._handoff_queue:
-            self.end_managed_session(
-                sink, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
-            )
+    # slot 拆分：scoring / @ 路由 / speak 搬到 :class:`ScoringOps`；下列为薄转发，
+    # 保 ``_run_ai_chain`` / drain / test_orchestrator_at_mention / test_scoring_subject_hint
+    # 的现有调用点不变。
 
     async def _pick_next_speaker(
         self,
@@ -924,216 +449,21 @@ class Orchestrator:
         respect_at_mention: bool,
         active_task_id: Optional[str] = None,
     ) -> tuple[list[str], list[ScoreResult], dict[str, Optional[str]], PickDebugMeta]:
-        """选下一回合发言者；返回 ``(winners, scores, prompts_by_guest, debug_meta)``。
-
-        - ``winners``：按分数倒序的茶客名列表，长度 0 ~ ``max_speakers_per_pick``。
-          **空 list = 无人接话**（旧版返 None 的两种场景：scorables=[]、no passed）；
-          P6 起改用 ``not winners`` 控制流（始终给 recorder 一条 turn 行可追溯）。
-        - ``scores``：含所有候选 ScoreResult（含冷却中那批 0 分占位）。
-        - ``prompts_by_guest``：``capture_prompts=True`` 时为 ``{guest_name: prompt}``，
-          否则空 dict（debug 落盘单点用；envelope piggyback 留给 step 3）。
-        - ``debug_meta``：:class:`PickDebugMeta`（threshold / scorables / cooled /
-          scoring_path）—— 给 ``recorder.record_scoring`` 用，避免上层重算。
-
-        ``respect_at_mention=True``：检查 transcript 最后一条（用户消息）里的 ``@``。
-        AI 间接力时（``_consecutive_ai_turns > 0``）不再认 @ —— 否则一个茶客在自己发言里
-        @ 别人会形成"自动续接"，与"持麦串行 + 上限"的设计相冲。
-
-        优先级：``@broadcast``（@all / @所有人 等）→ 全员发言一次（含冷却中的）；
-        否则 ``@<guest>`` 单点路由；否则走打分。
-        """
-        all_guests = list(self._guests.keys())
-
-        # 1a) @broadcast → 全员一次（用户意图明确，绕过冷却 + 打分）
-        if respect_at_mention and self._find_user_broadcast():
-            self._rounds_without_user_or_mention = 0
-            winners = list(all_guests)  # 注册顺序，确定性
-            scores = [
-                ScoreResult(guest_name=n, score=1.0, kind=ScoreKind.MENTION)
-                for n in winners
-            ]
-            return winners, scores, {}, PickDebugMeta(
-                threshold=None, scoring_path=SCORING_PATH_BROADCAST,
-            )
-
-        # 1b) @ 提及确定性路由（仅当回应用户那条时）
-        if respect_at_mention:
-            mention = self._find_user_mention()
-            if mention is not None and self._cooldown.get(mention, 0) == 0:
-                self._rounds_without_user_or_mention = 0
-                scores = [
-                    ScoreResult(
-                        guest_name=mention, score=1.0, kind=ScoreKind.MENTION
-                    )
-                ]
-                return [mention], scores, {}, PickDebugMeta(
-                    threshold=None, scoring_path=SCORING_PATH_MENTION,
-                )
-
-        # 2) 并发打分（冷却中的茶客直接当 0 分，省 LLM 调用）
-        scorables = [
-            name for name in all_guests if self._cooldown.get(name, 0) == 0
-        ]
-        cooled = [name for name in all_guests if name not in scorables]
-
-        # 全员冷却：无 LLM 调用，所有 guest 0 分占位记一行后由上层判 winners=[]。
-        if not scorables:
-            results = [
-                ScoreResult(guest_name=name, score=0.0, kind=ScoreKind.COOLDOWN)
-                for name in cooled
-            ]
-            return [], results, {}, PickDebugMeta(
-                threshold=None, cooled=cooled,
-                scoring_path=SCORING_PATH_SCORING,
-            )
-
-        # P5.6：每 pick 周期渲染一次 task_block，N 个 scorer 共享同一字符串。
-        # 不进 _score_one —— 那样 N 茶客就要 N 次 get_task。closed / missing → "".
-        rendered = self._maybe_render_scoring_task_block(active_task_id)
-        task_block = (
-            "\n" + _wrap_current_task(rendered) + "\n" if rendered else ""
+        return await self._scoring_ops.pick_next_speaker(
+            respect_at_mention=respect_at_mention,
+            active_task_id=active_task_id,
         )
-
-        transcript_text, recent = self._scoring_transcript()
-        scored: list[tuple[ScoreResult, Optional[str]]] = list(
-            await asyncio.gather(
-                *(
-                    self._score_one(name, transcript_text, recent, task_block)
-                    for name in scorables
-                )
-            )
-        )
-        results = [r for r, _ in scored]
-        prompts_by_guest: dict[str, Optional[str]] = {
-            r.guest_name: p for r, p in scored if p is not None
-        }
-
-        # 冷却中那些也填进 results 让 UI / recorder 看到"为什么没选他"。
-        for name in cooled:
-            results.append(
-                ScoreResult(
-                    guest_name=name, score=0.0, kind=ScoreKind.COOLDOWN
-                )
-            )
-
-        threshold = min(
-            1.0,
-            self.config.want_threshold
-            + self.config.threshold_decay_per_turn
-            * self._rounds_without_user_or_mention,
-        )
-        debug_meta = PickDebugMeta(
-            threshold=threshold, scorables=scorables, cooled=cooled,
-            scoring_path=SCORING_PATH_SCORING,
-        )
-        passed = [r for r in results if r.score >= threshold]
-        if not passed:
-            return [], results, prompts_by_guest, debug_meta
-        passed.sort(key=lambda r: r.score, reverse=True)
-        winners = [r.guest_name for r in passed[: self.config.max_speakers_per_pick]]
-        return winners, results, prompts_by_guest, debug_meta
-
-    async def _score_one(
-        self,
-        guest_name: str,
-        transcript_text: str,
-        recent: list[Message],
-        task_block: str = "",
-    ) -> tuple[ScoreResult, Optional[str]]:
-        """单茶客打分 —— 返回 ``(ScoreResult, prompt|None)``。
-
-        ``recorder.capture_prompts=True`` 时走 :meth:`IntentScorer.score_with_prompt`
-        拿 prompt 字符串落 ``debug/prompts/<turn_id>/scoring_<guest>.txt``；否则走
-        :meth:`IntentScorer.score` 不材化 prompt（避免内存里存在但不落盘的"半捕获"）。
-        """
-        entry = self._guests[guest_name]
-        mention_count = self._count_self_mentions(guest_name, recent)
-        if self._recorder.capture_prompts:
-            return await self.scorer.score_with_prompt(
-                guest_name=guest_name,
-                persona=entry.persona_md,
-                transcript_text=transcript_text,
-                user_config=self.user_config,
-                subject_mention_count=mention_count,
-                task_block=task_block,
-            )
-        result = await self.scorer.score(
-            guest_name=guest_name,
-            persona=entry.persona_md,
-            transcript_text=transcript_text,
-            user_config=self.user_config,
-            subject_mention_count=mention_count,
-            task_block=task_block,
-        )
-        return result, None
 
     def _count_self_mentions(
         self, guest_name: str, recent: list[Message]
     ) -> int:
-        """统计 ``recent`` 窗口里 ``guest_name`` 被**其他人**提到的次数。
-
-        给打分 prompt 注入 ``<context_hint>`` 用：名字出现在最近发言里是"话题在讨论你"
-        的 deterministic 信号，弥补单靠 LLM 评分时把"被讨论但没 @"判低分的问题。
-
-        排除 ``m.speaker_id == guest_name`` 的自我消息——茶客自己复读自己名字不算被讨论。
-        包含 ``@guest_name`` 形式的出现（调用方语义里 @ 走的是确定性路由，能到这里说明
-        本轮没 @，但更早的 @ 仍是有效的"刚被讨论"信号）。
-
-        简单子串匹配；接受名字是别人字符串子串的极少数误命中（"Elon" 撞到 "Elonomics"），
-        因为它只是 soft hint，不是硬规则。
-        """
-        count = 0
-        for m in recent:
-            if m.speaker_id == guest_name:
-                continue
-            if guest_name in m.text:
-                count += 1
-        return count
+        return self._scoring_ops.count_self_mentions(guest_name, recent)
 
     def _find_user_mention(self) -> Optional[str]:
-        """扫 transcript 最后一条消息里的 @ 提及；返回首个匹配的在场茶客名。
-
-        对每个 ``@`` 位置按**注册名长度倒序**做最长前缀匹配 + 词边界校验，所以含空格的
-        名字（``Elon Musk``）也能命中——把"什么算合法名字"完全交给注册表。
-
-        @broadcast（@all / @所有人 等）由 :meth:`_find_user_broadcast` 独立检查，
-        调用方先查 broadcast，因此这里遇到 broadcast token 时跳过当前 ``@``——避免
-        ``@all @宝总`` 极少数情况下被当成单点提及。
-        """
-        last = self.room.last_message()
-        if last is None or last.speaker_id != USER_SPEAKER_ID:
-            # 只承认用户消息里的 @；AI 互相 @ 不走确定性路由（见 _run_ai_chain 注释）。
-            return None
-        text = last.text
-        # 注册名按长度倒序：``Elon Musk`` 排在 ``Elon`` 之前，最长前缀优先。
-        names_by_length = sorted(self._guests, key=len, reverse=True)
-        for at_idx in iter_at_positions(text):
-            start = at_idx + 1
-            # 此 @ 是个 broadcast token？跳过（broadcast 由调用方独立判定）。
-            if any(matches_at(text, start, tok, case_insensitive=True) for tok in BROADCAST_TOKENS):
-                continue
-            for name in names_by_length:
-                if matches_at(text, start, name):
-                    return name
-        return None
+        return self._scoring_ops.find_user_mention()
 
     def _find_user_broadcast(self) -> bool:
-        """扫 transcript 最后一条消息里有没有 @broadcast 词（all / everyone / 大家 /
-        各位 / 所有人 —— 见 :data:`BROADCAST_TOKENS`，英文大小写无关）。
-
-        匹配带词边界 —— ``@allies`` 不会被当成 ``@all``，因为 ``e`` 不是名字边界。
-
-        broadcast 走"全员发言一次"路径，独立于 :meth:`_find_user_mention` 的 @ 单点路由。
-        """
-        last = self.room.last_message()
-        if last is None or last.speaker_id != USER_SPEAKER_ID:
-            return False
-        text = last.text
-        for at_idx in iter_at_positions(text):
-            start = at_idx + 1
-            if any(matches_at(text, start, tok, case_insensitive=True) for tok in BROADCAST_TOKENS):
-                return True
-        return False
+        return self._scoring_ops.find_user_broadcast()
 
     # ── 发言 ──────────────────────────────────────────────────────────
 
@@ -1146,21 +476,17 @@ class Orchestrator:
         task_id: Optional[str] = None,
         extra_blocks: Optional[list[str]] = None,
     ) -> None:
-        entry = self._guests[guest_name]
-        ctx = self._build_context_for(
-            guest_name, task_id=task_id, extra_blocks=extra_blocks,
+        await self._scoring_ops.let_speak(
+            guest_name,
+            turn_id=turn_id,
+            sink=sink,
+            task_id=task_id,
+            extra_blocks=extra_blocks,
         )
-        # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
-        # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
-        msg = await entry.guest.speak(
-            ctx, turn_id=turn_id, sink=sink, task_id=task_id,
-        )
-        if msg is None:
-            # 失败的发言不进 transcript（§3.5.2），冷却也不启动 —— 让他下一轮还有机会。
-            return
-        self.cursor.set(guest_name, msg.seq)
-        # cooldown 进入下个"AI 子轮"前先减一次，所以 +1 抵消，得到"持续 N 个 AI 子轮"。
-        self._cooldown[guest_name] = self.config.speaker_cooldown_turns + 1
+
+    # slot 拆分：turn-级 envelope emit + cancel fixup 搬到 :class:`AIChainOps`；
+    # 下列为薄转发，drain slot 经 ``self.orch._emit_turn(...)`` /
+    # ``self.orch._cancel_fixup_and_flush(...)`` 引用保稳定。
 
     def _emit_turn(
         self,
@@ -1171,78 +497,29 @@ class Orchestrator:
         data: dict,
         status: str = STATUS_OK,
     ) -> None:
-        """合成轮级 envelope（turn_start / turn_end）走 sink。message-级事件经
-        :class:`ChahuaTransport` emit。``status`` 默认 ok；cancel 路径走 ``cancelled``。
-        """
-        emit_to_sink(
-            sink,
-            ChahuaEnvelope(
-                room_id=self.room.name,
-                turn_id=turn_id,
-                guest_name=None,
-                message_id=None,
-                type=type,
-                status=status,
-                data=data,
-            ),
+        self._chain_ops.emit_turn(
+            sink, turn_id=turn_id, type=type, data=data, status=status,
         )
 
     def _emit_cancel_fixup(self, sink: EnvelopeSink, *, turn_id: str) -> None:
-        """补一帧 turn_end(next='user', cancelled) —— 两条 cancel 路径共用：
-        scoring 阶段 cancel 走 last_open_turn_id；speak 阶段 cancel 走当前 turn_id。
-        """
-        self._emit_turn(
-            sink,
-            turn_id=turn_id,
-            type=ChahuaEventType.TURN_END,
-            data={"next": "user"},
-            status=STATUS_CANCELLED,
-        )
+        self._chain_ops.emit_cancel_fixup(sink, turn_id=turn_id)
 
     def _cancel_fixup_and_flush(
         self, sink: EnvelopeSink, *, turn_id: str,
     ) -> None:
-        """speak 阶段 cancel 共用 fixup：补 turn_end(cancelled) + flush 半截
-        turns.jsonl 行（``_run_ai_chain`` / ``run_pending_handoff`` 两条 drain
-        路径同步走，避免两处各写一遍漂移）。
-        """
-        self._emit_cancel_fixup(sink, turn_id=turn_id)
-        self._recorder.flush_turn()
+        self._chain_ops.cancel_fixup_and_flush(sink, turn_id=turn_id)
 
     def _emit_handoff_consumed(
         self, sink: EnvelopeSink, *, turn_id: str, item_dict: dict,
     ) -> None:
-        """``HANDOFF_CONSUMED`` envelope：顶层 ``turn_id`` 与本轮 turn_start / turn_end
-        同值（关联取证），``data={"item": <HandoffItem.to_dict()>}``。
-        """
-        emit_to_sink(
-            sink,
-            ChahuaEnvelope(
-                room_id=self.room.name, turn_id=turn_id,
-                guest_name=None, message_id=None,
-                type=ChahuaEventType.HANDOFF_CONSUMED,
-                data={"item": item_dict},
-            ),
+        """slot 拆分：薄转发到 :class:`HandoffQueueOps`。"""
+        self._handoff_ops.emit_handoff_consumed(
+            sink, turn_id=turn_id, item_dict=item_dict,
         )
 
     def _emit_handoff_queue_snapshot(self, sink: EnvelopeSink) -> None:
-        """重发 ``HANDOFF_ENQUEUED`` 权威快照（连接级，``turn_id`` 全 None）。
-
-        drain 内静默 drop 跑不起来的队列项后必须调一次——前端队列镜像只认
-        ``HANDOFF_ENQUEUED`` / ``HANDOFF_CONSUMED`` / ``HANDOFF_CLEARED`` 三事件，
-        ``_advance_to_runnable_handoff`` 直接 ``popleft`` 死项不发事件会让队列预览
-        残留死项、后续 consumed 又对不上位（codex review P2）。``HANDOFF_ENQUEUED``
-        的语义本就是"权威快照、整体替换"（见 ``handoff_state.js``），重发即修正。
-        """
-        emit_to_sink(
-            sink,
-            ChahuaEnvelope(
-                room_id=self.room.name, turn_id=None,
-                guest_name=None, message_id=None,
-                type=ChahuaEventType.HANDOFF_ENQUEUED,
-                data={"queue": [i.to_dict() for i in self._handoff_queue]},
-            ),
-        )
+        """slot 拆分：薄转发到 :class:`HandoffQueueOps`。"""
+        self._handoff_ops.emit_handoff_queue_snapshot(sink)
 
     def _compute_trigger(self) -> dict[str, Any]:
         """构造本周期 turns.jsonl 的 ``trigger`` 字段（docs §数据模型）。
@@ -1301,182 +578,24 @@ class Orchestrator:
         self._sync_renderer()
         return self._renderer.display_map()
 
-    def _render_review_block(self, item: HandoffItem) -> str:
-        """P7.2：合成 review 项的 ``<review_target>`` 临时块（docs §4.2）。
-
-        被审消息走 :func:`format_messages` 渲染——与茶客平时在 ``<recent_messages>`` /
-        打分 transcript 看到的 ``<message>`` 包装一致（CLAUDE.md ``format_messages``
-        不变量）。块只含被审消息原文 + 审阅指引，**不附任务产物清单**。
-
-        ``message_by_id`` 保证命中：inbound 已校验 message_id 存在，``clear_room`` /
-        ``reset_room`` 会清 ``_handoff_queue``——review 项不可能跨"消息消失"存活
-        （docs §4.1 不变量）。查不到即 bug，``assert`` 兜底。
-        """
-        assert item.review_message_id is not None
-        msg = self.room.message_by_id(item.review_message_id)
-        assert msg is not None, (
-            f"review 项 {item.review_message_id!r} 的被审消息缺失——违反 docs §4.1 不变量"
-        )
-        message_xml = format_messages([msg], self._display_map())
-        return (
-            "<review_target>\n"
-            "请你审阅下面这条发言：\n\n"
-            f"{message_xml}\n\n"
-            f"{_REVIEW_INSTRUCTION}\n"
-            "</review_target>"
-        )
-
-    def _render_panel_block(self, panelists: list[str]) -> str:
-        """P7.3：合成 panel 项的 ``<panel_context>`` 临时块（docs §4.2）。
-
-        ``panelists`` 列本轮圆桌全体 panelist + 平行发言指引。N 位 panelist
-        **共享同一块**，文案写成位置无关（第一个 / 第 N 个 panelist 读到同一句都
-        通顺）。**不列 summarizer**——它不是 panelist，拿 :data:`_PANEL_SUMMARY_BLOCK`。
-
-        入参是名字列表（不是 ``HandoffItem``）——调用方在 runtime 过滤后才拼块，
-        保证 ``<panel_context>`` 列的是**存活** panelist（codex review P2）。
-        """
-        dmap = self._display_map()
-        names = "、".join(dmap.get(t, t) for t in panelists)
-        return (
-            "<panel_context>\n"
-            f"本轮是一次圆桌平行讨论，参与的茶客是：{names}。\n"
-            "请你独立给出自己的观点，不必附和、也不必复述其他茶客已经说过的内容；\n"
-            "如果你与前面发言的茶客看法不同，直接说出分歧。这是一次平行表态，"
-            "不是接龙。\n"
-            "</panel_context>"
-        )
+    # slot 拆分：drain 算法搬到 :class:`HandoffDrainOps`；保留下列薄转发覆盖
+    # ``test_orchestrator_handoff_panel`` 的直调 + ``Orchestrator._handoff_cost``
+    # classmethod-style 调用。``_advance_to_runnable_handoff`` / ``_panel_underfilled``
+    # / ``_render_review_block`` / ``_render_panel_block`` 不外露，无主类转发。
 
     @staticmethod
     def _handoff_cost(item: HandoffItem) -> int:
-        """一个 handoff item 占的 turn 内 speak 轮数（docs §4.1）。delegate /
-        review 恒 1；panel = panelist 数 + 有无 summarizer。声明值——不因 §4.4
-        runtime 过滤而变，while-entry cap 检查据此偏保守可接受。"""
-        if item.kind is HandoffKind.PANEL:
-            assert item.targets is not None
-            return len(item.targets) + (item.summarizer is not None)
-        return 1
-
-    def _advance_to_runnable_handoff(
-        self, sink: EnvelopeSink,
-    ) -> Optional[tuple[HandoffItem, list[str], str]]:
-        """从 ``_handoff_queue`` 队首弹掉所有**跑不起来**的项，返回第一个真能产出
-        turn 的项 ``(item, 过滤后 winners, scoring_path)``；队列耗尽 → ``None``。
-
-        "跑不起来"= runtime 重校验后必被 drop 的三类（docs §4.1.1 / §4.4），
-        pop + WARN：① 死项（``cost > max_consecutive_ai_turns``，无论计数都跑不动，
-        典型成因：入队后用户调低 max）；② panel 欠员（存活 panelist < 2）；
-        ③ winner 全失效（delegate / review target 被 ``remove_guest`` 删掉）。
-        丢弃任意项后重发一次 ``HANDOFF_ENQUEUED`` 权威快照，让前端队列预览不残留
-        死项（codex review P2）。
-
-        **不**含"此刻预算够不够"的判断——撞 ``_consecutive_ai_turns`` cap（档②）
-        的项**能**跑、只是当下不跑，留在队首不弹，由调用方 cap 检查负责。
-
-        drain loop 主体与 turn 末尾 ``has_next`` lookahead **共用**这一个 helper：
-        否则 lookahead 拿"将被静默 drop 的项"算 ``has_next`` → 误报
-        ``turn_end(next='ai')`` → 客户端等一个永不到来的 turn（codex review P2）。
-        """
-        dropped = False
-        try:
-            while self._handoff_queue:
-                item = self._handoff_queue[0]
-                if (
-                    self._handoff_cost(item)
-                    > self.config.max_consecutive_ai_turns
-                ):
-                    _log.warning(
-                        "handoff item cost exceeds max_consecutive_ai_turns; "
-                        "dropping: %r", item,
-                    )
-                    self._handoff_queue.popleft()
-                    dropped = True
-                    continue
-                winners, scoring_path = self._resolve_handoff_winners(item)
-                winners = [
-                    w for w in winners if w is not None and w in self._guests
-                ]
-                if self._panel_underfilled(item, winners):
-                    _log.warning(
-                        "panel item underfilled after revalidation; "
-                        "dropping: %r", item,
-                    )
-                    self._handoff_queue.popleft()
-                    dropped = True
-                    continue
-                if not winners:
-                    _log.warning(
-                        "handoff item target unavailable; dropping: %r", item,
-                    )
-                    self._handoff_queue.popleft()
-                    dropped = True
-                    continue
-                return item, winners, scoring_path
-            return None
-        finally:
-            if dropped:
-                self._emit_handoff_queue_snapshot(sink)
+        return HandoffDrainOps._handoff_cost(item)
 
     def _resolve_handoff_winners(
         self, item: HandoffItem,
     ) -> tuple[list[str], str]:
-        """按 ``item.kind`` 算 ``(winners, scoring_path)``（docs §4.1）。
-
-        panel → ``list(targets)[+summarizer]``；delegate / review → ``[target]``。
-        纯函数——不渲染、不 emit、不 await。``winner_blocks`` 由
-        :meth:`_build_winner_blocks` 在 runtime 过滤**之后**单独构造（panel 块要
-        按存活 panelist 渲染，codex review P2）。
-        """
-        if item.kind is HandoffKind.PANEL:
-            assert item.targets is not None
-            winners = list(item.targets)
-            if item.summarizer is not None:
-                winners.append(item.summarizer)
-            return winners, SCORING_PATH_HANDOFF_PANEL
-        if item.kind is HandoffKind.REVIEW:
-            return [item.target], SCORING_PATH_HANDOFF_REVIEW  # type: ignore[list-item]
-        return [item.target], SCORING_PATH_HANDOFF_DELEGATE  # type: ignore[list-item]
+        return self._drain_ops._resolve_handoff_winners(item)
 
     def _build_winner_blocks(
         self, item: HandoffItem, winners: list[str],
     ) -> list[Optional[list[str]]]:
-        """按 ``item.kind`` + **runtime 过滤后**的 ``winners`` 逐 winner 算
-        ``extra_blocks``（docs §4.1）。返回与 ``winners`` 等长——speak 循环 ``zip``
-        两者，逐 winner 取自己的块。
-
-        **必须在过滤之后调**：panel 的 ``<panel_context>`` 按存活 panelist 渲染，
-        否则被 ``remove_guest`` 移除的茶客仍会被列进名单（codex review P2）。
-        panelist 共享一份 ``<panel_context>``、summarizer 取 ``<panel_summary_request>``；
-        delegate 无块、review 单块。
-        """
-        if item.kind is HandoffKind.PANEL:
-            panelists = [w for w in winners if w != item.summarizer]
-            panel_block = self._render_panel_block(panelists)
-            return [
-                [_PANEL_SUMMARY_BLOCK] if w == item.summarizer else [panel_block]
-                for w in winners
-            ]
-        if item.kind is HandoffKind.REVIEW:
-            return [[self._render_review_block(item)]]
-        # P8.3：MTS 管理者回合（delegate 指向管理者）注入 <managed_session> 临时块
-        # （docs §7）。worker 回合 / 非 MTS 普通 delegate 无块（与 P7 一致）。
-        ms = self._managed_session
-        if (
-            ms is not None
-            and item.target == ms.manager_guest
-            and winners == [ms.manager_guest]
-        ):
-            return [[render_managed_session_block(ms.manager_guest, ms.budget)]]
-        return [None]
-
-    @staticmethod
-    def _panel_underfilled(item: HandoffItem, kept_winners: list[str]) -> bool:
-        """panel 项 runtime 过滤后有效 panelist（不含 summarizer）< 2 → 判欠员
-        （docs §4.4）。非 panel 项恒 ``False``。"""
-        if item.kind is not HandoffKind.PANEL:
-            return False
-        kept_panelists = [w for w in kept_winners if w != item.summarizer]
-        return len(kept_panelists) < 2
+        return self._drain_ops._build_winner_blocks(item, winners)
 
     def _scoring_transcript(self) -> tuple[str, list[Message]]:
         """转发到 :meth:`ContextRenderer.scoring_transcript`。"""
@@ -1553,4 +672,23 @@ class Orchestrator:
         —— 就是 P5.8 §5.4 ``mark_seen`` 存在的原因。统一走 facade 把这个回归口子堵住。
         """
         self._artifact_detector.mark_seen(task_id, name)
+
+
+# ── slot 拆分骨架（Step 0 占位） ─────────────────────────────────────────────
+
+
+def _install_orchestrator_slots(orch: Orchestrator) -> None:
+    """按子域 slot 模块装配 :class:`Orchestrator` 的辅助 ops 对象。
+
+    slot 拆分：唯一真理源 + 单点 jump（仿 :func:`chahua.server._install_handler_slots`）。
+
+    顺序约束：``_mts_ops`` / ``_drain_ops`` 写队列经 ``_handoff_ops``，故
+    ``_handoff_ops`` 必先装配；``_chain_ops`` / ``_drain_ops`` 调 speak 经
+    ``_scoring_ops``，故 ``_scoring_ops`` 在它们之前。
+    """
+    orch._handoff_ops = HandoffQueueOps(orch)
+    orch._mts_ops = ManagedSessionOps(orch)
+    orch._scoring_ops = ScoringOps(orch)
+    orch._drain_ops = HandoffDrainOps(orch)
+    orch._chain_ops = AIChainOps(orch)
 
