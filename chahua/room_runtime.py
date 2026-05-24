@@ -18,11 +18,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from .agent_run import AgentRun
 from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink
 from .session import RoomSession
+
+_log = logging.getLogger(__name__)
 
 # in-flight turn 的类型标签。与 :data:`chahua.server.INFLIGHT_KIND_*` 同值域 ——
 # 此处用 ``Literal`` 表达，运行期值由 server 传入。
@@ -109,9 +113,62 @@ class RoomRuntime:
     # 超限淘汰时取最小者（阶段 9.4.1）。
     background_since_ms: Optional[int] = None
 
+    # ── P11：bg run 运行态 ───────────────────────────────────────────────────
+    #
+    # 三个字段是同一组「房间内并发 bg run」状态的不同视图，**入口必须同步写**：
+    #
+    # - ``agent_runs[run_id]=run`` —— 运行中元数据（``AgentRun`` 不可变）；
+    # - ``agent_run_tasks[run_id]=task`` —— 包 ``_run_agent_background`` wrapper
+    #   的 asyncio task，``agent_run_cancel`` 走这个 dict 查 task → ``.cancel()``；
+    # - ``active_guest_names`` —— 「已占用 / 即将 speak」的茶客名集合，是
+    #   :meth:`guest_busy` 的唯一数据源。
+    #
+    # 「先 add(target) 再 create_task(wrapper)」的入口顺序由调用方（P11 C8 inbound /
+    # C11 工具）保证；wrapper 退出时由外层 finally 同步 discard。
+    # 前台 / handoff 的 ``_let_speak`` 也参与 ``active_guest_names`` 维护（C2）—— 这
+    # 样 ``guest_busy`` 同时覆盖三条 speak 路径。
+    agent_runs: dict[str, AgentRun] = field(default_factory=dict)
+    agent_run_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    active_guest_names: set[str] = field(default_factory=set)
+
     def inflight_alive(self) -> bool:
-        """该房间是否有 turn / handoff drain 正在跑。"""
+        """该房间是否有 turn / handoff drain 正在跑。
+
+        **P11 不变量**：本方法**只**反映前台 turn 控制语义（cancel 按钮 / 单
+        in-flight 防御），**不**含 bg run。判断「runtime 该不该活 / 房间该不该亮
+        busy」走 :meth:`busy_alive`，前台 turn 流程仍走 ``inflight_alive``。
+        """
         return self.inflight_task is not None and not self.inflight_task.done()
+
+    def has_active_runs(self) -> bool:
+        """该房间是否有 bg run 在跑。注册表 ``agent_runs`` 只装 running 项，故
+        ``bool(agent_runs)`` 即权威活跃状态（P11 设计 §「运行态」）。"""
+        return bool(self.agent_runs)
+
+    def busy_alive(self) -> bool:
+        """该房间是否有「任意」活跃运行（前台 turn or bg run）。
+
+        **P11 设计 §「运行态」窄替换**：本方法只在「runtime 生命周期 / 房间 busy
+        展示」分支替代 ``inflight_alive``：
+        - ``server.py::_switch_room`` 旧前台 demote 判断；
+        - ``server.py::_maybe_self_destruct_background_runtime`` 自毁判断；
+        - ``server.py::_rooms_available_with_busy`` 房间 busy 标志。
+
+        前台 turn 控制语义（cancel 按钮、单 in-flight 防御）**仍走** ``inflight_alive``
+        —— 后台 bg run 是用户自己拉起的并行工作，不能被「停止当前回答」误杀，也不
+        阻止新前台 user_message 起新 turn。
+        """
+        return self.inflight_alive() or self.has_active_runs()
+
+    def guest_busy(self, name: str) -> bool:
+        """名为 ``name`` 的茶客是否「已占用 / 即将 speak」。
+
+        :attr:`active_guest_names` 是 :meth:`guest_busy` 的唯一数据源 ——
+        前台 / handoff drain 的 ``_let_speak`` 在 ``speak()`` 前同步 add、finally
+        discard；bg run 在 inbound / 工具校验通过、登记 ``agent_runs`` 那一瞬同步
+        add（先于 ``create_task``），wrapper 外层 finally discard。
+        """
+        return name in self.active_guest_names
 
     def set_inflight(
         self,
@@ -135,6 +192,34 @@ class RoomRuntime:
         task = self.inflight_task
         if task is not None and not task.done():
             task.cancel()
+
+    async def cancel_and_drain_agent_runs(self) -> None:
+        """cancel 所有 bg run task **并等它们各自的 wrapper finally 跑完**。
+
+        清理路径（``clear_room`` / ``remove_guest`` / ``_replace_session`` /
+        ``aclose`` / ``_serve_one`` finally）必显式调一次，否则 wrapper finally 的
+        ``_kick_detect_new_artifacts`` / ``emit_terminal`` 等延迟动作可能在
+        ``reset_room`` 之后才跑、写入已 reset 的房间。
+
+        **不向调用方传播取消**：``gather(..., return_exceptions=True)`` 把每个 task
+        的 ``CancelledError``（wrapper 内部正确重抛、用于 asyncio task 标 cancelled）
+        与非 ``CancelledError`` 异常一并收成结果项；后者 WARN 后继续 drain 下一个，
+        不抛。这条职责边界让 ``clear_room`` / ``aclose`` 的 finally 不被中断。
+        """
+        tasks = list(self.agent_run_tasks.values())
+        if not tasks:
+            return
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                _log.warning(
+                    "bg run wrapper raised during drain: %r", result, exc_info=result,
+                )
 
     async def cancel_and_drain_inflight(self) -> None:
         """cancel 当前 turn task **并等它收尾**。
