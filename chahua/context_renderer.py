@@ -12,7 +12,7 @@ display_map 缓存在 renderer 内；只有 :meth:`Orchestrator.register` 后会
 from __future__ import annotations
 
 from typing import Optional
-from xml.sax.saxutils import quoteattr
+from xml.sax.saxutils import escape, quoteattr
 
 from .orchestrator_config import OrchestratorConfig
 from .persona_summary import clamp_summary
@@ -42,6 +42,38 @@ _SPEAK_ORDER_HINT_BLOCK = (
     "- 轮到你时按本职完整发言。\n"
     "</order_hint>"
 )
+
+
+def render_agent_run_block(
+    *, instruction: str, issued_by: str, source_guest: Optional[str] = None,
+) -> str:
+    """P11：bg run 茶客的 ``<agent_run_task>`` 临时块。
+
+    纯函数 —— 措辞固定、不读 store、不背状态。经 ``extra_blocks`` 注入到
+    ``<speak_instruction>`` 之前；只对被指派 bg run 的茶客那一次 speak 注入。
+
+    告诉茶客三件事：① 这次发言由用户后台指派（或某茶客经 ``spawn_*`` 工具发起），
+    指令在 ``instruction=...`` 里；② 后台执行无流式刷屏，请一次性把结论写完；③ 完成
+    后房间内不需再有"等你下一句"的语义 —— 用户会另外发起新轮。
+
+    ``instruction`` / ``source_guest`` / ``issued_by`` 都走 XML 转义防注入 ——
+    ``issued_by`` / ``source_guest`` 在 attr 走 ``quoteattr``；``instruction`` 在
+    text-node 走 :func:`xml.sax.saxutils.escape` —— 用户指令含 ``</instruction>``
+    无法逃出块边界（与 ``<room>`` / ``<managed_session>`` 等块同口径）。
+    """
+    src_attr = (
+        f" source_guest={quoteattr(source_guest)}" if source_guest else ""
+    )
+    return (
+        f"<agent_run_task issued_by={quoteattr(issued_by)}{src_attr}>\n"
+        "你正在「后台 Agent run」中独立执行 ——\n"
+        "- 这一次发言由本块的 instruction 直接驱动，不依赖房间打分 / @ 提及；\n"
+        "- 后台执行**不流式刷聊天区**，请一次性给出完整结论 / 产物路径，"
+        "不要写「我先想想」「稍等再说」等占位；\n"
+        "- 完成后房间内无需「等你下一句」的语义 —— 用户 / 调度方会自行决定后续。\n"
+        f"<instruction>{escape(instruction)}</instruction>\n"
+        "</agent_run_task>"
+    )
 
 
 def render_managed_session_block(manager: str, budget: int) -> str:
