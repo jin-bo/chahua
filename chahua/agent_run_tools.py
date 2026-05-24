@@ -27,9 +27,13 @@ drain），``spawn_agent_run(s)`` 是「立即创建并发后台 run」的直接
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, ClassVar, Optional
 
-from agentao.tools import Tool
+from agentao.tools.base import AsyncToolBase
+
+
+_log = logging.getLogger(__name__)
 
 
 # 单工具调用一批次的上限。docs §「Phases」P11.2：``max_agent_runs_per_tool_call = 4``
@@ -46,11 +50,18 @@ MAX_AGENT_RUNS_PER_TOOL_CALL = 4
 StartAgentRun = Callable[..., tuple[Optional[str], Optional[str]]]
 
 
-class _SpawnBase(Tool):
+class _SpawnBase(AsyncToolBase):
     """两个 spawn 工具的共同基类 —— 共享 getter / source_guest 字段 + ``is_read_only``。
 
+    **必须继承 ``AsyncToolBase``**（不是 ``Tool``）：``_start_agent_run`` 内部调
+    ``asyncio.create_task`` 启 bg wrapper，create_task 要求**当前线程有 running event
+    loop**。agentao 的 ``Tool.execute`` 由 ``ToolExecutor`` 在 ``loop.run_in_executor``
+    的工作线程内同步调用 —— 工作线程没有 running loop，create_task 会
+    ``RuntimeError: no running event loop``。``AsyncToolBase.async_execute`` 走
+    ``run_coroutine_threadsafe`` 桥回 host 事件循环，create_task 才工作。
+
     ``get_start_agent_run`` 是一个 **getter**（不是直接的回调）—— 工具实例每次
-    ``execute`` 现取一次：
+    ``async_execute`` 现取一次：
 
     - 工具实例在 ``TeaGuest.__init__`` 时注册，此时 ``self.start_agent_run`` 还是 None；
     - server ``_attach_runtime_state(runtime)`` 后回填 ``guest.start_agent_run = cb``；
@@ -76,13 +87,42 @@ class _SpawnBase(Tool):
         return False
 
     def _resolve_callback(self) -> Optional[StartAgentRun]:
-        """每次 execute 现取 —— 闭合 lambda 逐次读 ``guest.start_agent_run`` instance attr。
+        """每次 async_execute 现取 —— 闭合 lambda 逐次读 ``guest.start_agent_run`` instance attr。
 
         ``None`` 说明 server 端 ``_attach_runtime_state`` 还没装 —— 比如裸 session
         测试夹具 / build_room_session 阶段（未挂 server）。工具不抛、返 ``Error:``
         字符串（agentao 工具协议）。
         """
         return self._get_start_agent_run()
+
+    def _safe_call(
+        self,
+        cb: StartAgentRun,
+        *,
+        target: str,
+        instruction: str,
+        task_id: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """调 server ``_start_agent_run`` 并把任何抛出转成 ``(None, error_msg)``。
+
+        agentao 工具协议要求 ``async_execute`` 返字符串（含 ``Error:``）而**不抛**异常
+        —— 否则 tool_runner 走 ``f'Error executing {fn}: {exc}'`` 兜底，丢掉本工具
+        的 ``Error: ...`` 格式 + 暴露 stack/repr。``_start_agent_run`` 内 ``emit``
+        / ``create_task`` 都可能抛（ws 半断、loop 故障）；本 helper 是 contract 守门。
+        """
+        try:
+            return cb(
+                target=target,
+                instruction=instruction,
+                task_id=task_id,
+                source_guest=self._source_guest,
+            )
+        except Exception as exc:  # noqa: BLE001 — agentao 工具协议要求不抛
+            _log.warning(
+                "spawn tool: cb() raised — translating to Error: tool result",
+                exc_info=True,
+            )
+            return None, f"内部错误（{type(exc).__name__}）：{exc}"
 
 
 class SpawnAgentRunTool(_SpawnBase):
@@ -127,7 +167,7 @@ class SpawnAgentRunTool(_SpawnBase):
             "additionalProperties": False,
         }
 
-    def execute(
+    async def async_execute(
         self,
         *,
         target: str,
@@ -145,11 +185,8 @@ class SpawnAgentRunTool(_SpawnBase):
         instruction = instruction.strip()
         if task_id is not None and (not isinstance(task_id, str) or not task_id):
             return "Error: task_id 若给须为非空字符串。"
-        run_id, err = cb(
-            target=target,
-            instruction=instruction,
-            task_id=task_id,
-            source_guest=self._source_guest,
+        run_id, err = self._safe_call(
+            cb, target=target, instruction=instruction, task_id=task_id,
         )
         if err is not None:
             return f"Error: {err}"
@@ -177,8 +214,11 @@ class SpawnAgentRunsTool(_SpawnBase):
             "并行后台执行用本工具，**不要**用 propose_panel —— panel 仍是串行 drain。"
             "MTS 内可用，**绕开 budget 做并发分发**（不扣管理者预算 / 不计连发上限）。"
             "runs[*].target 同批次不可重复（一茶客一时刻 1 个 speak）；批次大小 ≤ 4。"
-            "若任一条因 target 不在场 / 正忙 / task_id 不存在等被拒，**整批**不创建，"
-            "返 ``Error: ...`` 字符串列出原因。成功时返 ``Successfully spawned ...`` 摘要。"
+            "**shape 错误（target/instruction 缺失 / 同批重复 / 超数量）在调用前整批拒**；"
+            "**逐条创建过程中**若第 k+1 条被服务端拒（target 不在场 / 正忙 / task_id 已关闭），"
+            "前 k 条已起 bg run 不回滚，返 ``Error: runs[k+1] ...；本批前 k 条已创建`` 列出"
+            "已起的 run_id（可用 ``agent_run_cancel`` 单独停）。"
+            "成功时返 ``Successfully spawned N bg run(s): ...`` 摘要。"
         )
 
     @property
@@ -214,7 +254,7 @@ class SpawnAgentRunsTool(_SpawnBase):
             "additionalProperties": False,
         }
 
-    def execute(self, *, runs: list[dict[str, Any]], **_: Any) -> str:
+    async def async_execute(self, *, runs: list[dict[str, Any]], **_: Any) -> str:
         cb = self._resolve_callback()
         if cb is None:
             return "Error: bg run 入口未装（session 未挂 server runtime）。"
@@ -254,14 +294,12 @@ class SpawnAgentRunsTool(_SpawnBase):
         # 下到 server 单条创建。失败短路返 —— 已成功创建的 bg run **不**回滚（一旦
         # `_start_agent_run` 登记进 `agent_runs` + `active_guest_names`，wrapper 已
         # 在 event loop 里跑、cancel 是另一回事）。让茶客看到「前 k 条成功，第 k+1
-        # 条因 ... 拒；可分别取消」的明确状态。
+        # 条因 ... 拒；可分别取消」的明确状态。这与 description 一致 —— description
+        # 显式标注 shape 错全拒、create 错 partial-success。
         created: list[str] = []
         for i, (target, instruction, task_id) in enumerate(parsed):
-            run_id, err = cb(
-                target=target,
-                instruction=instruction,
-                task_id=task_id,
-                source_guest=self._source_guest,
+            run_id, err = self._safe_call(
+                cb, target=target, instruction=instruction, task_id=task_id,
             )
             if err is not None:
                 if created:
@@ -270,7 +308,11 @@ class SpawnAgentRunsTool(_SpawnBase):
                         f"本批前 {len(created)} 条已创建（run_id: {', '.join(created)}）。"
                     )
                 return f"Error: runs[{i}] ({target}): {err}"
-            assert run_id is not None  # err is None ↔ run_id is not None
+            # err is None ↔ run_id is not None；显式护栏（assert 在 -O 模式被剥）。
+            if run_id is None:
+                return (
+                    f"Error: runs[{i}] ({target}): server 返回空 run_id（不变量破坏）"
+                )
             created.append(run_id)
         return (
             f"Successfully spawned {len(created)} bg run(s): "

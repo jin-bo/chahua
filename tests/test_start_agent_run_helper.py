@@ -312,3 +312,74 @@ async def test_make_start_agent_run_callback_returns_run_id_tuple() -> None:
     assert rt.agent_runs[run_id].source_guest == "Carol"
     assert rt.agent_runs[run_id].issued_by == AGENT_RUN_ISSUED_BY_AGENT
     await _drain(rt)
+
+
+# ── 端到端：spawn 工具经 _attach_runtime_state 绑定后调真 _start_agent_run ────
+
+
+async def test_spawn_tool_end_to_end_via_attach_runtime_state() -> None:
+    """**关键回归**：工具继承 AsyncToolBase 后，``async_execute`` 在 event loop 内
+    跑，调真 ``_start_agent_run`` → ``asyncio.create_task`` 不再抛 ``no running event
+    loop``（这是 C11 review 发现的 critical bug，B1）。
+
+    场景：build _FakeGuest 装好 spawn tool，server._attach_runtime_state 绑 callback，
+    `await tool.async_execute(...)` 走全链 → agent_runs 真出现 run 条目。
+    """
+    from chahua.agent_run_tools import SpawnAgentRunTool, register_agent_run_tools
+
+    class _FakeTools:
+        def __init__(self) -> None:
+            self.registered: list = []
+
+        def register(self, tool) -> None:
+            self.registered.append(tool)
+
+    class _FakeAgent:
+        def __init__(self) -> None:
+            self.tools = _FakeTools()
+
+    class _TeaGuestStub:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.start_agent_run = None
+            self.agent = _FakeAgent()
+            register_agent_run_tools(
+                self.agent,
+                source_guest=self.name,
+                get_start_agent_run=lambda: self.start_agent_run,
+            )
+
+    sink: list[ChahuaEnvelope] = []
+    bob_stub = _TeaGuestStub("Bob")
+    carol_stub = _TeaGuestStub("Carol")
+    srv, rt = _make_server(
+        sink, guest_names=("Bob", "Carol"),
+        guests=[bob_stub, carol_stub],  # type: ignore[list-item]
+    )
+
+    # _attach_runtime_state 已在 _make_server 末尾调过 —— bob/carol 都拿到 callback。
+    assert bob_stub.start_agent_run is not None
+    assert carol_stub.start_agent_run is not None
+
+    # Carol 调 spawn_agent_run 派 Bob —— 模拟茶客侧并发调度。
+    spawn = next(
+        t for t in carol_stub.agent.tools.registered
+        if isinstance(t, SpawnAgentRunTool)
+    )
+    out = await spawn.async_execute(target="Bob", instruction="审一下")
+    assert out.startswith("Successfully spawned bg run")
+
+    # bg run 真登记，AgentRun.source_guest 是 Carol（工具调用方）。
+    assert len(rt.agent_runs) == 1
+    run = next(iter(rt.agent_runs.values()))
+    assert run.guest_name == "Bob"
+    assert run.source_guest == "Carol"
+    assert run.issued_by == AGENT_RUN_ISSUED_BY_AGENT
+    assert "Bob" in rt.active_guest_names
+
+    # AGENT_RUN_STARTED 走 runtime.router 落 sink。
+    started = [e for e in sink if e.type is ChahuaEventType.AGENT_RUN_STARTED]
+    assert len(started) == 1
+    assert started[0].data["source_guest"] == "Carol"
+
+    await _drain(rt)

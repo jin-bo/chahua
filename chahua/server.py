@@ -406,12 +406,14 @@ class ChahuaServer:
         if target not in runtime.session.orchestrator.guest_names:
             return None, f"target={target!r} 不在场"
 
-        # 2. task_id 若给须存在且未关闭。
+        # 2. task_id 若给须存在且未关闭。变量名 ``task_obj`` 避免与下方
+        #    ``asyncio.create_task`` 返回值 ``task`` 冲突（同函数内同名 shadow 是
+        #    重构脚枪）。
         if task_id is not None:
-            task = runtime.session.tasks_store.get_task(task_id)
-            if task is None:
+            task_obj = runtime.session.tasks_store.get_task(task_id)
+            if task_obj is None:
                 return None, f"task_id={task_id!r} 不存在"
-            if task.status in CLOSED_STATUSES:
+            if task_obj.status in CLOSED_STATUSES:
                 return None, (
                     f"task_id={task_id!r} 已关闭，无法绑定 bg run"
                 )
@@ -437,12 +439,15 @@ class ChahuaServer:
             issued_by=issued_by,
             source_guest=source_guest,
         )
-        # 登记顺序：先 add target 再 create_task —— 让同 target 的第二条请求
-        # 在 wrapper 进 speak 之前就被 guest_busy 拒。
-        runtime.agent_runs[run.run_id] = run
+        # 登记顺序：**先** ``active_guest_names.add(target)`` —— ``guest_busy``
+        # 的唯一数据源，CLAUDE.md §「运行态」明确「add 必先于任何 await」。再
+        # ``agent_runs[run_id]=run`` 填注册表，最后 ``asyncio.create_task`` 起
+        # wrapper。当前段三步同步执行无 await，race-safe；显式按顺序写还能让未来
+        # 维护者在两步之间加 await 时立刻意识到「需要把 add 提到 await 之前」。
         runtime.active_guest_names.add(target)
-        task = asyncio.create_task(self._run_agent_background(runtime, run))
-        runtime.agent_run_tasks[run.run_id] = task
+        runtime.agent_runs[run.run_id] = run
+        bg_task = asyncio.create_task(self._run_agent_background(runtime, run))
+        runtime.agent_run_tasks[run.run_id] = bg_task
         # emit 走 runtime.router —— 与 wrapper terminal 同口径，前台 ws_sink 落
         # 同一帧通道；BatchMessageSink 显式 DROP AGENT_RUN_STARTED 防穿越。
         self._emit_agent_run_started(runtime, run)
