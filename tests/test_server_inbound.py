@@ -200,6 +200,9 @@ class _SpyServer(ChahuaServer):
         # handoff slot 无 spy 子类 —— test_server_inbound 不测 handoff 路由，装真实
         # HandoffHandlers 只为让 _bind_inbound_handlers 能解析 handoff.* 路径。
         self.handoff = HandoffHandlers(self)
+        # agent_run slot 同上 —— 装真实 AgentRunHandlers 仅为解析路径。
+        from chahua.server_inbound_agent_run import AgentRunHandlers
+        self.agent_run = AgentRunHandlers(self)
         self._inbound_handlers = _bind_inbound_handlers(self)
 
     async def _cancel_and_drain_inflight(self) -> None:  # type: ignore[override]

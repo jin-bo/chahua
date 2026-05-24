@@ -115,6 +115,11 @@ from .server_inbound_task import (
 # INBOUND_HANDOFF_* / INFLIGHT_KIND_* 经此再导出 —— 既给本模块 _INBOUND_ROUTES /
 # _inbound_user_message 用，也让 `from chahua.server import INBOUND_HANDOFF_*` 旧路径
 # （测试 / 外部调用方）在 P7 inbound 拆模块后保持不变。
+from .server_inbound_agent_run import (
+    AgentRunHandlers,
+    INBOUND_AGENT_RUN_CANCEL,
+    INBOUND_AGENT_RUN_START,
+)
 from .server_inbound_handoff import (  # noqa: F401
     HandoffHandlers,
     INBOUND_HANDOFF_CLEAR,
@@ -1308,6 +1313,9 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_USER_MESSAGE: "_inbound_user_message",
     INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
     INBOUND_LIST_GUEST_CAPS: "_inbound_list_guest_caps",
+    # agent_run slot：P11 bg run inbound（与 handoff 平行 —— bg run 不进调度层）。
+    INBOUND_AGENT_RUN_START: "agent_run._inbound_agent_run_start",
+    INBOUND_AGENT_RUN_CANCEL: "agent_run._inbound_agent_run_cancel",
     # handoff slot：delegate / review / panel / clear（P7 调度层 inbound）。
     INBOUND_HANDOFF_DELEGATE: "handoff._inbound_handoff_delegate",
     INBOUND_HANDOFF_REVIEW: "handoff._inbound_handoff_review",
@@ -1358,6 +1366,7 @@ def _install_handler_slots(srv: ChahuaServer) -> None:
     srv.settings = SettingsHandlers(srv)
     srv.task = TaskHandlers(srv)
     srv.handoff = HandoffHandlers(srv)
+    srv.agent_run = AgentRunHandlers(srv)
 
 
 def _bind_inbound_handlers(srv: ChahuaServer) -> dict[str, _InboundHandler]:
