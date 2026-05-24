@@ -121,6 +121,13 @@ class IOHandlers:
             return
         rel = f"{ROOM_SHARE_DIRNAME}/{safe_name}"
         _log.info("upload_file: %s (%d bytes)", rel, len(data))
+        # P10.2：用户经 UI 上传到 share/ 后必须同步 mark_share_seen —— 否则下一轮
+        # ``ArtifactDetector._detect_share_artifacts`` 把该文件当 share/ 新增重发
+        # ``room_artifact_added``（同 P5.8 §5.4 attach_artifact mark_seen 口径，
+        # 否则 "用户上传却显示房间产物" 是可见 bug）。
+        # P10.3 修：走 orchestrator 公开访问器，不穿透 ``._artifact_detector`` 私属性，
+        # 避免未来重命名时 inbound 路径 silently AttributeError 把 echo 链条扼断。
+        self.server._session.orchestrator.mark_share_seen(rel)
         sink(
             ChahuaEnvelope(
                 room_id=self.server._session.room.name,
@@ -265,7 +272,9 @@ class IOHandlers:
         # read-only：不动 session、不挡 inflight turn。
         self._export_room(sink)
 
-    def _download_file(self, *, rel: str, sink: EnvelopeSink) -> None:
+    def _download_file(
+        self, *, rel: str, sink: EnvelopeSink, purpose: str = "download"
+    ) -> None:
         """按 ``rel`` 把房间内文件读出 + base64 后回吐 ``FILE_DOWNLOAD``。
 
         - 仅接受 :data:`_DOWNLOAD_ALLOWED_PREFIXES` 前缀的 rel。绝对路径 / 包含 ``..``
@@ -274,26 +283,30 @@ class IOHandlers:
         - 超 :data:`_DOWNLOAD_MAX_BYTES` 拒（base64 后帧太大触发对端 ws 断线噩梦）。
         - **每次入站请求恒发一条** ``FILE_DOWNLOAD`` envelope（成功 / 失败），失败路径
           同时 emit NOTICE error 给用户看，与 upload 对仗。
+
+        ``purpose`` 仅用作 envelope 回声，server 端读盘逻辑对取值无差异 ——
+        ``"preview"`` 让前端把字节灌进 ``<img>``、``"download"`` 让前端触发
+        ``a.download``。无白名单校验：未知值前端按 download 兜底处理。
         """
         original_rel = rel
         if not isinstance(rel, str) or not rel:
-            self._fail_download(sink, rel=original_rel, text="rel 缺失或非字符串")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text="rel 缺失或非字符串")
             return
         # 反斜杠 / 绝对路径 / 空段 / .. 全部拒。Windows 上 PurePosix 拆出来的段不会含 \\，
         # 显式过滤避免误把 "share\\evil" 当成 share/ 子文件。
         if "\\" in rel or rel.startswith("/"):
-            self._fail_download(sink, rel=original_rel, text="rel 含非法字符或绝对路径")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text="rel 含非法字符或绝对路径")
             return
         if not rel.startswith(_DOWNLOAD_ALLOWED_PREFIXES):
             self._fail_download(
-                sink, rel=original_rel,
+                sink, rel=original_rel, purpose=purpose,
                 text=f"rel 不在白名单前缀内（仅允许 {'/'.join(_DOWNLOAD_ALLOWED_PREFIXES)}）",
             )
             return
         # 拆段做 traversal 检查 —— 任何空段 / "." / ".." 都拒。
         segments = rel.split("/")
         if any(seg in ("", ".", "..") for seg in segments):
-            self._fail_download(sink, rel=original_rel, text="rel 含非法路径段")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text="rel 含非法路径段")
             return
         # tasks/ 前缀必须严格落在 tasks/<id>/artifacts/<name>+ 形（≥4 段，segments[2] ==
         # "artifacts"）—— 防 tasks/state.json / tasks/<id>/task.json / decisions.jsonl /
@@ -301,7 +314,7 @@ class IOHandlers:
         # 目录是合法用法，且无敏感元数据混在 share/ 下）。
         if segments[0] == "tasks" and (len(segments) < 4 or segments[2] != "artifacts"):
             self._fail_download(
-                sink, rel=original_rel,
+                sink, rel=original_rel, purpose=purpose,
                 text="rel 必须形如 tasks/<id>/artifacts/<name>",
             )
             return
@@ -320,29 +333,29 @@ class IOHandlers:
                 ).resolve()
             target.relative_to(allowed_root)
         except (OSError, ValueError) as e:
-            self._fail_download(sink, rel=original_rel, text=f"路径解析失败：{e}")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text=f"路径解析失败：{e}")
             return
         if not target.is_file():
-            self._fail_download(sink, rel=original_rel, text="文件不存在或不是普通文件")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text="文件不存在或不是普通文件")
             return
         try:
             size = target.stat().st_size
         except OSError as e:
-            self._fail_download(sink, rel=original_rel, text=f"读盘失败：{e}")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text=f"读盘失败：{e}")
             return
         if size > _DOWNLOAD_MAX_BYTES:
             self._fail_download(
-                sink, rel=original_rel,
+                sink, rel=original_rel, purpose=purpose,
                 text=f"文件太大（{size} bytes，上限 {_DOWNLOAD_MAX_BYTES}）",
             )
             return
         try:
             data = target.read_bytes()
         except OSError as e:
-            self._fail_download(sink, rel=original_rel, text=f"读盘失败：{e}")
+            self._fail_download(sink, rel=original_rel, purpose=purpose, text=f"读盘失败：{e}")
             return
         content_b64 = base64.b64encode(data).decode("ascii")
-        _log.info("download_file: %s (%d bytes)", rel, size)
+        _log.info("download_file: %s (%d bytes, purpose=%s)", rel, size, purpose)
         sink(
             ChahuaEnvelope(
                 room_id=self.server._session.room.name,
@@ -353,19 +366,34 @@ class IOHandlers:
                     "name": target.name,
                     "size": size,
                     "content_b64": content_b64,
+                    "purpose": purpose,
                 },
             )
         )
 
-    def _fail_download(self, sink: EnvelopeSink, *, rel: str, text: str) -> None:
-        """NOTICE error + FILE_DOWNLOAD(error) —— 与 _fail_upload 同口径。"""
-        self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
+    def _fail_download(
+        self, sink: EnvelopeSink, *, rel: str, text: str, purpose: str = "download"
+    ) -> None:
+        """``FILE_DOWNLOAD(error)`` 必发；NOTICE 仅 download 路径才发 —— 与 _fail_upload
+        同口径但对 preview 路径降级。
+
+        ``purpose`` 同样回声，让前端 preview 路径上的"图占位"失败时不弹下载 alert。
+        P10.3 codex review §1 修：preview 路径的失败不再走 NOTICE level=error（前端
+        ``NOTICE`` 是 ``window.alert`` 强提示），否则历史房间懒触发的 preview 把缺失
+        artifact 串成模态弹窗墙；preview 失败由 ``resolveArtifactPreview`` 的红框
+        ``.artifact-image-error`` 承接即可。download 路径维持 NOTICE 提示。"""
+        if purpose != "preview":
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=text)
         sink(
             ChahuaEnvelope(
                 room_id=self.server._session.room.name,
                 turn_id=None, guest_name=None, message_id=None,
                 type=ChahuaEventType.FILE_DOWNLOAD,
-                data={"rel": rel if isinstance(rel, str) else "", "error": text},
+                data={
+                    "rel": rel if isinstance(rel, str) else "",
+                    "error": text,
+                    "purpose": purpose,
+                },
             )
         )
 
@@ -373,4 +401,8 @@ class IOHandlers:
         # 不动 session、不挡 inflight turn —— 纯读盘。
         raw_rel = data.get("rel")
         rel = raw_rel if isinstance(raw_rel, str) else ""
-        self._download_file(rel=rel, sink=sink)
+        # ``purpose`` 可选；缺省 "download"（与本帧加 purpose 字段前的语义一致）。
+        # 未知字符串原样回声、不拒帧 —— envelope 协议层零硬校验、前端按值分流。
+        raw_purpose = data.get("purpose", "download")
+        purpose = raw_purpose if isinstance(raw_purpose, str) and raw_purpose else "download"
+        self._download_file(rel=rel, sink=sink, purpose=purpose)

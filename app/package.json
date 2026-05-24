@@ -25,7 +25,8 @@
   },
   "dependencies": {
     "dompurify": "^3.4.3",
-    "marked": "^18.0.3"
+    "marked": "^18.0.3",
+    "mermaid": "^11.15.0"
   },
   "build": {
     "appId": "chahua.app",
@@ -44,13 +45,21 @@
       "package.json",
       "!python-bundle/**/*",
       "!scripts/**/*",
-      "!dist/**/*"
+      "!dist/**/*",
+      "!node_modules/mermaid/dist/**/*.map",
+      "!node_modules/mermaid/dist/mermaid.js",
+      "!node_modules/mermaid/dist/mermaid.min.js",
+      "!node_modules/mermaid/dist/mermaid.esm.min.mjs",
+      "!node_modules/mermaid/dist/chunks/mermaid.esm.min/**/*",
+      "!node_modules/mermaid/dist/chunks/mermaid.core/**/*"
     ],
     "extraResources": [
       {
         "from": "python-bundle",
         "to": "python-bundle",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
@@ -58,7 +67,9 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         }
       ],
       "artifactName": "chahua-${version}-mac-${arch}.${ext}",
@@ -74,7 +85,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "chahua-${version}-win-${arch}.${ext}"

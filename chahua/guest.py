@@ -38,6 +38,7 @@ from .events import (
     new_message_id,
 )
 from .mcp_thread import ThreadedMcpClientManager
+from .message_artifacts import MessageArtifactRegistry
 from .permissions import apply_permission_mode
 from .persona_assets import PersonaAssets
 from .handoff_tools import register_handoff_tools
@@ -106,6 +107,8 @@ class TeaGuest:
         assets: Optional[PersonaAssets] = None,
         room_level_mcp: Optional[dict[str, dict]] = None,
         recorder: TurnRecorder = NOOP_RECORDER,
+        message_artifacts: Optional[MessageArtifactRegistry] = None,
+        share_dir: Optional[Path] = None,
     ) -> None:
         self.name = name
         self.room = room
@@ -118,7 +121,17 @@ class TeaGuest:
         # transport 终身绑定 (room_id, guest_name)；per-speak 的 (sink, turn_id,
         # message_id) 通过 bind() 临时设。room_id 暂用 room.name —— P4 加 [room].id
         # 后由 cli 显式传，这里换个 helper 即可。
-        self._transport = ChahuaTransport(room_id=room.name, guest_name=name)
+        self._transport = ChahuaTransport(
+            room_id=room.name,
+            guest_name=name,
+            message_artifacts=message_artifacts,
+            # P10.4：shell / MCP 工具 args 推不出落盘路径，transport 自己拿 share/
+            # 实路径 + tasks_store 做"前后 diff"回填 pending。share_dir 必须是
+            # ``<room>/share/`` 实路径，不能传 guest cwd 的软链——``_list_share_rels``
+            # 用 ``os.walk(followlinks=False)``，软链会被当成空目录。
+            share_dir=share_dir,
+            tasks_store=tasks_store,
+        )
 
         permission_engine = PermissionEngine(
             project_root=self.working_directory,

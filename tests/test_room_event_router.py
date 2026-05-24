@@ -52,6 +52,7 @@ _BACKGROUND_PASS = [
     ChahuaEventType.MESSAGE_END,
     ChahuaEventType.TASK_INFO,
     ChahuaEventType.TASK_ARTIFACT_ADDED,
+    ChahuaEventType.ROOM_ARTIFACT_ADDED,
     ChahuaEventType.MANAGED_SESSION_STARTED,
     ChahuaEventType.MANAGED_SESSION_ADVANCED,
     ChahuaEventType.MANAGED_SESSION_ENDED,

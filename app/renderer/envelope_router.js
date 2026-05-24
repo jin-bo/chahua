@@ -23,6 +23,7 @@ import {
   formatTaskEventNotice,
   formatManagedSessionNotice,
 } from "./events.js";
+import { resolveArtifactPreview } from "./chat_view.js";
 import * as taskState from "./task_state.js";
 import * as handoffState from "./handoff_state.js";
 
@@ -74,6 +75,9 @@ export function createEnvelopeRouter({
   appendDelta,
   endStreamingMessage,
   appendBubble,
+  // 「气泡后挂图片 / 下载链」live 路径：task_artifact_added 收到 originated_message_id
+  // 时把挂件 append 到该气泡末尾；找不到气泡返 false → 走系统气泡兜底。
+  attachArtifactByMessageId,
   setStatus,
   upload,
   taskPanel,
@@ -170,10 +174,48 @@ export function createEnvelopeRouter({
       // 不再合成 user 消息进 transcript）。气泡是瞬时 UI 通知，刷新 / 切房即清。
       case EventType.TASK_OPEN:
       case EventType.TASK_DECISION_ADDED:
-      case EventType.TASK_ARTIFACT_ADDED:
       case EventType.TASK_CLOSE: {
         taskPanel.flashHint(env.type, env.data ?? {});
         const text = formatTaskEventNotice(env.type, env.data ?? {});
+        if (text) appendBubble({ kind: "system", text });
+        return;
+      }
+      case EventType.TASK_ARTIFACT_ADDED: {
+        // 面板增量闪烁不变。新行为：envelope 带 originated_message_id 且能找到那条
+        // 气泡 → 把图片 / 下载 pill 挂到气泡末尾、不再追系统气泡（避免 "📎 茶客产出："
+        // 与挂件双重提示）。命不中 → 走系统气泡兜底（用户上传、跨周期遗留、流式失败丢
+        // 锚消息的 message_id）。
+        const data = env.data ?? {};
+        taskPanel.flashHint(env.type, data);
+        const originated = data.originated_message_id;
+        if (originated && attachArtifactByMessageId) {
+          const ok = attachArtifactByMessageId(originated, {
+            name: data.name,
+            rel: data.rel,
+            size: data.size,
+            task_id: data.task_id,
+          });
+          if (ok) return;
+        }
+        const text = formatTaskEventNotice(env.type, data);
+        if (text) appendBubble({ kind: "system", text });
+        return;
+      }
+      case EventType.ROOM_ARTIFACT_ADDED: {
+        // P10.2 房间公共桌面产物 —— 与 TASK_ARTIFACT_ADDED 同分流，差在不闪任务面板
+        // （没有面板可闪），且 data 不含 task_id（前端 attachArtifactToBubble 仅用 rel/name/size，
+        // task_id 字段缺省无副作用）。
+        const data = env.data ?? {};
+        const originated = data.originated_message_id;
+        if (originated && attachArtifactByMessageId) {
+          const ok = attachArtifactByMessageId(originated, {
+            name: data.name,
+            rel: data.rel,
+            size: data.size,
+          });
+          if (ok) return;
+        }
+        const text = formatTaskEventNotice(env.type, data);
         if (text) appendBubble({ kind: "system", text });
         return;
       }
@@ -234,12 +276,33 @@ export function createEnvelopeRouter({
         return;
       }
       case EventType.FILE_DOWNLOAD: {
-        // 失败路径：NOTICE 已弹过 alert，envelope 仅含 {rel, error}，跳过 Blob 流程。
+        // 失败路径：NOTICE 已弹过 alert，envelope 仅含 {rel, error, purpose?}。
+        // preview 路径上的失败要传给等待中的 <img> 显示 alt 错误；download 路径无副作用。
         const d = env.data || {};
-        if (d.error) return;
+        const purpose = d.purpose === "preview" ? "preview" : "download";
+        if (d.error) {
+          if (purpose === "preview") {
+            resolveArtifactPreview({
+              rel: d.rel, content_b64: null, name: d.name, error: d.error,
+            });
+          }
+          return;
+        }
         const b64 = d.content_b64;
         const name = d.name || "download";
         if (typeof b64 !== "string") return;
+        // 「气泡后挂图片 / 下载链」preview 分流：bytes 灌进等待的 <img>，不走 a.download。
+        // P10.3 修：preview 路径没等待者也**不**兜底走下载——用户按的是"预览"，
+        // 切走 / 节点被 clear 是预期场景，强存盘是 UX 回退。命不中静默 setStatus 即可。
+        if (purpose === "preview") {
+          const consumed = resolveArtifactPreview({
+            rel: d.rel, content_b64: b64, name, error: null,
+          });
+          if (!consumed) {
+            setStatus("", `预览「${name}」的字节已到，但目标气泡已不在前台`);
+          }
+          return;
+        }
         // base64 → Uint8Array → Blob。atob 一次性解码 ~200MB 在 Chromium 还稳；超大
         // base64 字符串在 ws 入站早就被 _DOWNLOAD_MAX_BYTES 拦了。
         let bin;

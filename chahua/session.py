@@ -25,6 +25,7 @@ from .cursor import GuestCursor
 from .debug_recorder import TurnRecorder
 from .guest import TeaGuest
 from .llm_spec import LLMSpec, build_client
+from .message_artifacts import MessageArtifactRegistry
 from . import persona_summary
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .persona_assets import discover_assets, persona_relative
@@ -128,6 +129,7 @@ def _build_guests(
     *,
     tasks_store: TasksStore,
     recorder: TurnRecorder,
+    message_artifacts: MessageArtifactRegistry,
 ) -> list[tuple[TeaGuest, str]]:
     """按 ``room.toml`` 里 ``[[guest]]`` 顺序构造茶客。
 
@@ -177,6 +179,11 @@ def _build_guests(
             assets=assets,
             room_level_mcp=gc.extra_mcp_servers,
             recorder=recorder,
+            message_artifacts=message_artifacts,
+            # P10.4：transport 用 share/ 实路径做 shell / MCP 工具的"前后 diff"
+            # 基线。传房间根的 share/（``room_share``）—— guest cwd 下的 ``share``
+            # 是软链、``_list_share_rels`` followlinks=False 会跳过。
+            share_dir=room_share,
         )
         # TeaGuest.__init__ 已经 mkdir 了 working_directory，share 软链放这里安全。
         _link_guest_share(guest.working_directory, room_share)
@@ -233,6 +240,12 @@ class RoomSession:
     跑实时记录；server ``_inbound_fetch_turn_detail`` 也经它走 ``load_turn`` /
     ``load_index`` 取证（P6.3.A）。``enabled=False`` 时是 ``NOOP_RECORDER`` 风格的
     no-op 实例，但仍是真 ``TurnRecorder`` 句柄（session 装配期一次性创建）。"""
+
+    message_artifacts: MessageArtifactRegistry
+    """房间级「消息 ↔ 茶客产物」注册表（"气泡后挂图片 / 下载链"）。
+    与 transcript.jsonl 同生命周期：``task_write_artifact`` 工具运行时收 message_id
+    → 产物名映射，落 ``rooms/<id>/message_artifacts.jsonl``；``emit_room_history``
+    按 message 投影给前端，刷新 / 切房后历史挂件能还原。``reset_room`` 同步截断。"""
 
     def close(self) -> None:
         # cursor flush 是廉价同步 IO，先做完再走茶客 close（后者偶发卡 event loop）。
@@ -424,6 +437,13 @@ def build_room_session(
     tasks_store = TasksStore(room_dir=room_config.room_dir)
     task_summaries = TaskSummaries(summary_client, tasks_store=tasks_store)
 
+    # 「气泡后挂图片 / 下载链」：与 ``transcript.jsonl`` 同生命周期的房间级注册表，
+    # 跟踪每条消息流式期间通过 ``task_write_artifact`` 产出的文件名 + 大小。落盘在
+    # ``rooms/<id>/message_artifacts.jsonl``，加载跳坏行；``reset_room`` 同步截断。
+    message_artifacts = MessageArtifactRegistry(
+        store_path=room_config.room_dir / "message_artifacts.jsonl",
+    )
+
     # P6.1：``[debug] enabled = false`` 时 ``TurnRecorder.__init__`` 早 return，
     # 不动盘；同 NOOP_RECORDER 风格但保留 toml 的 capture_prompts 字段（即便
     # enabled=False 时 ``capture_prompts`` 实际效果固定 False，不变量"recorder.
@@ -438,6 +458,7 @@ def build_room_session(
     guest_entries = _build_guests(
         room_config, guest_clients, room, paths,
         tasks_store=tasks_store, recorder=recorder,
+        message_artifacts=message_artifacts,
     )
     guests = [g for g, _ in guest_entries]
 
@@ -475,6 +496,10 @@ def build_room_session(
         task_summaries=task_summaries,
         recorder=recorder,
         roster=roster,
+        message_artifacts=message_artifacts,
+        # P10.2 房间公共桌面：与 ``_build_guests`` 里的 ``ensure_room_share_dir`` 同源
+        # （后者已 mkdir 兜底）；这里再 helper 一次取 Path 是幂等的。
+        share_dir=ensure_room_share_dir(room_config.room_dir),
     )
     for guest, persona_md in guest_entries:
         orchestrator.register(guest, persona_md)
@@ -498,6 +523,7 @@ def build_room_session(
         tasks_store=tasks_store,
         task_summaries=task_summaries,
         recorder=recorder,
+        message_artifacts=message_artifacts,
     )
     relink_task_dirs(session)
     return session

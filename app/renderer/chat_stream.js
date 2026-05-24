@@ -10,12 +10,14 @@
 
 import { Status } from "./events.js";
 import {
+  attachArtifactToBubble,
   attachCopyButton,
   attachReviewButton,
   isSelectionInside,
   removeStreamingCursor,
   renderGuestText,
   renderMarkdown,
+  renderMermaidIn,
   setStatusTail,
 } from "./chat_view.js";
 
@@ -30,6 +32,9 @@ export function createChatStream({
   stickToBottom,
   afterAppendMessage,
   onRequestReview,
+  // 「气泡后挂图片 / 下载链」用：调用方注入 `{onRequestPreview(rel), onRequestDownload(rel)}`，
+  // 缺省时挂件依然渲染、但点击 / 占位图字节无回路（适合无 ws 测试 harness）。
+  artifactCallbacks = null,
 }) {
   // 流式 in-flight 状态：message_id → { textEl, li, bubble, accumulated }。
   // 由本模块封装；外部只通过 :func:`closeInFlightOnDisconnect` 一键清空。
@@ -243,11 +248,15 @@ export function createChatStream({
           if (isSelectionInside(m.textEl)) return;
           document.removeEventListener("selectionchange", finalize);
           m.textEl.innerHTML = renderMarkdown(finalText);
+          // mermaid 异步渲染：只在 message_end 全文到位时调一次（流式 delta 期间禁
+          // 调，半截 mermaid 源会刷错）。
+          renderMermaidIn(m.textEl);
         };
         document.addEventListener("selectionchange", finalize);
         return;
       }
       m.textEl.innerHTML = renderMarkdown(finalText);
+      renderMermaidIn(m.textEl);
     });
   }
 
@@ -277,16 +286,54 @@ export function createChatStream({
     stickToBottom(() => {
       for (const m of messages) {
         const taskId = m.task_id ?? null;
+        let bubble;
         if (m.speaker_id === USER_SPEAKER_ID) {
-          messagesEl.appendChild(makeUserRow(m.text, { messageId: m.message_id, taskId }));
+          const li = makeUserRow(m.text, { messageId: m.message_id, taskId });
+          messagesEl.appendChild(li);
+          bubble = li.querySelector(":scope > .bubble");
         } else {
           const row = makeGuestRow(m.speaker_id, { messageId: m.message_id, taskId });
           renderGuestText(row, m.text);
           messagesEl.appendChild(row.li);
+          bubble = row.bubble;
+        }
+        // 「气泡后挂图片 / 下载链」历史回放：originated_artifacts 由后端按 message_id
+        // 投影；每条独立 attachArtifactToBubble、内部按 rel 去重避免双触发（live + history
+        // 在切回房瞬间可能撞同一条）。
+        // P10.3 修：``lazy: true`` —— 历史路径下 preview 请求挂 IntersectionObserver,
+        // 仅当 figure 进入视口才发 download_file，防一打开历史房就 N 个图片字节雷暴。
+        const refs = Array.isArray(m.originated_artifacts) ? m.originated_artifacts : [];
+        if (bubble && refs.length > 0) {
+          for (const r of refs) {
+            attachArtifactToBubble(bubble, r, artifactCallbacks, { lazy: true });
+          }
         }
       }
       // 强制滚到底 —— stickToBottom 在 mutate 前 messagesEl 是空，stick=true，自动定到底。
     });
+  }
+
+  // 给 envelope_router 用：按 message_id 找气泡挂 artifact。流式期间 inFlight 持有
+  // 引用；流式结束后从 DOM 查 ``li[data-message-id]``。找不到 → 调用方走系统气泡兜底。
+  function attachArtifactByMessageId(messageId, artifact) {
+    if (!messageId) return false;
+    let bubble = null;
+    const inflightEntry = inFlight.get(messageId);
+    if (inflightEntry) {
+      bubble = inflightEntry.bubble;
+    } else {
+      const li = messagesEl.querySelector(`li[data-message-id="${cssEscapeAttr(messageId)}"]`);
+      if (li) bubble = li.querySelector(":scope > .bubble");
+    }
+    if (!bubble) return false;
+    attachArtifactToBubble(bubble, artifact, artifactCallbacks);
+    return true;
+  }
+
+  function cssEscapeAttr(s) {
+    return typeof CSS !== "undefined" && CSS.escape
+      ? CSS.escape(s)
+      : String(s).replace(/(["\\])/g, "\\$1");
   }
 
   return {
@@ -297,5 +344,6 @@ export function createChatStream({
     clearInFlight,
     closeInFlightOnDisconnect,
     renderHistory,
+    attachArtifactByMessageId,
   };
 }

@@ -454,7 +454,10 @@ class TaskHandlers:
         # 文件当 new_names 重发 TASK_ARTIFACT_ADDED 且无条件标 created_by=guest ——
         # P5.8 把 hint 渲成可见气泡后会变成"用户上传却显示茶客产出"的 bug。mark_seen
         # 对非 active 任务也安全（detect 只扫 active，重复实际只在挂到 active 时发生）。
-        self.server._session.orchestrator._artifact_detector.mark_seen(
+        # P10.4 review §3：走 orchestrator 公开访问器，与 ``_upload_file`` 走
+        # ``mark_share_seen`` 同口径，不穿透 ``._artifact_detector`` 私属性 ——
+        # 避免未来重命名时 inbound 路径 silently AttributeError 把 echo 链条扼断。
+        self.server._session.orchestrator.mark_task_artifact_seen(
             task_id, info["name"],
         )
         self._emit_task_envelope(

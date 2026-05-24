@@ -29,6 +29,7 @@ import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 # Sentinel for "task_id arg not passed" —— 区分 None（显式无任务）vs 缺省（要内部 snapshot）。
@@ -61,6 +62,7 @@ from .events import (
     new_turn_id,
 )
 from .guest import TeaGuest
+from .message_artifacts import MessageArtifactRegistry
 from .handoff import (
     MANAGED_SESSION_REASON_BUDGET_EXHAUSTED,
     MANAGED_SESSION_REASON_CAP_REACHED,
@@ -137,6 +139,8 @@ class Orchestrator:
         task_summaries: Optional[TaskSummaries] = None,
         recorder: TurnRecorder = NOOP_RECORDER,
         roster: Optional[dict[str, str]] = None,
+        message_artifacts: Optional[MessageArtifactRegistry] = None,
+        share_dir: Optional[Path] = None,
     ) -> None:
         self.room = room
         self.user_config = user_config
@@ -183,8 +187,16 @@ class Orchestrator:
         # P5.4 茶客自动归集：每个 pick 周期末尾扫 active task 的 ``artifacts/``，
         # diff "上次扫到的文件名 set" emit hint + ``task_info``。逻辑搬到
         # :class:`ArtifactDetector`；本类经 ``_seen_artifacts`` 属性向测试暴露内部 dict。
+        # 同时挂上房间级 ``message_artifacts``，让 detect 在 emit envelope 时挂上
+        # ``originated_message_id`` + 落 ``message_artifacts.jsonl``（"气泡后挂图片
+        # / 下载链"）。``None`` = 测试 / 未装配 —— 路径退化到 envelope 不带该字段。
+        self._message_artifacts = message_artifacts
+        # P10.2：``share_dir`` 透传给 detector 做房间公共桌面增量扫描。``None`` =
+        # 测试 / 未装配 —— share/ 扫描整段跳过，行为与本变更前一致。
         self._artifact_detector = ArtifactDetector(
             room=self.room, tasks_store=tasks_store,
+            share_dir=share_dir,
+            message_artifacts=message_artifacts,
         )
 
         # P7.1 显式 handoff 队列：FIFO，新指派 append 队尾，drain loop 取队首。
@@ -294,6 +306,11 @@ class Orchestrator:
         # managed_session_ended（reset_room 后 server 重发整份 room snapshot，
         # 前端状态条随快照复位；切房 / clear 不是 MTS 自身的「结束」语义）。
         self._managed_session = None
+        # 「气泡后挂图片 / 下载链」注册表与 transcript 同生命周期：transcript 清光后
+        # 任何 ``originated_message_id`` 都会指向已不存在的消息，需同时截断；同样的
+        # 截断不删盘上 ``tasks/<id>/artifacts/`` 内的文件（``/clear task`` 走独立路径）。
+        if self._message_artifacts is not None:
+            self._message_artifacts.clear()
 
     # ── handoff 队列（P7.1，docs/P7 §3.4）────────────────────────────────
 
@@ -1513,4 +1530,27 @@ class Orchestrator:
         软链后，落在 ``tasks/<active>/artifacts/<name>``。
         """
         self._artifact_detector.detect(sink, active_task_id)
+
+    def mark_share_seen(self, rel: str) -> None:
+        """公开访问器：把单个 ``share/`` rel 增量记进 detector 的 share_seen。
+
+        P10.3 review 修：``server_inbound_io._upload_file`` 等 inbound 路径不应
+        穿透 ``orchestrator._artifact_detector`` 私属性 —— 后者一次重命名就会让 inbound
+        代码 silently AttributeError、把整条 ``file_uploaded`` echo 链条扼断、前端
+        upload 队列永挂。走这层封装避免耦合到具体 detector 字段名。
+        """
+        self._artifact_detector.mark_share_seen(rel)
+
+    def mark_task_artifact_seen(self, task_id: str, name: str) -> None:
+        """公开访问器：把单个任务 artifact 名增量记进 detector 的 ``seen``（P10.4
+        code review §3 fix）。
+
+        与 :meth:`mark_share_seen` 同位面：``server_inbound_task._inbound_attach_artifact``
+        在 P10.3 仍直接 ``orchestrator._artifact_detector.mark_seen(...)`` 穿透私属性，
+        与 ``_upload_file`` 走 ``mark_share_seen`` facade 的口径不对称——下次 detector
+        字段重命名会让 ``attach_artifact`` 路径 silently AttributeError，下一轮 detect()
+        把用户上传的文件当 ``new_names`` 重发 ``TASK_ARTIFACT_ADDED`` 且打 ``created_by=guest``
+        —— 就是 P5.8 §5.4 ``mark_seen`` 存在的原因。统一走 facade 把这个回归口子堵住。
+        """
+        self._artifact_detector.mark_seen(task_id, name)
 

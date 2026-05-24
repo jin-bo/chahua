@@ -49,6 +49,7 @@ import { createConnection } from "./connection.js";
 import { createRoomList } from "./room_list.js";
 import { createTurnState } from "./turn_state.js";
 import { createEnvelopeRouter } from "./envelope_router.js";
+import { clearPendingArtifactPreviews } from "./chat_view.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -249,6 +250,27 @@ const messageFilter = createMessageFilter({ messagesEl, taskState });
 // afterAppendMessage）都已定义之后实例化。返回的 6 个方法是 envelope 分派与
 // 连接生命周期的唯一对接面，老的 makeGuestRow / makeUserRow / inFlight Map 都封在
 // 模块内不外泄。
+// 「气泡后挂图片 / 下载链」回调：preview 走 download_file purpose=preview，前端 envelope
+// 路由把 bytes 灌进等待的 <img>；download 走 purpose=download，触发 a.download。两条
+// 都是 envelope 协议层的同一帧，仅 purpose 字段不同。断网时早返避免 send 抛。
+//
+// P10.3 修：onRequestPreview 返 ``boolean`` —— ``true`` = 已 send；``false`` = 没发出
+// （断线 / 早返）。chat_view.buildImageNode 据此决定是否挂 pendingPreview waiter:
+// 不挂可以避免在断线场景下 waiter 永挂、Map 无界增长。
+const artifactCallbacks = {
+  onRequestPreview: (rel) => {
+    if (!connection.isConnected()) return false;
+    send({ type: Inbound.DOWNLOAD_FILE, rel, purpose: "preview" });
+    return true;
+  },
+  onRequestDownload: (rel) => {
+    if (!connection.isConnected()) return false;
+    send({ type: Inbound.DOWNLOAD_FILE, rel, purpose: "download" });
+    setStatus("", `下载「${rel}」…`);
+    return true;
+  },
+};
+
 const {
   appendBubble,
   startStreamingMessage,
@@ -257,6 +279,7 @@ const {
   clearInFlight,
   closeInFlightOnDisconnect,
   renderHistory,
+  attachArtifactByMessageId,
 } = createChatStream({
   messagesEl,
   makeAvatar: sidebar.makeAvatar,
@@ -264,6 +287,7 @@ const {
   stickToBottom,
   afterAppendMessage: messageFilter.afterAppendMessage,
   onRequestReview: requestReview,
+  artifactCallbacks,
 });
 
 // ── sidebar 装配（room_info）────────────────────────────────────────
@@ -273,6 +297,9 @@ function renderSidebar(roomInfo) {
   // （pill 的 rel 是按房间 share/ 计的相对路径，换房后挂别房不通）。打分残留由下文
   // sidebar.renderGuests 重建时清。
   clearInFlight();
+  // 「气泡后挂图片 / 下载链」预览 pending：messagesEl 被 replaceChildren 后，等图节点
+  // 不再 isConnected，preview 字节回包来了也无处灌；不清的话 Map 持续涨。
+  clearPendingArtifactPreviews();
   // 切房 / 重连 / 清空 → filter 视图无意义，强 exit 让新房间从全量视角起步。
   messageFilter.exitFilter();
   messagesEl.replaceChildren();
@@ -627,6 +654,7 @@ const envelopeRouter = createEnvelopeRouter({
   appendDelta,
   endStreamingMessage,
   appendBubble,
+  attachArtifactByMessageId,
   setStatus,
   upload,
   taskPanel,

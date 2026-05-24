@@ -151,10 +151,19 @@ class ChahuaEventType(str, Enum):
 
     # P9 切房后房间后台续跑（docs/P9-切房后房间后台续跑.md §4 / §5）。hint 型里程碑：
     # 切走后仍 busy 的房间转后台续跑，其 turn / handoff drain 跑完、runtime 自毁时
-    # emit 一次。不进 transcript / 不触发 AI。阶段 9.2 后台 router 是 NOOP，本事件被
+    # emit 一次。不进 transcript / 不触发 AI。阶段 9.2 后台 router 是 NOOP,本事件被
     # 丢弃（靠切回快照）；阶段 9.3.1 后台白名单放行后才真送达前端更新房间列表徽标。
     # 新增事件类型——旧前端遇未知 type WARN 后忽略（向前兼容），不 bump schema_version。
     ROOM_BACKGROUND_FINISHED = "room_background_finished"
+
+    # P10.2 非任务房间产物：茶客通过原生 ``write_file('./share/<x>')`` 落盘到房间公共
+    # 桌面 ``<room>/share/``，或用户 UI 上传到 share/ —— 与 ``TASK_ARTIFACT_ADDED`` 平行
+    # 的 hint。``data`` 形状 ``{rel, name, size, originated_message_id?}`` —— 无
+    # ``task_id`` 字段（这是房间级而非任务级产物）。``originated_message_id`` 缺 → 用户
+    # 上传 / 跨周期遗留 / 流式失败丢锚，前端走系统气泡兜底。茶客 ``write_file`` 在
+    # 同一段 transport_bridge 拦截点压 pending；``ArtifactDetector`` 扫 share/ diff 后
+    # consume + 落 ``message_artifacts.jsonl``。``schema_version`` 不 bump。
+    ROOM_ARTIFACT_ADDED = "room_artifact_added"
 
 
 # status 三态。仅 ``message_end`` / ``turn_end`` 有意义；其余事件一律 OK 占位。

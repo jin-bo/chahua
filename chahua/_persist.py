@@ -64,13 +64,24 @@ def read_jsonl_skip_bad(path: Path) -> Iterator[dict]:
                 _log.warning("skip non-dict jsonl line %s:%d", path, lineno)
 
 
+def _tmp_path(path: Path) -> Path:
+    """生成 ``<parent>/.<name>.tmp`` 形式的 tmp 路径（P10.2 修：dot-prefix）。
+
+    旧式 ``<path>.tmp``（如 ``share/foo.png.tmp``）会被 :func:`chahua.artifact_detector
+    ._list_share_rels` 当成正常文件扫到、emit ``ROOM_ARTIFACT_ADDED`` 幽灵气泡；
+    dot-prefix 命名让该扫描器一致地跳过整族 tmp 残骸（已经存在 ``startswith('.')``
+    过滤）。改名仅影响 rename 前的瞬态文件，``os.replace`` 后的最终路径不变。
+    """
+    return path.parent / f".{path.name}.tmp"
+
+
 def write_json_atomic(path: Path, data: object) -> None:
-    """原子写整个 JSON 文件：写 ``<path>.tmp`` → ``os.replace`` 到 ``<path>``。
+    """原子写整个 JSON 文件：写 ``<parent>/.<name>.tmp`` → ``os.replace`` 到 ``<path>``。
 
     读端永远看到完整 JSON 或上一版完整 JSON，不会读到半写状态。父目录由调用方
     在构造期建好（同 :func:`append_jsonl`）。
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = _tmp_path(path)
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
@@ -83,17 +94,18 @@ def write_text_atomic(path: Path, text: str) -> None:
     "构造期一次性 mkdir"的承诺）。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = _tmp_path(path)
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
-    """原子写整段二进制。头像 PNG 走这里 —— 同 :func:`write_text_atomic`，
-    内容是字节而非 UTF-8 文本。
+    """原子写整段二进制。头像 PNG / share/ 上传走这里 —— 同 :func:`write_text_atomic`，
+    内容是字节而非 UTF-8 文本。tmp 名走 dot-prefix（详见 :func:`_tmp_path`）确保
+    share/ 扫描期间瞬态残骸不被当成 artifact 气泡误报。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = _tmp_path(path)
     tmp.write_bytes(data)
     os.replace(tmp, path)
 

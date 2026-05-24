@@ -253,7 +253,34 @@ def emit_room_history(server: "ChahuaServer", sink: EnvelopeSink) -> None:
     关闭时整字段缺省（不下发空数组），让前端区分"关了" vs "开着但确实空"。
     """
     msgs = server._session.room.messages_since(0)
-    data: dict[str, Any] = {"messages": [m.to_jsonl_dict() for m in msgs]}
+    message_artifacts = server._session.message_artifacts
+    room_dir = server._session.room_config.room_dir
+    # 「气泡后挂图片 / 下载链」：每条消息的 ``originated_artifacts`` 投影 ——
+    # ``rooms/<id>/message_artifacts.jsonl`` 在 boot 时已加载到 ``by_message``；
+    # 这里按 message_id 查表，空列表的消息**不写键**（与 ``task_id`` 缺省同口径，
+    # 避免给绝大多数无产物消息塞空数组导致 envelope 膨胀）。
+    #
+    # P10.3 review 修：盘上不存在的 ref 不下发 —— 任务被 ``close_task(delete=True)``
+    # / ``clear_artifacts`` / 用户手动删 share/ 后，jsonl 里的旧映射会变成死引用，
+    # 前端要么 preview 失败显红框、要么下载报 "文件不存在"。这里加一层 ``is_file``
+    # 过滤把死 ref 在 history 帧里就剔除，避免 broken-chip 残留。
+    history: list[dict[str, Any]] = []
+    for m in msgs:
+        record = m.to_jsonl_dict()
+        refs = message_artifacts.for_message(m.message_id)
+        if refs:
+            live_payloads: list[dict] = []
+            for r in refs:
+                try:
+                    if (room_dir / r.rel).is_file():
+                        live_payloads.append(r.to_payload())
+                except OSError:
+                    # 路径解析异常（极少见，例如 rel 含奇异字符）→ 当死引用跳过。
+                    continue
+            if live_payloads:
+                record["originated_artifacts"] = live_payloads
+        history.append(record)
+    data: dict[str, Any] = {"messages": history}
     recorder = server._session.recorder
     if recorder.enabled:
         idx = recorder.load_index(limit=TURNS_INDEX_HARD_CAP)

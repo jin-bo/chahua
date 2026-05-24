@@ -215,6 +215,111 @@
   height: auto;
 }
 
+/* Mermaid 渲染产物 —— `<pre><code class="language-mermaid">` 被 chat_view.renderMermaidIn
+   replaceWith 为 `<div class="mermaid-rendered">`。居中放置避免气泡左对齐的图看着歪；
+   SVG 自适应气泡宽度（mermaid 默认 width=100%）。背景同浅米色与代码块区分开。
+   渲染失败保留原 `<pre>` 并加 .mermaid-error class —— 红边提示用户源码有问题。 */
+.bubble .text.markdown .mermaid-rendered {
+  margin: 0.5em 0;
+  padding: 8px;
+  background: #fafaf5;
+  border: 1px solid #e0d8c4;
+  border-radius: 6px;
+  text-align: center;
+  overflow-x: auto;
+}
+.bubble .text.markdown .mermaid-rendered svg {
+  max-width: 100%;
+  height: auto;
+  display: inline-block;
+}
+.bubble .text.markdown pre.mermaid-error {
+  border: 1px solid #c66;
+  position: relative;
+}
+.bubble .text.markdown pre.mermaid-error::before {
+  content: "Mermaid 渲染失败：" attr(data-mermaid-error);
+  display: block;
+  margin-bottom: 6px;
+  padding: 2px 6px;
+  background: rgba(204, 102, 102, 0.15);
+  color: #c66;
+  font-size: 11px;
+  font-family: inherit;
+  border-radius: 3px;
+}
+
+/* 「气泡后挂图片 / 下载链」—— task_artifact_added 拿到 originated_message_id 后由
+   chat_view.attachArtifactToBubble append 到 .bubble 末尾。图片走懒加载占位 + bytes 回来
+   填 <img>；其它扩展走 pill 按钮，点击触发 file_download purpose=download 浏览器下载。
+   SVG 因可内嵌脚本走 pill 保守路径（不内嵌预览，C=保守）。 */
+.bubble .artifact-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.bubble .artifact-image {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 100%;
+  cursor: zoom-in;
+}
+.bubble .artifact-image img {
+  max-width: 280px;
+  max-height: 220px;
+  height: auto;
+  width: auto;
+  border-radius: 6px;
+  border: 1px solid #e0d8c4;
+  background: #fafaf5;
+  /* bytes 未到位时占位灰底；preview 失败走 .artifact-image-error 覆盖 */
+  min-height: 60px;
+  min-width: 60px;
+  object-fit: contain;
+}
+.bubble .artifact-image figcaption {
+  margin-top: 2px;
+  font-size: 10px;
+  color: #888;
+  max-width: 280px;
+  word-break: break-all;
+}
+.bubble .artifact-image.artifact-image-error img {
+  border-color: #c66;
+  background: rgba(204, 102, 102, 0.08);
+}
+.bubble .artifact-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  color: #5a4a2a;
+  background: #fafaf5;
+  border: 1px solid #e0d8c4;
+  border-radius: 14px;
+  cursor: pointer;
+  max-width: 100%;
+}
+.bubble .artifact-pill:hover {
+  background: #f0eada;
+  border-color: #c9be9b;
+}
+.bubble .artifact-pill-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble .artifact-pill-size {
+  color: #999;
+  font-size: 10px;
+}
+
 /* 复制按钮 —— hover 气泡时浮现在右上角；点击后短暂变 "已复制"。透明度过渡避免
    光标进出气泡时按钮闪烁；user-select:none 防止 Cmd+A 把按钮文字一起选进剪贴板。 */
 .bubble-copy {

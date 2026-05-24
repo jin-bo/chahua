@@ -77,6 +77,10 @@ export const EventType = Object.freeze({
   // 转后台续跑，其 turn / handoff drain 跑完、runtime 自毁时 emit 一次。前端据此
   // 清掉房间列表「进行中」徽标。镜像 chahua/events.py::ROOM_BACKGROUND_FINISHED。
   ROOM_BACKGROUND_FINISHED: "room_background_finished",
+  // P10.2 房间级（非任务）产物。data {rel, name, size, originated_message_id?} ——
+  // 与 TASK_ARTIFACT_ADDED 平行的 hint，缺 task_id（语义上不归属任何任务）。前端按
+  // originated_message_id 优先挂气泡末尾，命不中走系统气泡兜底。
+  ROOM_ARTIFACT_ADDED: "room_artifact_added",
 });
 
 // P9 §4：后台房间事件白名单 —— 后台 router 只放行这些里程碑。前端用同一集合判定
@@ -89,6 +93,7 @@ export const BACKGROUND_MILESTONE_TYPES = Object.freeze(new Set([
   EventType.MESSAGE_END,
   EventType.TASK_INFO,
   EventType.TASK_ARTIFACT_ADDED,
+  EventType.ROOM_ARTIFACT_ADDED,
   EventType.MANAGED_SESSION_STARTED,
   EventType.MANAGED_SESSION_ADVANCED,
   EventType.MANAGED_SESSION_ENDED,
@@ -287,6 +292,8 @@ export function formatTaskEventNotice(type, data) {
       return data.created_by === ArtifactCreatedBy.GUEST
         ? `📎 茶客产出：${data.name || ""}`
         : `📎 用户挂载产物：${data.name || ""}`;
+    case EventType.ROOM_ARTIFACT_ADDED:
+      return `📎 房间产物：${data.name || ""}`;
     case EventType.TASK_ARTIFACTS_CLEARED:
       return `🗑️ 用户清空了任务【${data.title || TASK_UNTITLED}】的产物（${
         data.count || 0
