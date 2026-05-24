@@ -137,13 +137,15 @@ def _rooms_available_with_busy(server: "ChahuaServer") -> list[dict]:
     """``discover_rooms`` 结果叠加每房 ``busy`` 标志（P9 阶段 9.3.2）。
 
     ``busy`` ⟺ 该 ``room_id`` 在 ``server._runtimes`` 注册表里且其 runtime
-    ``inflight_alive()``。``discover_rooms`` 的 ``room_id`` 与注册表 key 同口径
-    （都是房间目录名）。前台房间正在跑 turn 时也会标 ``busy``。
+    :meth:`~chahua.room_runtime.RoomRuntime.busy_alive` —— **P11 C7 起含 bg run**
+    （即「前台 turn / handoff drain」**或**「有 bg run 在跑」），让有 bg run 的
+    房间在房间列表里也亮 busy。``discover_rooms`` 的 ``room_id`` 与注册表 key 同
+    口径（都是房间目录名）。
     """
     busy_ids = {
         rid
         for rid, rt in server._runtimes.items()
-        if rt.inflight_alive()
+        if rt.busy_alive()
     }
     rooms = discover_rooms(server._paths)
     for room in rooms:

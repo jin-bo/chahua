@@ -637,7 +637,9 @@ class ChahuaServer:
 
         # ── 阶段二：目标已就绪，demote 旧前台 ──
         old = self._foreground_runtime
-        if old.inflight_alive():
+        # P11 C7：busy_alive() 含 bg run（在跑的并发后台 Agent）—— 旧前台仅有 bg run、
+        # 无前台 turn 时仍走 demote 转后台续跑，否则会被当 idle 误 close 把 bg run 干掉。
+        if old.busy_alive():
             # busy → 转后台续跑：留在注册表、router 转 background。
             old.router.mode = ROUTER_MODE_BACKGROUND
             old.background_since_ms = int(time.time() * 1000)
@@ -783,8 +785,12 @@ class ChahuaServer:
         """
         if runtime.router.mode != ROUTER_MODE_BACKGROUND:
             return  # 前台 runtime（或已被切回）不自毁。
-        if runtime.inflight_alive():
-            return  # in-flight turn / handoff drain 还在跑 —— 留着续跑。
+        # P11 C7：用 busy_alive() 替代 inflight_alive() —— 后台 runtime 上**只剩
+        # bg run、无前台 turn / handoff drain** 也算 busy；否则首个 bg run 跑完时本
+        # 函数会立刻把整 runtime 拆毁，并发的另一条 bg run 的 session 被 close 后脏写。
+        # 触发点：bg wrapper 外层 finally。
+        if runtime.busy_alive():
+            return  # 任意活跃运行还在跑 —— 留着续跑。
         # envelope 顶层 room_id 用 ``room.name`` —— 与 orchestrator / transport 发的
         # turn_* / message_end / managed_session_* 等所有里程碑同口径（见
         # chahua/events.py：envelope room_id 塞 room.name）。**不能**用
