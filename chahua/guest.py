@@ -243,6 +243,7 @@ class TeaGuest:
         sink: EnvelopeSink,
         cancellation_token: Optional[CancellationToken] = None,
         task_id: Optional[str] = None,
+        record_debug: bool = True,
     ) -> Optional[Message]:
         """让茶客说一句话。
 
@@ -262,12 +263,23 @@ class TeaGuest:
         P6.1：``record_message_start`` 在 envelope MESSAGE_START 之后调（speak_prompt
         从形参拿）；``record_message_end`` 单点在外层 ``finally``，``status`` 悲观初始化
         为 ``STATUS_ERROR``，三条出口路径（return msg / raise / return None）共享 finally。
+
+        P11 C4：``record_debug=False`` 让 bg run wrapper 调用方临时绕开 ``TurnRecorder`` ——
+        本次 speak 整段把 ``self._recorder`` 替换为 :data:`NOOP_RECORDER`（bind / record
+        全部落空），避免 bg message 串进前台并发的 debug turn。代价：bg run 不进 debug 视图
+        （docs/P11 §「TurnRecorder 串台修复」）。``speak`` 是顺序复用、不并发，外层 finally
+        无条件复原原 recorder。
         """
         message_id = new_message_id()
         # 悲观初始化：finally 路径永远拿到合法 status；ok 在 return msg 前覆写，
         # cancel 在 except CancelledError 里覆写，error 走默认。
         status: str = STATUS_ERROR
         msg: Optional[Message] = None
+        # P11 C4：bg run wrapper 传 ``record_debug=False`` 时整段切到 NOOP_RECORDER。
+        # ``self._recorder`` 是实例 attr 而非 closure，bind 与三处 record_* 都读 self.
+        original_recorder = self._recorder
+        if not record_debug:
+            self._recorder = NOOP_RECORDER
         try:
             with self._transport.bind(
                 sink=sink, turn_id=turn_id, message_id=message_id, task_id=task_id,
@@ -319,6 +331,9 @@ class TeaGuest:
                 message_id=message_id, status=status,
                 seq=msg.seq if msg is not None else None,
             )
+            # P11 C4：无条件复原原 recorder —— 即便上面 record_message_end 走 NOOP 路径
+            # 也保证 self._recorder 不会被永久落成 NOOP（下次 speak 起来走前台路径正常）。
+            self._recorder = original_recorder
 
     def _emit_failure(self, status: str, error: str) -> None:
         """两条失败分支（cancelled / error）共用的 message_end emit。"""
