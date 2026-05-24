@@ -291,12 +291,29 @@ class ChahuaServer:
             self._runtimes = runtimes
         else:  # 同房重建 / 新建房：只 pop 旧前台，background runtime 不动。
             runtimes.pop(self._foreground_id, None)
-        runtimes[new_room_id] = RoomRuntime(
+        runtime = RoomRuntime(
             room_id=new_room_id,
             session=value,
             router=RoomEventRouter(NOOP_SINK),
         )
+        self._attach_runtime_state(runtime)
+        runtimes[new_room_id] = runtime
         self._foreground_id = new_room_id
+
+    def _attach_runtime_state(self, runtime: RoomRuntime) -> None:
+        """把 RoomRuntime 上的 per-room 可变状态注入到 session.orchestrator —— C2 起
+        集中收口，避免「漏装第二处」。
+
+        C2 阶段只做一件事：把 ``runtime.active_guest_names`` 这个 set 引用绑到
+        ``orchestrator.active_guest_names``，让 :class:`ScoringOps.let_speak` 在
+        ``speak()`` 前后 add/discard 维护「茶客已占用」视图（``RoomRuntime.guest_busy``
+        的唯一数据源）。
+        C11 阶段在此扩展：遍历 ``runtime.session.guests`` 绑定 ``start_agent_run``
+        回调 —— 单点 helper 承所有 per-runtime 注入。
+
+        调用点：``_session.setter``（首次 / 同房重建）+ ``_switch_room``（切房目标）。
+        """
+        runtime.session.orchestrator.active_guest_names = runtime.active_guest_names
 
     # P9 9.1.3：``_inflight_*`` 两槽下沉 RoomRuntime —— 这里是读写前台 runtime
     # 同名字段的兼容 property，让 ``server_inbound_*.py`` 各 handler 与既有测试
@@ -611,6 +628,7 @@ class ChahuaServer:
                 session=new_session,
                 router=RoomEventRouter(NOOP_SINK),
             )
+            self._attach_runtime_state(target)
             self._runtimes[room_id] = target
 
         # ── 阶段二：目标已就绪，demote 旧前台 ──

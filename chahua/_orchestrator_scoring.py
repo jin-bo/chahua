@@ -285,11 +285,23 @@ class ScoringOps:
         ctx = orch._build_context_for(
             guest_name, task_id=task_id, extra_blocks=extra_blocks,
         )
-        # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
-        # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
-        msg = await entry.guest.speak(
-            ctx, turn_id=turn_id, sink=sink, task_id=task_id,
-        )
+        # P11 C2：前台 / handoff 路径也参与 ``RoomRuntime.active_guest_names`` 维护
+        # （唯一数据源是 ``RoomRuntime.guest_busy(name)``）。``add`` 必须先于任何
+        # ``await``，否则同 target 的第二条 ``agent_run_start`` inbound 可能在
+        # ``speak()`` 期间挤进来漏过 busy 校验。``active_guest_names is None`` ——
+        # 测试夹具裸构 Orchestrator 的兼容路径，整段跳过、保持 P11 前测试零改。
+        names = orch.active_guest_names
+        if names is not None:
+            names.add(guest_name)
+        try:
+            # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
+            # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
+            msg = await entry.guest.speak(
+                ctx, turn_id=turn_id, sink=sink, task_id=task_id,
+            )
+        finally:
+            if names is not None:
+                names.discard(guest_name)
         if msg is None:
             # 失败的发言不进 transcript（§3.5.2），冷却也不启动 —— 让他下一轮还有机会。
             return

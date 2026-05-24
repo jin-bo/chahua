@@ -149,6 +149,14 @@ class Orchestrator:
         # 就跳过，避免堆积。摘要慢点不影响当前回合，所以**不 await**。
         self._summary_task: Optional[asyncio.Task[None]] = None
 
+        # P11 C2：``RoomRuntime.active_guest_names`` 的窄注入点 ——
+        # ``ScoringOps.let_speak`` 进 ``speak()`` 前 ``add(name)``、finally
+        # ``discard(name)``，让前台 / handoff 路径也参与 ``guest_busy()`` 视图。
+        # server 装 RoomRuntime 时经 ``_attach_runtime_state`` 把同一 set 引用注入；
+        # 旧测试夹具裸构 ``Orchestrator``（active_guest_names is None）时 let_speak
+        # 跳过 set 维护——保持 P11 之前测试零改。
+        self.active_guest_names: Optional[set[str]] = None
+
         # P5.4 茶客自动归集：每个 pick 周期末尾扫 active task 的 ``artifacts/``，
         # diff "上次扫到的文件名 set" emit hint + ``task_info``。逻辑搬到
         # :class:`ArtifactDetector`；本类经 ``_seen_artifacts`` 属性向测试暴露内部 dict。

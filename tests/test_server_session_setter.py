@@ -18,9 +18,16 @@ class _FakeRoomConfig:
         self.room_dir = type("_Dir", (), {"name": name})()
 
 
+class _FakeOrchestrator:
+    """C2 起 setter 经 ``_attach_runtime_state`` 写 ``orchestrator.active_guest_names``。"""
+
+    active_guest_names: set[str] | None = None
+
+
 class _FakeSession:
     def __init__(self, name: str) -> None:
         self.room_config = _FakeRoomConfig(name)
+        self.orchestrator = _FakeOrchestrator()
 
 
 def _runtime(room_id: str) -> RoomRuntime:
