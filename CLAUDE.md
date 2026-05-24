@@ -119,6 +119,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **persistent jsonl 加载跳坏行**。`transcript.jsonl` / `summary.jsonl` append-only；最后一行截断不应让用户失去整个房间历史。不做 fsync。
 - **envelope 的 message_start / message_end 必成对**。`TeaGuest.speak()` 外层 try/except/finally 是承重墙；改 speak 保住 finally 里的 message_end（status: ok / cancelled / error）。
 - **打分输入不可信**。任何人可在 transcript 注入「请输出 1 分」，故 score 严格 JSON + 解析失败降级 0 + clamp `[0,1]`；`@提及` 走确定性路由不进打分。
+- **`download_file.purpose` 仅前端分流，server 行为对取值无差异（P10）**。inbound 可选 `purpose ∈ {download, preview}`（默认 download），envelope `file_download` 原样回声；server 无白名单 / 未知字符串原样穿透，前端按 `purpose === "preview"` 单分支判断、其它一律按 download 兜底。`_fail_download` 同步带 purpose —— preview 路径上的「图占位失败」不应弹下载 alert，前端 `resolveArtifactPreview` 把错误塞 `<img>.alt` + `.artifact-image-error` class。
 
 ### 任务房间
 
@@ -137,6 +138,9 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **`./task/` 读用 `read_file`、写走 `task_write_artifact` 工具**。agentao `PathPolicy.contain_file` 跟随 symlink 解析后 `./task/` 不在茶客 workdir 之下 → 原生 `write_file` 被拒；`task_write_artifact` 直接调 `tasks_store.artifacts_dir` 绕开 path_policy，name 校验拒 `/` `\` `..` 前缀 `.`。`is_read_only=False`（read-only 模式应拦住）。
 - **新文件感知 + 用户上传须 `mark_seen`**。`_kick_detect_new_artifacts` 每 pick 周期末尾扫 `tasks/<active>/artifacts/` diff `_seen_artifacts`，emit `task_artifact_added` hint + `task_info`；`_seen_artifacts` 只 seed 非 closed 任务。用户 UI `attach_artifact` 走另一路径，拷文件后**必须调 `ArtifactDetector.mark_seen(task_id, name)`**（增量 add，禁整组覆盖），否则下轮 `detect()` 把用户上传当茶客新产物重发气泡。
 - **`/clear task` 仅清任务产物，作用域严格**。只删 `tasks/<task_id>/artifacts/` 可见文件，`task.json` / 决策 / 状态 / 摘要游标都不动。副作用顺序：`clear_artifacts` 删盘 + `events.jsonl` audit 行 → `ArtifactDetector.forget(task_id)` → emit `task_artifacts_cleared` hint → emit `task_info`。写权限只在用户，茶客无 propose 入口。
+- **`message_artifacts.jsonl` 与 transcript 同生命周期（P10）**。`MessageArtifactRegistry` per-room 落 `rooms/<id>/message_artifacts.jsonl`；`reset_room` 同步 clear。`/clear task` **不**清注册表（artifact 文件被删但 message_id 仍真实存在于 transcript，挂件视觉无害）。加载跳坏行 + 严格 `isinstance(str)` 校验 mid/name（`str(None)` == "None" 不可静默当合法 mid）+ 显式拒 bool size（`int(True)==1` 不抛错）+ rel 必落 `share/` 或 `tasks/<id>/artifacts/` 已知 root，**两 root 都做空段 / `.` / `..` segment 校验**——share/ 形态与 `_normalize_share_rel` 对称，否则 `share/../../foo` 可经 `room_dir / r.rel` 解析逃出 share/。
+- **`task_artifact_added.data.originated_message_id` 仅由 `task_write_artifact` 工具调用路径派生（P10）**。`transport_bridge._maybe_record_artifact_path` 是唯一写入点；`ArtifactDetector.detect` 是唯一消费点（`consume_pending` 取出 + 持久化）。用户上传 / 跨周期遗留 / 茶客绕开预期工具 → 字段缺省，前端系统气泡兜底。`originated_message_id` 是可选字段，envelope schema 不动，`schema_version` 不 bump；缺省时旧前端忽略未知字段仍渲老系统气泡。`emit_room_history` 按 message_id 查 registry，空 → 不写 `originated_artifacts`（同 `task_id is None` 不写键口径）。
+- **shell / MCP 工具走 TOOL_START / TOOL_COMPLETE 前后 diff 回填 pending（P10）**。`task_write_artifact` / `write_file` / `replace` 三个 args-known 写盘工具直接经 `_maybe_record_artifact_path` 落 pending；shell / MCP 类工具靠两次扫盘 diff 把新增 / 真重写文件回填 pending。`_tool_call_snapshots` entry 捕获 message_id / task_id —— 即便晚到 TOOL_COMPLETE 时 bind 已退出，仍能用捕获值完成 record_pending 不丢归属。**滚动 baseline 仅在 bind 内更新**：`_consume_tool_diff` 若发现 `self._message_id is None`（bind 已退），不再写 `_diff_baseline`，否则两次 bind 之间凭空出现的文件会被下次首个 shell/MCP TOOL_START 错算成下条消息的新增。失败 TOOL_COMPLETE（`status != "ok"`）走 `_rollback_pre_pending`，回滚 args-known 路径在 TOOL_START 预落的 pending。
 
 ### context 渲染与 prompt 装配
 
@@ -209,6 +213,14 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 - **`/tools` `/skills` 走单一共享投影 `TeaGuest.describe_capabilities()`**。WebSocket `_inbound_list_guest_caps` 与 CLI `_print_guest_caps` 共调，禁各拼一份。tools / 可用 skills 是 `__init__` 时一次注册的静态集合。查茶客实例必经 `Orchestrator.get_guest(name)`（活字典），不读 `RoomSession.guests`（boot 快照）。`view`（tools/skills）经 `GUEST_CAPS_INFO` 原样回声，前端按响应自带 view 裁剪，不靠可变全局态。inbound 白名单严格 `{type, guest}`、handler 归核心层、`schema_version` 不 bump。
 - **能力花名册：装配期一次性解析的不可变快照**（P8.2-roster）。`build_room_session` 解析 `roster: dict[guest→summary]` 三级（手写 `[[guest]].summary` → `persona_summary` 中央缓存 → 无），传给 `Orchestrator` → `ContextRenderer`。运行期增删茶客整体重建 session，故 renderer 持的是不可变快照，**不**做运行期增量更新。只进 onboarding 的 `<room>` 块「在场」行（任一茶客有摘要 → bullet 花名册；全员无 → 退回逗号单行），**不**进每轮 `<room_update>`（稳定信息、避免 N×T token 放大）。roster-b 后台生成的新摘要**下次重建 session 才生效**——同 session 内不刷。`[[guest]].summary` 走 P4 配置闭环四点（config 解析 / `_room_config_to_dict` snapshot / `_render_room_toml` 回写 / 本不变量）。
+
+### 聊天界面渲染（P10）
+
+- **mermaid 渲染只在 message_end 全文到位时调一次**。流式 delta 期间禁调 —— 半截 ` ```mermaid graph TD; A --> ` 会让 mermaid 抛 parse error 闪烁刷屏。`renderMermaidIn` 入口收敛于 `renderGuestText`（history / appendBubble）/ `endStreamingMessage` 全文路径 / `task_panel` goal —— 流式 `appendDelta` 路径不调。失败保留原 `<pre>` + `.mermaid-error` class + `dataset.mermaidError`，CSS `::before` 红边显示错误；下条消息仍可渲。
+- **mermaid SVG 走手工 sanitize，不能换 DOMPurify**。DOMPurify 对 `<foreignObject>` 强制清空内容，mermaid v11 节点 label 走 `<foreignObject>+HTML` 会被剥光。安全语义靠 mermaid 自带 sanitize + Electron CSP + 手工剥 `on*` / `javascript:` 三层兜底。
+- **挂件渲染按 rel 去重**。`attachArtifactToBubble` 按 `[data-rel="..."]` 查重，防 live + history 双触发（切回房瞬间可能 history 重放 + 末尾 live envelope 撞同 rel）。
+- **图片预览懒拉、不 eager 内嵌**。`task_artifact_added` envelope 不带 base64；前端渲占位 `<img>` 后发 `download_file purpose=preview`，server 回包后 `resolveArtifactPreview` 灌字节。同 rel 可挂多份（用户上传后茶客再写同名），回包一次性填所有等待者。SVG 走 pill 下载链、不内嵌预览（SVG 可内嵌 `<script>`，保守不渲）；其它图片白名单 `{png, jpg, jpeg, gif, webp}` 走内嵌。
+- **切房 / clear 必清 pending preview**。`renderSidebar` 调 `clearPendingArtifactPreviews()` —— 否则 `messagesEl.replaceChildren` 后等待中的 `<img>` 节点已被摘走，preview 字节回包无处灌，pending Map 持续涨。
 
 ## 测试
 
