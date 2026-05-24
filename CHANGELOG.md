@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-23
+
+详见 [`docs/releases/v0.1.3.md`](docs/releases/v0.1.3.md)。
+
+### Added
+- **P9 切房后房间后台续跑**（2026-05-23，详见 [`docs/P9-切房后房间后台续跑.md`](docs/P9-切房后房间后台续跑.md)）：把「切房 = cancel + drain」的硬中断升级成「busy 的旧前台转后台续跑、新前台立即可用」。新建 `chahua/room_runtime.py` —— `RoomRuntime` dataclass（挂 session / router / in-flight 槽 / `background_since_ms`）+ `RoomEventRouter`（per-room 可变路由 sink，`mode=foreground` 全量透传 / `mode=background` 按精确白名单过滤）。server 从「持 1 个 `self._session`」升级为「持 `self._runtimes: dict[room_id, RoomRuntime]` 注册表 + `self._foreground_id` 前台指针」；in-flight 槽下沉 `RoomRuntime`，server 保留同名 compat property / wrapper（旧读点 / 测试夹具不动）。`_switch_room` 两阶段失败原子性：阶段一准备目标 runtime（任何失败「未碰旧前台」就 `return`）→ 阶段二 demote 旧前台（busy → 后台续跑、idle → close 移出）→ 切前台指针 → 重发快照；后台 turn / handoff drain 跑完即自毁（emit `room_background_finished` + close + 移出注册表）。`emit_room_snapshot` 重建 in-flight 状态（补发 `message_start` + `partial_text` delta）+ MTS 快照 + 房间列表 `busy` 标志。后台精确白名单 `_BACKGROUND_WHITELIST` 收敛到里程碑事件（`turn_*` / `message_end` / `task_info` / `task_artifact_added` / `managed_session_*` / `room_background_finished`），高频流式一律丢弃。global 茶客切走前必 `cancel+drain`（共享 cwd 软链与目标房 retarget 撞车）。前端按 `envelope.room_id`（即 `room.name`）分流前台 / 后台房间里程碑——故 `[room].name` 跨房唯一成为承重契约，`admin.create_room` / `admin.update_room_toml` 两入口拒重名。
+  - **P9.4 后台房间软上限**。`server.py` 加 `MAX_BACKGROUND_ROOMS = 5` 模块常量；`_inbound_switch_room` 在 `_switch_room` 之后调 `_enforce_background_room_limit`，后台 runtime 数超上限即淘汰 `background_since_ms` 最小（最早转入后台）者——走强制拆除路径 `_aclose_one_runtime`（带 MTS 先 `end_managed_session` 再 cancel drain），拆除**之后**补一帧 `room_background_finished` + emit info `NOTICE`（前后顺序避免「进行中」徽标闪烁）。**软上限**：超限淘汰最早项、不拒绝切房。
+- **P10 聊天界面增强 —— Mermaid / 图片预览 / 产物下载链**（2026-05-23，详见 [`docs/P10-聊天界面增强.md`](docs/P10-聊天界面增强.md)）：把聊天气泡从「纯文本框」升级成「会渲染、会展示产物的载体」。**纯前端 + 协议薄增量**：后端只新增「消息 → 产物」一张落盘表 + envelope 多一个可选字段 `originated_message_id`，不改对话原语 / Task 数据结构 / 不 bump `schema_version`。
+  - **后端 message ↔ artifact 关联**。新建 `chahua/message_artifacts.py`（`MessageArtifactRegistry` + `ArtifactRef`）—— per-room 落 `rooms/<id>/message_artifacts.jsonl`、与 `transcript.jsonl` 同生命周期；`reset_room` 同步 clear。`transport_bridge` 在写盘工具命中时 `record_pending(rel → message_id)`；`ArtifactDetector.detect` 在 pick 周期末 `consume_pending` 取出 + 持久化 + emit envelope 多挂 `originated_message_id`。`emit_room_history` 按 message_id 投影 `originated_artifacts`，刷新 / 切房 / 重启后历史挂件还原。加载严格 `isinstance(str)` 校验 mid/name + 显式拒 bool size + rel 必落 `share/` 或 `tasks/<id>/artifacts/` 已知 root（两 root 都做空段 / `.` / `..` segment 校验）。
+  - **shell / MCP 工具走前后 diff 回填 pending**。`task_write_artifact` / `write_file` / `replace` 三个 args-known 写盘工具直接走 `_maybe_record_artifact_path`；shell / MCP 类 args-unknown 工具靠两次扫盘 diff 回填，`_tool_call_snapshots` entry 捕获 message_id / task_id 让晚到 TOOL_COMPLETE 仍能正确归属。滚动 baseline（`self._diff_baseline`）压「每个工具调用扫两次」成「首次扫一次 + 每个 COMPLETE 扫一次」；bind 退出清 baseline，跨 speak 不共享；晚到 TOOL_COMPLETE（bind 已退）不再回填 baseline（防下次 bind 首扫被跳过）。
+  - **`download_file.purpose` 分流**。inbound 可选 `purpose ∈ {download, preview}`（默认 download），envelope `file_download` 原样回声；server 行为对取值无差异，前端按 `purpose === "preview"` 单分支判断。失败路径 `_fail_download` 同步带 purpose（preview 路径的「图占位失败」塞 `<img>.alt` 不弹下载 alert）。
+  - **前端 Mermaid 渲染**。`mermaid ^11.15.0` 依赖；`chat_view.js::renderMermaidIn` 动态 import 懒加载 + SVG 手工 sanitize（DOMPurify 对 `<foreignObject>` 强制清空内容，mermaid v11 节点 label 走 `<foreignObject>+HTML` 会被剥光）；流式 delta 期间禁调，入口收敛于 `renderGuestText` / `endStreamingMessage` ok 终态 / `task_panel` goal。失败保留原 `<pre>` + `.mermaid-error` class + CSS 红边。
+  - **前端 artifact 挂件**。`chat_view.js::attachArtifactToBubble` / `resolveArtifactPreview` / `clearPendingArtifactPreviews`。图片白名单 `{png, jpg, jpeg, gif, webp}` 走内嵌 `<img>` 懒预览（占位 + `download_file purpose=preview` 拉字节 + 一次性灌所有等待者）；SVG / 其它扩展走 pill 下载链（`<a class="artifact-pill">`）。挂件按 `[data-rel]` 去重防 live + history 双触发。`renderSidebar` 切房路径调 `clearPendingArtifactPreviews()` —— 防 `messagesEl.replaceChildren` 后 pending Map 持续涨内存泄露。`envelope_router.js::TASK_ARTIFACT_ADDED` 拆挂件 vs 系统气泡兜底；`FILE_DOWNLOAD` 按 `purpose` 分流。
+- **`renderer.js` 模块化重构**（2026-05-22）：从 ~1500 行单文件拆成 8 个职责单一子模块（PR #8 合 7 次提交）—— `message_filter`（系统气泡过滤）/ `commands`（slash 命令注册表）/ `connection`（ws 连接管理）/ `room_list`（房间列表渲染）/ `turn_state`（turn 状态机）/ `envelope_router`（envelope 分派）/ `sidebar`（侧栏渲染）/ `modals`（模态框）。
+- **`debug_panel.js` 模块化重构**（2026-05-22）：拆出纯工具模块（`debug_panel_utils.js`）与渲染树模块（`debug_panel_tree.js`），整文件从单一巨函数收敛成分层数据流。
+- **Yvonne 角色加 `create_image` skill**（2026-05-23）：按用户提示词直接生成图像，封装四种生图后端（`gpt` / `nanobanana` / `seedreamv5` / `wan`）由 `--model` 选择；支持画幅 / 质量 / 出图张数；不强制输出位置、agent 据上下文选目标目录。persona-bundled skill，零后端改动。
+
 ## [0.1.2] - 2026-05-21
 
 详见 [`docs/releases/v0.1.2.md`](docs/releases/v0.1.2.md)。
