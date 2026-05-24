@@ -497,6 +497,9 @@
   <!-- P7.1 handoff 队列预览小条：handoffQueueState 非空时浮现「下一句：A → B」，
        右侧 ✕ 触发 handoff_clear。空队列时 hidden 不占位。 -->
   <div id="handoff-queue-bar" class="handoff-queue-bar" hidden></div>
+  <!-- P11 后台 Agent run：composer 上方列表条，每条 bg run 一行（茶客名 · 来源 ·
+       指令预览 · × 取消按钮）。空列表时 hidden 不占位。 -->
+  <div id="bg-run-bar" class="bg-run-bar" hidden></div>
   <form id="composer">
     <input id="file-input" type="file" multiple hidden>
     <ul id="pending-files" class="pending-files" hidden></ul>

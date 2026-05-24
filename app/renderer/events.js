@@ -81,6 +81,20 @@ export const EventType = Object.freeze({
   // 与 TASK_ARTIFACT_ADDED 平行的 hint，缺 task_id（语义上不归属任何任务）。前端按
   // originated_message_id 优先挂气泡末尾，命不中走系统气泡兜底。
   ROOM_ARTIFACT_ADDED: "room_artifact_added",
+  // P11 后台 Agent run（docs/P11-后台 Agent.md §「envelope」）。4 个 hint 型 ——
+  // 不进 transcript、不触发 AI。data 形状均含 ``{run_id, guest_name, task_id?,
+  // issued_by, source_guest?, instruction_preview?}``；ERROR 加 ``{error}``。
+  // 前端职责分叉：
+  //   - AGENT_RUN_STARTED → 新增运行列表条 + sidebar .guest-bg-run 指示亮；
+  //   - AGENT_RUN_FINISHED → 移除列表条 + sidebar 指示熄（**只**这个事件做这事；
+  //     正常茶客气泡靠普通 MESSAGE_END(ok) 追加）；
+  //   - AGENT_RUN_CANCELLED / AGENT_RUN_ERROR → 同上移除 + 中央系统气泡，
+  //     **不**生成结果气泡。
+  // 镜像 chahua/events.py::ChahuaEventType.AGENT_RUN_*。
+  AGENT_RUN_STARTED: "agent_run_started",
+  AGENT_RUN_FINISHED: "agent_run_finished",
+  AGENT_RUN_CANCELLED: "agent_run_cancelled",
+  AGENT_RUN_ERROR: "agent_run_error",
 });
 
 // P9 §4：后台房间事件白名单 —— 后台 router 只放行这些里程碑。前端用同一集合判定
@@ -98,6 +112,11 @@ export const BACKGROUND_MILESTONE_TYPES = Object.freeze(new Set([
   EventType.MANAGED_SESSION_ADVANCED,
   EventType.MANAGED_SESSION_ENDED,
   EventType.ROOM_BACKGROUND_FINISHED,
+  // P11：bg run 4 个里程碑加入后台白名单。
+  EventType.AGENT_RUN_STARTED,
+  EventType.AGENT_RUN_FINISHED,
+  EventType.AGENT_RUN_CANCELLED,
+  EventType.AGENT_RUN_ERROR,
 ]));
 
 // TASK_PROPOSAL envelope 的 data.kind 取值。镜像 chahua/events.py::TASK_PROPOSAL_KIND_*。
@@ -205,6 +224,12 @@ export const Inbound = Object.freeze({
   // /tools / /skills slash 查询。payload: {guest, view}。服务端回 GUEST_CAPS_INFO
   // 并原样带回 view（请求方据此裁剪显示，多查询并发不串台）。
   LIST_GUEST_CAPS: "list_guest_caps",
+  // P11 后台 Agent run inbound。
+  //   - AGENT_RUN_START {target, instruction, task_id?}：用户手动 / /bg 命令入口。
+  //     instruction 必填非空、不允许默认句兜底。
+  //   - AGENT_RUN_CANCEL {run_id}：只 cancel 指定 run，不动其它 bg run / 前台 turn。
+  AGENT_RUN_START: "agent_run_start",
+  AGENT_RUN_CANCEL: "agent_run_cancel",
 });
 
 // 镜像 chahua/handoff.py::HandoffKind —— handoff 队列项的 ``kind`` wire 值。

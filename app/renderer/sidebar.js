@@ -28,6 +28,12 @@ export function createSidebar({
   // 茶客行 → 打分 span 的引用。renderGuests 重建时填，applyScores 直接改文字，
   // 不重建 DOM（避免头像 / 徽章闪烁）。
   const scoreSpansByName = new Map();
+  // P11：茶客行 → bg-run 指示 span 的引用。同 scoreSpansByName 套路，靠左与
+  // .guest-score（靠右）共存。``bgRunByName: Map<guest_name, run_id>`` —— 茶客
+  // 唯一性（guest_busy 守 + agent_runs 每房 ≤ MAX_AGENT_RUNS_PER_ROOM）保证同 name
+  // 不会有第二条 bg run，value 直接存 run_id 不用 set。
+  const bgRunSpansByName = new Map();
+  const bgRunByName = new Map();
   // 当前 turn 的打分明细。turn_start replace / turn_end 清（经 applyScores）。
   let scoresByName = new Map();
   let userDisplayName = "我";
@@ -76,6 +82,13 @@ export function createSidebar({
       showPermissionPopover(node, g);
     });
     li.appendChild(node);
+    // P11：bg-run 指示靠左、贴头像。空 textContent 占位不可见；applyBackgroundRuns
+    // 时 textContent 设为「●」（或一个简单可点击的小标记）+ 添加 data-bg-run-id；
+    // 头像 popover「× 取消后台 run」走 bgRunByName 查 run_id 后发 AGENT_RUN_CANCEL。
+    const bgRun = document.createElement("span");
+    bgRun.className = "guest-bg-run";
+    li.appendChild(bgRun);
+    bgRunSpansByName.set(g.name, bgRun);
     const nameBadge = makeBadge("guest-name", null, g.name);
     nameBadge.classList.add("permission-anchor");
     nameBadge.title = `点击设置「${g.name}」的权限（当前 ${g.permission || DEFAULT_PERMISSION}）`;
@@ -150,6 +163,9 @@ export function createSidebar({
     renderGuests() {
       guestsEl.replaceChildren();
       scoreSpansByName.clear();
+      // P11：bg run 指示同步清 —— renderGuests 来自 room_info 的整批权威，
+      // 紧接 applyBackgroundRuns(room_info.data.background_runs) 把指示重建。
+      bgRunSpansByName.clear();
       scoresByName = new Map();
       // 最后一位茶客不能删（与 server 端 admin.remove_guest 硬约束一致）—— 前端禁用
       // 按钮，用户少踩一次"提交后才发现不行"的坑。
@@ -160,6 +176,53 @@ export function createSidebar({
         renderGuestRowNormal(li, g, lastGuestLock);
         guestsEl.appendChild(li);
       }
+    },
+    // P11：room_info.data.background_runs 整批权威覆盖。前端实时 AGENT_RUN_STARTED
+    // / _terminal 只做增量；room_info 是覆盖式源（切回房 / 重连 / clear 都重新到，整批
+    // set 清除幽灵指示——即便实时 terminal 帧在断连中丢了）。
+    applyBackgroundRuns(runs) {
+      bgRunByName.clear();
+      for (const run of runs || []) {
+        if (run && typeof run.guest_name === "string" && typeof run.run_id === "string") {
+          bgRunByName.set(run.guest_name, run.run_id);
+        }
+      }
+      // 刷新所有指示 span（先全清，再亮命中的）。
+      for (const [name, span] of bgRunSpansByName) {
+        if (bgRunByName.has(name)) {
+          span.textContent = "●";
+          span.dataset.runId = bgRunByName.get(name);
+          span.title = `${name} 正在后台执行 —— 点击取消`;
+        } else {
+          span.textContent = "";
+          delete span.dataset.runId;
+          delete span.title;
+        }
+      }
+    },
+    // P11 实时增量：AGENT_RUN_STARTED → mark；_terminal → unmark。覆盖式刷新由
+    // applyBackgroundRuns 兜底（room_info 整批），增量只为减少延迟。
+    markGuestBgRun(guestName, runId) {
+      bgRunByName.set(guestName, runId);
+      const span = bgRunSpansByName.get(guestName);
+      if (span) {
+        span.textContent = "●";
+        span.dataset.runId = runId;
+        span.title = `${guestName} 正在后台执行 —— 点击取消`;
+      }
+    },
+    unmarkGuestBgRun(guestName) {
+      bgRunByName.delete(guestName);
+      const span = bgRunSpansByName.get(guestName);
+      if (span) {
+        span.textContent = "";
+        delete span.dataset.runId;
+        delete span.title;
+      }
+    },
+    // 头像 popover「取消 bg run」接入点 —— 按 guest_name 拿 run_id。
+    getBgRunId(guestName) {
+      return bgRunByName.get(guestName) || null;
     },
     // turn_start / turn_end 经 envelope_router 调 —— 用打分列表（turn_end 传空）
     // 替换 scoresByName 并刷 sidebar。

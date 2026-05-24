@@ -296,6 +296,62 @@ body:not(.has-active-task) .pending-file-attach { display: none; }
   border-radius: 10px;
 }
 .handoff-queue-bar[hidden] { display: none; }
+
+/* P11 C10 后台 Agent run 列表条 —— 同 .handoff-queue-bar 视觉风格，避免引入新视觉。
+   每条 .bg-run-row 一行：茶客名 · 来源 · 指令预览 · × 取消按钮。 */
+.bg-run-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 12px 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: #eef2f7;
+  border: 1px solid #d6dde6;
+  border-radius: 10px;
+}
+.bg-run-bar[hidden] { display: none; }
+.bg-run-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.bg-run-head { color: #2a4b6b; font-weight: 600; flex-shrink: 0; }
+.bg-run-source { color: #6b7a8c; flex-shrink: 0; }
+.bg-run-preview {
+  color: #4a5566;
+  background: #fff;
+  border: 1px solid #d6dde6;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.bg-run-cancel {
+  background: transparent;
+  border: none;
+  color: #b04040;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+.bg-run-cancel:hover { color: #d04040; }
+
+/* P11 C10 sidebar .guest-bg-run 指示 —— 靠左、贴头像，与 .guest-score（靠右）共存。 */
+.guest-bg-run {
+  display: inline-block;
+  color: #2a4b6b;
+  font-size: 10px;
+  margin-right: 4px;
+  min-width: 8px;
+}
+.guest-bg-run[data-run-id] { color: #2070d0; cursor: pointer; }
 .handoff-queue-label { color: #6b4f2a; font-weight: 500; flex-shrink: 0; }
 .handoff-queue-chain {
   display: flex;

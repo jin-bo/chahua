@@ -33,6 +33,7 @@ import { createRoomSettings } from "./room_settings.js";
 import { createPermissionPopover } from "./permission_popover.js";
 import { createAssignPopover } from "./assign_popover.js";
 import { createHandoffQueueBar } from "./handoff_queue_bar.js";
+import { createBgRunBar } from "./bg_run_bar.js";
 import { createManagedSession } from "./managed_session.js";
 import { createDecisionSupport } from "./decision_support.js";
 import * as taskState from "./task_state.js";
@@ -95,6 +96,7 @@ const debugPanelBackBtn = document.getElementById("debug-panel-back");
 const debugPanelClearBtn = document.getElementById("debug-panel-clear");
 const composerTaskChipEl = document.getElementById("composer-task-chip");
 const handoffQueueBarEl = document.getElementById("handoff-queue-bar");
+const bgRunBarEl = document.getElementById("bg-run-bar");
 const markDecisionModal = document.getElementById("mark-decision-modal");
 const markDecisionSummaryEl = document.getElementById("mark-decision-summary");
 const markDecisionSupportEl = document.getElementById("mark-decision-support");
@@ -353,6 +355,13 @@ function renderSidebar(roomInfo) {
   personasAvailable = Array.isArray(roomInfo.personas_available) ? roomInfo.personas_available : [];
   maxAiTurns = roomInfo.orchestrator?.max_consecutive_ai_turns ?? 20;
   sidebar.renderGuests();
+  // P11 C10：room_info.data.background_runs 整批权威覆盖运行列表条 + sidebar 指示。
+  // bgRunBar.applyAll 内部会同步刷 sidebar.applyBackgroundRuns —— 切回房 / 重连 /
+  // clear 都重发 room_info，整批 set 清除幽灵指示。renderSidebar 只在 envelope_router
+  // 接收 ROOM_INFO 时调用，调用链：connection.start() → ws 帧 → envelope_router
+  // → renderSidebar —— ``bgRunBar`` const 那时已初始化（同一文件早于 envelope_router
+  // 装配），故无需 ``typeof`` 守卫（TDZ 上 typeof 也抛 ReferenceError，并非静默）。
+  bgRunBar.applyAll(roomInfo.background_runs || []);
   // 房间列表 + P9「进行中」后台房徽标（见 ./room_list.js）—— render 内部从权威快照
   // rooms_available[].busy 重建后台房集合再渲染。
   roomList.render(roomInfo.rooms_available, roomInfo.current_room_id);
@@ -518,6 +527,16 @@ const handoffQueueBar = createHandoffQueueBar({
 });
 handoffState.subscribe((queue) => handoffQueueBar.render(queue));
 
+// P11 C10：bg run 列表条 —— composer 上方运行中的 bg run 一行一条；事件分叉由
+// envelope_router 直接喂（AGENT_RUN_STARTED / _FINISHED / _CANCELLED / _ERROR），
+// room_info.data.background_runs 整批权威覆盖由 renderSidebar 调 applyAll。
+const bgRunBar = createBgRunBar({
+  barEl: bgRunBarEl,
+  send,
+  isConnected: connection.isConnected,
+  sidebar,
+});
+
 // P8.3 托管会话：任务卡里的「托管」按钮（入口 + 状态 + 停止三合一）。状态来自
 // managed_session_* envelope；与 handoff 队列同瞬态——切房 / 断线即 reset。
 managedSession = createManagedSession({
@@ -659,6 +678,7 @@ const envelopeRouter = createEnvelopeRouter({
   upload,
   taskPanel,
   managedSession,
+  bgRunBar,
 });
 
 // task ↔ debug 互斥占槽：``setVisible(bool)`` 让各自模块持有自家 hidden 不变量，
@@ -809,6 +829,8 @@ const commands = createCommands({
     textInput.value = "";
     autoResizeTextarea();
   },
+  // P11 C10：/bg <茶客名> <指令> 命令校验 target 在场用。
+  getGuestNames: () => guests.map((g) => g.name),
 });
 
 composer.addEventListener("submit", (ev) => {

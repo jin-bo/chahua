@@ -21,6 +21,7 @@ const HELP_TEXT = [
   "- `/clear task` —— 清空当前任务的全部产物（仅删 `artifacts/`，任务本身保留）",
   "- `/tools <茶客名>` —— 查看某位茶客 agent 注册的工具",
   "- `/skills <茶客名>` —— 查看某位茶客可用的 skills",
+  "- `/bg <茶客名> <指令>` —— 后台指派该茶客独立执行（不打断当前聊天）",
   "",
   "_本帮助是本地提示，不进 transcript；刷新 / 切房后消失。_",
 ].join("\n");
@@ -34,6 +35,7 @@ export function createCommands({
   upload,
   clearRoom,
   clearInput,
+  getGuestNames,
 }) {
   function tryHandle(text) {
     // /help（或 /?）—— 在聊天区里以系统气泡显示可用斜杠命令清单。本地 UI 行为，不
@@ -112,6 +114,40 @@ export function createCommands({
     if (text === "/clear" || text === "/new") {
       clearInput();
       clearRoom();
+      return true;
+    }
+    // /bg <茶客名> <指令> —— 后台指派某茶客独立执行。前端本地校验：① 必须填茶客名 +
+    // 指令；② 茶客在前端 roster 内（不在场则报错让用户改 @ 路径）。通过即发同一条
+    // AGENT_RUN_START（与弹窗「后台运行」单一入口）。
+    if (text.startsWith("/bg ") || text === "/bg") {
+      if (!isConnected()) {
+        setStatus("error", "未连接服务端");
+        return true;
+      }
+      const body = text.slice("/bg".length).trim();
+      const sp = body.indexOf(" ");
+      if (sp < 0) {
+        setStatus("error", "/bg <茶客名> <指令>：指令必填，不能为空");
+        return true;
+      }
+      const target = body.slice(0, sp).trim();
+      const instruction = body.slice(sp + 1).trim();
+      if (!target) {
+        setStatus("error", "/bg 后面要跟茶客名");
+        return true;
+      }
+      if (!instruction) {
+        setStatus("error", "/bg <茶客名> <指令>：指令必填，不能为空");
+        return true;
+      }
+      const knownNames = typeof getGuestNames === "function" ? getGuestNames() : [];
+      if (knownNames.length > 0 && !knownNames.includes(target)) {
+        setStatus("error", `${target} 不在当前房间`);
+        return true;
+      }
+      send({ type: Inbound.AGENT_RUN_START, target, instruction });
+      setStatus("", `已后台指派 ${target}…`);
+      clearInput();
       return true;
     }
     return false;
