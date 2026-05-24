@@ -78,11 +78,15 @@ class ScoringOps:
         """
         orch = self.orch
         all_guests = list(orch._guests.keys())
+        # P11：bg run 占用的茶客既不接 @，也不参与打分 —— ``active_guest_names`` 是
+        # 唯一数据源（前台 / handoff `let_speak` 也写）。空 set 兜底兼容裸构 Orchestrator
+        # 的旧测试夹具（``active_guest_names is None``）。
+        busy: set[str] = orch.active_guest_names or set()
 
-        # 1a) @broadcast → 全员一次（用户意图明确，绕过冷却 + 打分）
+        # 1a) @broadcast → 全员一次（用户意图明确，绕过冷却 + 打分）；busy 的不带上
         if respect_at_mention and self.find_user_broadcast():
             orch._rounds_without_user_or_mention = 0
-            winners = list(all_guests)  # 注册顺序，确定性
+            winners = [n for n in all_guests if n not in busy]  # 注册顺序，确定性
             scores = [
                 ScoreResult(guest_name=n, score=1.0, kind=ScoreKind.MENTION)
                 for n in winners
@@ -91,7 +95,8 @@ class ScoringOps:
                 threshold=None, scoring_path=SCORING_PATH_BROADCAST,
             )
 
-        # 1b) @ 提及确定性路由（仅当回应用户那条时）
+        # 1b) @ 提及确定性路由（仅当回应用户那条时）；@busy 目标在 find_user_mention
+        # 内被跳过（继续往下一个 @ 找），落到这里的 mention 必非 busy。
         if respect_at_mention:
             mention = self.find_user_mention()
             if mention is not None and orch._cooldown.get(mention, 0) == 0:
@@ -105,11 +110,16 @@ class ScoringOps:
                     threshold=None, scoring_path=SCORING_PATH_MENTION,
                 )
 
-        # 2) 并发打分（冷却中的茶客直接当 0 分，省 LLM 调用）
+        # 2) 并发打分（冷却中的茶客直接当 0 分，省 LLM 调用；busy 整段不进入两边任一
+        # 桶 —— 与 scorables/cooled 是三档分流，bg run 跑完自然回到 scorables 池）
         scorables = [
-            name for name in all_guests if orch._cooldown.get(name, 0) == 0
+            name for name in all_guests
+            if orch._cooldown.get(name, 0) == 0 and name not in busy
         ]
-        cooled = [name for name in all_guests if name not in scorables]
+        cooled = [
+            name for name in all_guests
+            if name not in scorables and name not in busy
+        ]
 
         # 全员冷却：无 LLM 调用，所有 guest 0 分占位记一行后由上层判 winners=[]。
         if not scorables:
@@ -165,7 +175,13 @@ class ScoringOps:
         if not passed:
             return [], results, prompts_by_guest, debug_meta
         passed.sort(key=lambda r: r.score, reverse=True)
-        winners = [r.guest_name for r in passed[: orch.config.max_speakers_per_pick]]
+        # 重读 ``active_guest_names`` 的当前值再选 winner：上面 ``await gather`` 期间
+        # 可能有 bg run 起来，行 84 的 ``busy`` 快照对此盲。先 filter 再 cap，避免
+        # 顶分刚 busy 时少给 winner；不剔掉的话 ``_let_speak`` 会与 bg run 共享同一
+        # 茶客名，俩 finally 的 discard 会让仍跑的那路看起来 idle。
+        current_busy = orch.active_guest_names or set()
+        not_busy = [r for r in passed if r.guest_name not in current_busy]
+        winners = [r.guest_name for r in not_busy[: orch.config.max_speakers_per_pick]]
         return winners, results, prompts_by_guest, debug_meta
 
     async def score_one(
@@ -227,7 +243,7 @@ class ScoringOps:
         return count
 
     def find_user_mention(self) -> Optional[str]:
-        """扫 transcript 最后一条消息里的 @ 提及；返回首个匹配的在场茶客名。
+        """扫 transcript 最后一条消息里的 @ 提及；返回首个匹配的**非 busy** 在场茶客名。
 
         对每个 ``@`` 位置按**注册名长度倒序**做最长前缀匹配 + 词边界校验，所以含空格的
         名字（``Elon Musk``）也能命中——把"什么算合法名字"完全交给注册表。
@@ -235,12 +251,17 @@ class ScoringOps:
         @broadcast（@all / @所有人 等）由 :meth:`find_user_broadcast` 独立检查，
         调用方先查 broadcast，因此这里遇到 broadcast token 时跳过当前 ``@``——避免
         ``@all @宝总`` 极少数情况下被当成单点提及。
+
+        P11：busy（bg run 占用）的茶客 @ 视为忽略 —— 匹配到 busy 名直接跳过当前 @
+        token、继续看下一个 @；用户输 ``@busy_guest @ok_guest`` 仍能路由到第二位。
+        全 @ 都打在 busy 上 → 返 ``None`` 落到打分（busy 也不参与，自然等用户消息）。
         """
         last = self.orch.room.last_message()
         if last is None or last.speaker_id != USER_SPEAKER_ID:
             # 只承认用户消息里的 @；AI 互相 @ 不走确定性路由（见 _run_ai_chain 注释）。
             return None
         text = last.text
+        busy: set[str] = self.orch.active_guest_names or set()
         # 注册名按长度倒序：``Elon Musk`` 排在 ``Elon`` 之前，最长前缀优先。
         names_by_length = sorted(self.orch._guests, key=len, reverse=True)
         for at_idx in iter_at_positions(text):
@@ -250,6 +271,10 @@ class ScoringOps:
                 continue
             for name in names_by_length:
                 if matches_at(text, start, name):
+                    if name in busy:
+                        # 命中 busy 名：整个 @ token 忽略（用户显式打的就是这位，
+                        # 不退回去试更短前缀），继续看下一个 @ 位置。
+                        break
                     return name
         return None
 
