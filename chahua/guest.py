@@ -28,6 +28,7 @@ from agentao.mcp import load_mcp_config
 from agentao.paths import user_root
 from agentao.permissions import PermissionEngine
 
+from .agent_run_tools import StartAgentRun, register_agent_run_tools
 from .debug_recorder import NOOP_RECORDER, TurnRecorder
 from .events import (
     STATUS_CANCELLED,
@@ -117,6 +118,11 @@ class TeaGuest:
         # P6.1：speak() 在 message_start/end 处调 recorder；NOOP_RECORDER = 测试 /
         # [debug] enabled=false 时不动盘。也透传到 transport.bind() 给工具事件 hook。
         self._recorder = recorder
+        # P11.2 C11：``spawn_agent_run(s)`` 工具入口槽位。session 装配期是 None ——
+        # ``register_agent_run_tools`` 用闭包 ``lambda: self.start_agent_run`` 注册，
+        # 工具实例每次 ``execute`` 现取一次 instance attr。server ``_attach_runtime_state``
+        # 装回调进来（切房 re-attach 直接重写本槽位）—— 闭包逐次读 attr，立刻见新值。
+        self.start_agent_run: Optional[StartAgentRun] = None
 
         # transport 终身绑定 (room_id, guest_name)；per-speak 的 (sink, turn_id,
         # message_id) 通过 bind() 临时设。room_id 暂用 room.name —— P4 加 [room].id
@@ -179,6 +185,14 @@ class TeaGuest:
         # P7.4：handoff propose 工具（propose_delegate / review / panel）—— 与 task
         # 工具并列注册。propose_review 要 room 把 reviewee 名解析成 message_id。
         register_handoff_tools(self.agent, transport=self._transport, room=room)
+        # P11.2 C11：``spawn_agent_run`` / ``spawn_agent_runs`` —— 茶客主动调度并发
+        # 后台 run。getter 闭合 ``self.start_agent_run`` instance attr，让 server
+        # 切房 re-attach 后同一 Tool 实例下次 call 自动看见新 runtime（闭合契约）。
+        register_agent_run_tools(
+            self.agent,
+            source_guest=self.name,
+            get_start_agent_run=lambda: self.start_agent_run,
+        )
 
     @property
     def permission(self) -> str:

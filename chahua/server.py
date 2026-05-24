@@ -36,7 +36,13 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from ._paths import Paths
-from .agent_run import AgentRun
+from .agent_run import (
+    AGENT_RUN_ISSUED_BY_AGENT,
+    AGENT_RUN_ISSUED_BY_USER,
+    AgentRun,
+    IssuedBy,
+    create as create_agent_run,
+)
 from .agent_run_sink import BatchMessageSink
 from .context_renderer import render_agent_run_block
 from .config import ISOLATION_GLOBAL
@@ -119,7 +125,9 @@ from .server_inbound_agent_run import (
     AgentRunHandlers,
     INBOUND_AGENT_RUN_CANCEL,
     INBOUND_AGENT_RUN_START,
+    MAX_AGENT_RUNS_PER_ROOM,
 )
+from .tasks_store import CLOSED_STATUSES
 from .server_inbound_handoff import (  # noqa: F401
     HandoffHandlers,
     INBOUND_HANDOFF_CLEAR,
@@ -313,16 +321,167 @@ class ChahuaServer:
         """把 RoomRuntime 上的 per-room 可变状态注入到 session.orchestrator —— C2 起
         集中收口，避免「漏装第二处」。
 
-        C2 阶段只做一件事：把 ``runtime.active_guest_names`` 这个 set 引用绑到
-        ``orchestrator.active_guest_names``，让 :class:`ScoringOps.let_speak` 在
-        ``speak()`` 前后 add/discard 维护「茶客已占用」视图（``RoomRuntime.guest_busy``
-        的唯一数据源）。
-        C11 阶段在此扩展：遍历 ``runtime.session.guests`` 绑定 ``start_agent_run``
-        回调 —— 单点 helper 承所有 per-runtime 注入。
+        两件事：
+        ① C2：把 ``runtime.active_guest_names`` 这个 set 引用绑到
+           ``orchestrator.active_guest_names``，让 :class:`ScoringOps.let_speak` 在
+           ``speak()`` 前后 add/discard 维护「茶客已占用」视图
+           （``RoomRuntime.guest_busy`` 的唯一数据源）。
+        ② P11.2 C11：遍历 ``runtime.session.guests`` 把 ``start_agent_run`` 回调
+           绑到本 runtime —— ``spawn_agent_run(s)`` 工具经 getter 拿到此回调创建
+           bg run。re-attach（切房目标已是同 runtime）会重写槽位，让同 Tool 实例
+           下次 call 自动走新 runtime（C11 getter 闭合契约）。
 
         调用点：``_session.setter``（首次 / 同房重建）+ ``_switch_room``（切房目标）。
         """
         runtime.session.orchestrator.active_guest_names = runtime.active_guest_names
+        # P11.2 C11：每个 guest 槽位指向当前 runtime 的回调。``register_agent_run_tools``
+        # 在 ``TeaGuest.__init__`` 时用闭包 ``lambda: self.start_agent_run`` 注册，工具
+        # 实例每次 ``execute`` 经 getter 读 instance attr —— 装配期写一次，运行期读多次。
+        # ``getattr`` 兜底：测试夹具的 ``_FakeSession`` 不必都铺 ``guests`` 列表。真实
+        # ``RoomSession`` 是 dataclass 自带 ``guests: list[TeaGuest]``。
+        callback = self._make_start_agent_run(runtime)
+        for guest in getattr(runtime.session, "guests", ()):
+            guest.start_agent_run = callback
+
+    def _make_start_agent_run(
+        self, runtime: RoomRuntime,
+    ) -> Callable[..., tuple[Optional[str], Optional[str]]]:
+        """工厂：返回绑定 ``runtime`` 的 ``start_agent_run`` 回调。
+
+        回调签名 ``(target, instruction, task_id, source_guest) -> (run_id, error)``：
+        成功返 ``(run_id, None)``；任一校验拒返 ``(None, error_msg)`` —— 工具侧把
+        error_msg 拼回 ``Error: ...`` 字符串作为 tool result，inbound 侧走 NOTICE error。
+
+        ``issued_by`` 在工具路径恒 ``"agent"``（spawn 工具是茶客调用产物）；inbound
+        路径不经此回调、直接调 ``_start_agent_run`` 传 ``"user"``。
+        """
+        def start(
+            *,
+            target: str,
+            instruction: str,
+            task_id: Optional[str] = None,
+            source_guest: Optional[str] = None,
+        ) -> tuple[Optional[str], Optional[str]]:
+            run, err = self._start_agent_run(
+                runtime,
+                target=target,
+                instruction=instruction,
+                task_id=task_id,
+                issued_by=AGENT_RUN_ISSUED_BY_AGENT,
+                source_guest=source_guest,
+            )
+            if err is not None:
+                return None, err
+            assert run is not None  # err is None ↔ run is not None
+            return run.run_id, None
+
+        return start
+
+    def _start_agent_run(
+        self,
+        runtime: RoomRuntime,
+        *,
+        target: str,
+        instruction: str,
+        task_id: Optional[str],
+        issued_by: IssuedBy,
+        source_guest: Optional[str],
+    ) -> tuple[Optional[AgentRun], Optional[str]]:
+        """C8 inbound + C11 ``spawn_*`` 工具共调的单一登记 / 启动路径。
+
+        校验顺序与 ``server_inbound_agent_run`` 一致：① target 在场 → ② task_id
+        若给须未关闭 → ③ ``guest_busy(target) == False`` → ④ 房间 bg run 数未到
+        ``MAX_AGENT_RUNS_PER_ROOM`` 上限。返 ``(None, err)`` 任一校验拒，调用方
+        负责把 ``err`` 翻成 NOTICE / tool result。
+
+        成功路径同步登记 ``agent_runs[run_id]=run`` + ``active_guest_names.add(target)``
+        **先于** ``asyncio.create_task`` —— 让同 target 的第二条请求在 wrapper 进
+        speak 之前就被 ``guest_busy`` 拒（race 不变量，docs §「运行态」）。
+
+        emit ``AGENT_RUN_STARTED`` 走 ``runtime.router``（与 wrapper 的
+        ``_emit_agent_run_terminal`` 同口径）；前端 ``room_info.background_runs``
+        快照 + 实时 envelope 两条线一致。
+        """
+        # 1. target 在场。
+        if target not in runtime.session.orchestrator.guest_names:
+            return None, f"target={target!r} 不在场"
+
+        # 2. task_id 若给须存在且未关闭。
+        if task_id is not None:
+            task = runtime.session.tasks_store.get_task(task_id)
+            if task is None:
+                return None, f"task_id={task_id!r} 不存在"
+            if task.status in CLOSED_STATUSES:
+                return None, (
+                    f"task_id={task_id!r} 已关闭，无法绑定 bg run"
+                )
+
+        # 3. target 不 busy（含前台 / handoff / 已有 bg run）。
+        if runtime.guest_busy(target):
+            return None, (
+                f"target={target!r} 正忙（前台 / handoff / 已有 bg run），稍后再试"
+            )
+
+        # 4. 房间 bg run 数上限。
+        if len(runtime.agent_runs) >= MAX_AGENT_RUNS_PER_ROOM:
+            return None, (
+                f"房间 bg run 数已达上限 {MAX_AGENT_RUNS_PER_ROOM}，稍后再试"
+            )
+
+        # ── 校验通过：登记 + 启动 wrapper + emit started ──
+        run = create_agent_run(
+            room_id=runtime.room_id,
+            guest_name=target,
+            instruction=instruction,
+            task_id=task_id,
+            issued_by=issued_by,
+            source_guest=source_guest,
+        )
+        # 登记顺序：先 add target 再 create_task —— 让同 target 的第二条请求
+        # 在 wrapper 进 speak 之前就被 guest_busy 拒。
+        runtime.agent_runs[run.run_id] = run
+        runtime.active_guest_names.add(target)
+        task = asyncio.create_task(self._run_agent_background(runtime, run))
+        runtime.agent_run_tasks[run.run_id] = task
+        # emit 走 runtime.router —— 与 wrapper terminal 同口径，前台 ws_sink 落
+        # 同一帧通道；BatchMessageSink 显式 DROP AGENT_RUN_STARTED 防穿越。
+        self._emit_agent_run_started(runtime, run)
+        return run, None
+
+    def _emit_agent_run_started(
+        self, runtime: RoomRuntime, run: AgentRun,
+    ) -> None:
+        """构造并下发 ``AGENT_RUN_STARTED`` envelope（走 ``runtime.router``）。
+
+        data 字段与 :func:`chahua.server_room_snapshot._project_agent_runs` 投影 /
+        :meth:`_emit_agent_run_terminal` 同构 —— 前端单点渲染逻辑共用。
+        ``instruction_preview`` 截 30 字（与 inbound C8 emit 同长度，前端列表条
+        固定预算）。
+        """
+        preview = run.instruction
+        if len(preview) > 30:
+            preview = preview[:30]
+        data: dict = {
+            "run_id": run.run_id,
+            "guest_name": run.guest_name,
+            "issued_by": run.issued_by,
+            "instruction_preview": preview,
+            "created_at_ms": run.created_at_ms,
+        }
+        if run.task_id is not None:
+            data["task_id"] = run.task_id
+        if run.source_guest is not None:
+            data["source_guest"] = run.source_guest
+        runtime.router(
+            ChahuaEnvelope(
+                room_id=runtime.session.room.name,
+                turn_id=None,
+                guest_name=run.guest_name,
+                message_id=None,
+                type=ChahuaEventType.AGENT_RUN_STARTED,
+                data=data,
+            )
+        )
 
     # P9 9.1.3：``_inflight_*`` 两槽下沉 RoomRuntime —— 这里是读写前台 runtime
     # 同名字段的兼容 property，让 ``server_inbound_*.py`` 各 handler 与既有测试
