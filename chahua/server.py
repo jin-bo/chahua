@@ -373,12 +373,19 @@ class ChahuaServer:
             await self._aclose_one_runtime(runtime)
 
     async def _aclose_one_runtime(self, runtime: RoomRuntime) -> None:
-        """单个 runtime 的 async 拆除：end MTS → cancel drain → close → 移出注册表。
+        """单个 runtime 的 async 拆除：end MTS → cancel/drain all → close → 移出注册表。
 
-        三步**各自 try** —— end MTS / drain 抛错绝不能挡住 ``runtime.close()``，否则
-        该房 agentao / MCP 子进程在进程退出时变孤儿泄漏。带 MTS 的 runtime 先
-        ``end_managed_session`` 再 cancel drain（§8 拆除顺序：绝不留「``_managed_session``
-        还在、drain 已 cancel」的死调度）。清完即移出 ``_runtimes``（幂等）。
+        各步**各自 try** —— end MTS / drain 抛错绝不能挡住 ``runtime.close()``，否则
+        该房 agentao / MCP 子进程在进程退出时变孤儿泄漏。
+
+        **拆除顺序**（docs/P9 §8 + docs/P11 §「取消与清理」）：
+        ① ``end_managed_session`` 永远先于 cancel/drain —— 绝不留「``_managed_session``
+        还在、drain 已 cancel」的死调度；
+        ② :meth:`RoomRuntime.cancel_and_drain_all` 走 P11 5 步（sync cancel foreground
+        + 全部 bg run → await drain bg → await drain foreground），让 bg run wrapper
+        finally 在 session close 之前跑完（否则 wrapper 写已关 agentao 的 session
+        会脏写）；
+        ③ ``runtime.close()`` 关停 session（agentao guests / MCP 子进程）+ 移出注册表。
         """
         try:
             orch = runtime.session.orchestrator
@@ -389,7 +396,7 @@ class ChahuaServer:
         except Exception:
             _log.exception("aclose: runtime %r 结束 MTS 出错", runtime.room_id)
         try:
-            await runtime.cancel_and_drain_inflight()
+            await runtime.cancel_and_drain_all()
         except Exception:
             _log.exception("aclose: runtime %r drain 出错", runtime.room_id)
         try:
@@ -549,21 +556,26 @@ class ChahuaServer:
                     return
                 await self._handle_inbound(data, sink)
         finally:
-            # P8.3：MTS 活着 ⟺ drain task 在跑；断线必经下面 _cancel_and_drain_inflight
-            # 把 drain cancel 掉，MTS 既不会自然推进也无人能停。先结束 MTS（清队列 + 置
+            # P8.3：MTS 活着 ⟺ drain task 在跑；断线必经下面 cancel_and_drain_all 把
+            # drain cancel 掉，MTS 既不会自然推进也无人能停。先结束 MTS（清队列 + 置
             # None）再 cancel drain —— 否则重连后房间快照会让前端「托管中」按钮复活、
-            # 却对着一个已死的调度（Codex review P2）。
+            # 却对着一个已死的调度（Codex review P2）。MTS-end 顺序与 docs/P9 §8 + P11
+            # §「取消与清理」一致：永远先于 cancel/drain。
             self._maybe_end_managed_session(
                 sink, reason=MANAGED_SESSION_REASON_USER_CANCEL,
             )
-            # 残留 turn task 必须先收掉再 cancel writer —— turn task 在被 cancel 后还要
-            # 走 ``except CancelledError`` 补 turn_end(cancelled)，那条 envelope 会
+            # P11 C9：前台 runtime 走 5 步「sync cancel 前台 turn + 全部 bg run →
+            # await drain bg → await drain foreground turn」，**不**做步骤 5 的
+            # reset/close —— 前台 session / runtime 跨连接复用（docs/P9 §11 决策 1）。
+            # 残留 turn task 必须先收掉再 cancel writer：被 cancel 的 turn 还要走
+            # ``except CancelledError`` 补 turn_end(cancelled)，那条 envelope 会
             # ``put_nowait`` 进 outbound queue。先 drain producer 再砍 writer，避免
             # producer 写已"cancelling"的 writer 拿到的"task exception was never
             # retrieved"告警（websockets close 本身不依赖这条帧送达）。
-            await self._cancel_and_drain_inflight()
-            # P9 §11 决策 1：ws 断开 → 切走后仍在后台续跑的房间立即全清（带 MTS 的
-            # 先 end_managed_session 再 cancel drain）。前台 runtime 保留供重连重用。
+            await self._cancel_and_drain_all_foreground()
+            # P9 §11 决策 1 + P11：ws 断开 → 切走后仍在后台续跑的房间立即全清（每个
+            # 后台 runtime 走 _aclose_one_runtime 含 5 步 + close + pop）。前台 runtime
+            # 保留供重连重用。
             await self._aclose_background_runtimes()
             writer.cancel()
             try:
@@ -763,8 +775,27 @@ class ChahuaServer:
         self._foreground_runtime.cancel_inflight()
 
     async def _cancel_and_drain_inflight(self) -> None:
-        """cancel 前台 runtime 当前 turn task **并等它收尾**。"""
+        """cancel 前台 runtime 当前 turn task **并等它收尾**。
+
+        **只清前台 turn / handoff drain，不动 bg run**——cancel 按钮（``_inbound_cancel``）
+        专用：用户点「停止当前回答」不应杀掉自己拉起的并行 bg run。同 P11 设计
+        §「运行态」分流口径。
+
+        其它「准备 mutate session」场景（admin / settings / clear_room）必须走
+        :meth:`_cancel_and_drain_all_foreground`，否则 bg run wrapper finally 会在
+        旧 session close 后写脏（C9 修）。
+        """
         await self._foreground_runtime.cancel_and_drain_inflight()
+
+    async def _cancel_and_drain_all_foreground(self) -> None:
+        """P11 C9：前台 runtime 走完整 5 步「sync cancel inflight + 全部 bg run task
+        → await drain bg → await drain inflight」，**不**做步骤 5 的 reset/close。
+
+        所有「准备 mutate / replace / reset 前台 session」的路径必经此 helper（admin
+        加/删茶客 / 改 LLM / 改权限 / trust / toml / clear_room / _replace_session
+        间接经其调用方）。否则 bg run wrapper finally 会在 session close 后写脏。
+        """
+        await self._foreground_runtime.cancel_and_drain_all()
 
     def _maybe_self_destruct_background_runtime(self, runtime: RoomRuntime) -> None:
         """后台 runtime 的 turn / handoff drain 跑完后自毁（P9 §5.1）。
@@ -1125,8 +1156,11 @@ class ChahuaServer:
         # 例外：前台房有 global-isolation 茶客时，其跨房共享 cwd 的 share/task 软链
         # 会被目标房 build_room_session retarget、与后台 turn 撞车 —— 先 cancel+drain，
         # 让 _switch_room 把它当 idle 关掉而非转后台。
+        # P11 C9：走 5 步 helper —— 单清前台 turn 不够：bg run 让 busy_alive() 真，
+        # _switch_room 仍走 demote 转后台分支，违反「background runtime 永不含 global
+        # 茶客」不变量；必须把 bg run 也 drain 干净才能让 busy_alive() 为 False 走 close。
         if self._foreground_session_has_global_guest():
-            await self._cancel_and_drain_inflight()
+            await self._cancel_and_drain_all_foreground()
         self._switch_room(room_id, sink)
         # P9 §5.3：切房可能把旧前台转入后台 —— 超 MAX_BACKGROUND_ROOMS 即淘汰最早者。
         # 放在 _switch_room（同步、含 _emit_room_snapshot）之后：快照里被淘汰房仍标
@@ -1134,7 +1168,9 @@ class ChahuaServer:
         await self._enforce_background_room_limit(sink)
 
     async def _inbound_clear_room(self, data: dict, sink: EnvelopeSink) -> None:
-        await self._cancel_and_drain_inflight()
+        # P11 C9：reset_room 前必须把 bg run wrapper finally 跑完（否则 detect /
+        # cursor.set / emit terminal 会写入已 reset 的房间）；走 5 步 helper 保证。
+        await self._cancel_and_drain_all_foreground()
         self._clear_room(sink)
 
     async def _inbound_fetch_turn_detail(

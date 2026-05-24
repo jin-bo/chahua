@@ -107,7 +107,7 @@ class SettingsHandlers:
         )
         if content is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_user_md(content=content, sink=sink)
 
     async def _inbound_update_room_toml(self, data: dict, sink: EnvelopeSink) -> None:
@@ -118,7 +118,7 @@ class SettingsHandlers:
         )
         if content is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_room_toml(content=content, sink=sink)
 
     async def _inbound_update_user_avatar(

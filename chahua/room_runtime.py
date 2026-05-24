@@ -249,6 +249,35 @@ class RoomRuntime:
         self.agent_runs.clear()
         self.agent_run_tasks.clear()
 
+    async def cancel_and_drain_all(self) -> None:
+        """P11 C9：完整清理「前台 turn + 所有 bg run」—— 不含 ``reset_room`` / ``close``。
+
+        设计（docs/P11 §「取消与清理」5 步）：
+
+        1. ``cancel_inflight()`` —— 同步 cancel 前台 turn task（不 await）。立刻阻断
+           前台继续产出 / 调度新 bg run（含 P11.2 ``spawn_agent_run`` 工具）。
+        2. cancel 所有 ``agent_run_tasks`` —— 同样只 cancel 不 await。
+        3. ``await cancel_and_drain_agent_runs()`` —— 等所有 bg wrapper finally 跑完。
+        4. ``await cancel_and_drain_inflight()`` —— 等前台 turn 收尾（``cancel`` 已发，
+           幂等）。
+
+        「先 sync cancel 所有生产者 → 再 await drain」用顺序本身保证「drain 期间不再
+        产新 bg run」—— 不需要循环 drain / 不需要 closing 状态标志。带 MTS 的
+        runtime 由调用方先调 ``orchestrator.end_managed_session()``（与 P9 §8 拆除
+        顺序一致：MTS-end 永远在 cancel/drain 之前）。
+        """
+        # 步骤 1：sync cancel foreground turn。
+        self.cancel_inflight()
+        # 步骤 2：sync cancel 全部 bg run task。注意复制 values()——drain 过程中
+        # wrapper finally 会 pop entry，迭代时直接动 dict 会 RuntimeError。
+        for task in list(self.agent_run_tasks.values()):
+            if not task.done():
+                task.cancel()
+        # 步骤 3：await drain bg runs（含 pre-start cancel race sweep）。
+        await self.cancel_and_drain_agent_runs()
+        # 步骤 4：await drain foreground turn（重复 cancel 幂等）。
+        await self.cancel_and_drain_inflight()
+
     async def cancel_and_drain_inflight(self) -> None:
         """cancel 当前 turn task **并等它收尾**。
 

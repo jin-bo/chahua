@@ -368,14 +368,14 @@ class AdminHandlers:
         if not isinstance(permission, str):
             _log.warning("ignoring %s: permission 必须是 str", INBOUND_ADD_GUEST)
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._add_guest(persona=persona, name=name, permission=permission, sink=sink)
 
     async def _inbound_remove_guest(self, data: dict, sink: EnvelopeSink) -> None:
         name = require_str(data, "name", where=INBOUND_REMOVE_GUEST)
         if name is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._remove_guest(name=name, sink=sink)
 
     async def _inbound_set_persona_mcp_trust(
@@ -389,7 +389,7 @@ class AdminHandlers:
         trusted = require_bool(data, "trusted", where=INBOUND_SET_PERSONA_MCP_TRUST)
         if trusted is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._set_persona_mcp_trust(
             persona_rel=persona_rel, trusted=trusted, sink=sink
         )
@@ -405,7 +405,7 @@ class AdminHandlers:
         )
         if permission is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_guest_permission(name=name, permission=permission, sink=sink)
 
     async def _inbound_update_room_orchestrator(
@@ -434,7 +434,7 @@ class AdminHandlers:
             return
         if not check_optional_dict(data, "spec", where=INBOUND_UPDATE_ROOM_LLM):
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_room_llm(
             section=section, spec_dict=data.get("spec"), sink=sink
         )
@@ -447,7 +447,7 @@ class AdminHandlers:
             return
         if not check_optional_dict(data, "spec", where=INBOUND_UPDATE_GUEST_LLM):
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_guest_llm(name=name, spec_dict=data.get("spec"), sink=sink)
 
     async def _inbound_update_guest_isolation(
@@ -461,7 +461,7 @@ class AdminHandlers:
         )
         if isolation is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_guest_isolation(name=name, isolation=isolation, sink=sink)
 
     async def _inbound_update_guest_extra_mcp(
@@ -474,7 +474,7 @@ class AdminHandlers:
         servers = require_list(data, "servers", where=INBOUND_UPDATE_GUEST_EXTRA_MCP)
         if servers is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._update_guest_extra_mcp(name=name, servers=servers, sink=sink)
 
     async def _inbound_create_room(self, data: dict, sink: EnvelopeSink) -> None:
@@ -499,7 +499,7 @@ class AdminHandlers:
         # topic / rules 是可选 str；缺 / 非 str → 空串。一个表达式收 None / 其它类型。
         topic = data.get("topic") if isinstance(data.get("topic"), str) else ""
         rules = data.get("rules") if isinstance(data.get("rules"), str) else ""
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._create_room(
             room_id=room_id,
             name=name,
@@ -513,5 +513,5 @@ class AdminHandlers:
         room_id = require_str(data, "room_id", where=INBOUND_DELETE_ROOM)
         if room_id is None:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         self._delete_room(room_id=room_id, sink=sink)

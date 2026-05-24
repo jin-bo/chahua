@@ -208,6 +208,12 @@ class _SpyServer(ChahuaServer):
     async def _cancel_and_drain_inflight(self) -> None:  # type: ignore[override]
         self.cancel_drain_count += 1
 
+    async def _cancel_and_drain_all_foreground(self) -> None:  # type: ignore[override]
+        # P11 C9：admin/settings/clear_room 路径改走新 5 步 helper；spy 把它当
+        # 同一计数器，让既有 `cancel_drain_count == 1` 断言保持语义（「mutation 前
+        # 必走 drain」）不变。
+        self.cancel_drain_count += 1
+
     def _cancel_inflight(self) -> None:  # type: ignore[override]
         self.calls.append(("_cancel_inflight", {}))
 

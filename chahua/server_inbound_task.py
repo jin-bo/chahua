@@ -144,7 +144,7 @@ class TaskHandlers:
         # 持旧 active_task_id，而 ./task 软链已指向新任务，其后续工具写会落到错任务、
         # 且 turn 末尾 detector 扫的还是旧任务（P5.8 移除 _kick_synthesized_user_message
         # 时连带丢了这个 cancel，本是它的副作用）。
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         # P8.3：open_task 自动 set_active 到新任务 —— 与 set_active_task 同口径，
         # 取消了 in-flight 的 MTS handoff drain，drain 死了 MTS 不会自己收尾。显式
         # 结束，否则 _managed_session 卡住、UI 永远「托管中」（Codex review P2）。
@@ -312,7 +312,7 @@ class TaskHandlers:
         # 这里挡住，否则用户那点一下会把正在跑的回答给杀了。
         if self.server._session.tasks_store.active_task_id == task_id_raw:
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         # P8.3：切 active 取消了 in-flight 的 MTS handoff drain —— drain 死了
         # `_advance_managed_session_after_turn` 不会再跑、MTS 不会自己收尾。显式结束，
         # 否则 _managed_session 卡住、UI 永远「托管中」（Codex review P2）。
@@ -367,7 +367,7 @@ class TaskHandlers:
                 ),
             )
             return
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         # P8.3：close 取消了 in-flight 的 MTS handoff drain —— 同 set_active_task，
         # 显式收尾 MTS（drain 死了不会自己跑到 task_closed 停止判定，Codex review P2）。
         # 被关的就是 MTS 驱动的任务 → task_closed；关的是别的任务 → user_cancel。
@@ -564,7 +564,7 @@ class TaskHandlers:
         # in-flight 茶客可能正写 ./task/<x> —— 同 close_task / set_active_task 口径先
         # drain，避免 unlink 与 write 撞或 _kick_detect_new_artifacts 把"刚写又刚被删"
         # 当 removed_names + new_names 双重广播。
-        await self.server._cancel_and_drain_inflight()
+        await self.server._cancel_and_drain_all_foreground()
         try:
             deleted = store.clear_artifacts(task_id)
         except OSError as e:
