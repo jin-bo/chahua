@@ -82,13 +82,17 @@ def render_managed_session_block(manager: str, budget: int) -> str:
     纯函数 —— 措辞固定、不读 store、不背状态。经 ``extra_blocks`` 注入到
     ``<speak_instruction>`` 之前；只管理者回合注入，worker 回合不注入。
 
-    告诉管理者四件事：① 你在托管会话中，复查后直接 ``propose_delegate`` 指派下一步，
-    托管期自动生效、不要交回用户；② 工具 ack 若说「等用户采纳」在托管会话中请忽略
-    （第 ② 条专门作废 P7.4 ``propose_*`` 工具 ack 的等待语义 —— 为保
-    ``handoff_tools.py`` 零改动不改工具，改由本块纠偏）；③ Goal 达成用
-    ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）；
-    ④ P11.2：多人并发用 ``spawn_agent_runs`` —— 绕开 budget 做并发分发
-    （budget 控制管理者**串行**复查深度；``spawn_*`` 是并行后台调度，两者正交）。
+    告诉管理者四件事（与渲染顺序一致）：① 你在托管会话中，复查后直接
+    ``propose_delegate`` 指派下一步，托管期自动生效、不要交回用户；② 工具 ack
+    若说「等用户采纳」在托管会话中请忽略（第 ② 条专门作废 P7.4 ``propose_*``
+    工具 ack 的等待语义 —— 为保 ``handoff_tools.py`` 零改动不改工具，改由本块纠偏）；
+    ③ P11.2：多人并发用 ``spawn_agent_runs`` —— 绕开 budget 做并发分发
+    （budget 控制管理者**串行**复查深度；``spawn_*`` 是并行后台调度，两者正交）；
+    ④ Goal 达成用 ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）。
+
+    **CLAUDE.md MTS 不变量「块第 ② 条作废 propose_* 等待语义」** —— 渲染顺序中
+    第 ② 条仍是「忽略 propose_* 工具 ack 的等待语义」；后续若调整顺序需同步
+    CLAUDE.md 该不变量的条目编号。
 
     ``manager`` 走 ``quoteattr`` 转义防 XML 属性注入（与 ``<room>`` 等块同口径）。
     """

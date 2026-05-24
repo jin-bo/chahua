@@ -25,7 +25,6 @@ from chahua.events import (
     ChahuaEnvelope,
     ChahuaEventType,
     NOOP_SINK,
-    TASK_PROPOSAL_KIND_DECISION,
     TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
 )
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
@@ -155,7 +154,10 @@ def test_mts_intercept_task_proposal_still_works_for_real_proposals() -> None:
     enqueued: list = []
 
     class _HandoffOps:
-        _queue: list = []
+        # ``_queue`` 在 ``__init__`` 里实例化 —— 不能用类级 ``_queue: list = []``
+        # 默认（mutable class var）：如果未来某测在同进程内重跑会跨实例累积。
+        def __init__(self) -> None:
+            self._queue: list = []
 
         def enqueue_handoff(self, item):
             enqueued.append(item)
@@ -199,8 +201,14 @@ def test_mts_intercept_task_proposal_still_works_for_real_proposals() -> None:
 async def test_spawn_during_mts_does_not_decrement_budget() -> None:
     """**核心 C12 不变量**：MTS 管理者在自己回合内调 spawn → bg run 创建成功，但
     ``budget`` 不变（budget 是「worker 回合走完 → 管理者复查」扣 1 的 drain-loop
-    层概念，spawn 走独立 wrapper、不进 drain queue）。"""
-    from chahua._orchestrator_managed_session import ManagedSessionOps
+    层概念，spawn 走独立 wrapper、不进 drain queue）。
+
+    **测试覆盖范围**：本测试只验证 ``_start_agent_run`` 路径自身不写
+    ``orchestrator._managed_session.budget``。完整的 drain-loop 级覆盖（即
+    spawn 完成后下一个真 turn 调 ``advance_after_turn`` 时 budget 不被错误扣减）
+    属于 ``test_managed_session.py`` 的范畴 —— C12 单测只验 spawn 路径的局部
+    不变量。
+    """
     from chahua.handoff import ManagedSession
 
     sink: list[ChahuaEnvelope] = []
@@ -262,28 +270,31 @@ async def test_spawn_still_counts_against_max_agent_runs_per_room() -> None:
     """正交性的另一面：spawn 仍占 ``MAX_AGENT_RUNS_PER_ROOM`` —— budget bypass
     不是「无限并发」的免死金牌。MTS 与非 MTS 在这条 cap 上一致。"""
     from chahua.server_inbound_agent_run import MAX_AGENT_RUNS_PER_ROOM
-    from chahua._orchestrator_managed_session import ManagedSessionOps
     from chahua.handoff import ManagedSession
 
     sink: list[ChahuaEnvelope] = []
-    guest_names = tuple(f"G{i}" for i in range(MAX_AGENT_RUNS_PER_ROOM + 1))
+    # G0 = 管理者；workers = G1..G_MAX 占满 cap，G_(MAX+1) 试探拒。
+    # 不让 G0 当 spawn target（管理者把自己当 worker 是奇怪场景；C8 inbound 也
+    # 不显式禁，但避免误测「manager-as-target 拒绝」当成 cap 拒绝）。
+    workers = tuple(f"G{i}" for i in range(1, MAX_AGENT_RUNS_PER_ROOM + 2))
+    guest_names = ("G0",) + workers
     srv, rt = _make_server(sink, guest_names=guest_names)
     rt.session.orchestrator._managed_session = ManagedSession(  # type: ignore[attr-defined]
         task_id="t1", manager_guest="G0", budget=99,
     )
 
     cb = srv._make_start_agent_run(rt)
-    # 占满 max_agent_runs_per_room。
+    # 占满 max_agent_runs_per_room（前 N 个 worker）。
     for i in range(MAX_AGENT_RUNS_PER_ROOM):
         run_id, err = cb(
-            target=guest_names[i], instruction="x",
+            target=workers[i], instruction="x",
             task_id=None, source_guest="G0",
         )
-        assert err is None, f"i={i}: 应放行"
+        assert err is None, f"i={i} target={workers[i]}: 应放行"
 
-    # 第 N+1 条：在 MTS 内仍拒（cap 不被 MTS bypass）。
+    # 第 N+1 条（workers[-1]）：在 MTS 内仍拒（cap 不被 MTS bypass）。
     run_id, err = cb(
-        target=guest_names[-1], instruction="x",
+        target=workers[-1], instruction="x",
         task_id=None, source_guest="G0",
     )
     assert run_id is None
