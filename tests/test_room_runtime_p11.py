@@ -119,6 +119,66 @@ async def test_cancel_and_drain_agent_runs_swallows_non_cancel_exception(
     assert any("bg run wrapper raised" in rec.message for rec in caplog.records)
 
 
+async def test_cancel_and_drain_agent_runs_sweeps_leaked_entries() -> None:
+    """pre-start cancel race：wrapper never ran → finally 不执行 → 三件套留死。
+    drain 兜底 sweep 把死条目清掉。
+    """
+    rt = _make_runtime()
+
+    # 模拟 wrapper 还没启动就被 cancel 的尾态：注册表里有 run + task，
+    # active_guest_names 也有名字（inbound 同步 add 的），但 finally 没跑。
+    run = create_agent_run(room_id="r", guest_name="Bob", instruction="x")
+    rt.agent_runs[run.run_id] = run
+    rt.active_guest_names.add("Bob")
+
+    async def _never_ran() -> None:
+        # 不进 try/finally —— 模拟 throw 在 body 之前就触发。
+        await asyncio.sleep(100)
+
+    task = asyncio.create_task(_never_ran())
+    rt.agent_run_tasks[run.run_id] = task
+
+    # 此外加一个正常完成的 task（wrapper 跑过 finally 已清掉自己条目）：
+    # 验证 sweep 不会误伤已清的部分。
+    async def _ok() -> None:
+        return None
+
+    done_task = asyncio.create_task(_ok())
+    await done_task  # 让它完成；但保留在 agent_run_tasks 里模拟 wrapper finally 未 pop。
+    rt.agent_run_tasks["run_done"] = done_task
+
+    await rt.cancel_and_drain_agent_runs()
+
+    # sweep 后三件套清空（Bob 也被 discard）。
+    assert rt.agent_runs == {}
+    assert rt.agent_run_tasks == {}
+    assert "Bob" not in rt.active_guest_names
+
+
+async def test_drain_sweep_preserves_foreground_only_active_guest_names() -> None:
+    """sweep 只清「bg run 注册表里」的 guest_name —— 不动 foreground let_speak 加的 entry。"""
+    rt = _make_runtime()
+
+    # bg run 留死条目：guest_name=Bob
+    leaked = create_agent_run(room_id="r", guest_name="Bob", instruction="x")
+    rt.agent_runs[leaked.run_id] = leaked
+    rt.active_guest_names.add("Bob")
+
+    # 同时 foreground let_speak 加了 Alice（无对应 bg run）
+    rt.active_guest_names.add("Alice")
+
+    async def _never_ran() -> None:
+        await asyncio.sleep(100)
+
+    rt.agent_run_tasks[leaked.run_id] = asyncio.create_task(_never_ran())
+
+    await rt.cancel_and_drain_agent_runs()
+
+    # Bob 被 sweep 清掉，Alice 保留（foreground 还在 speak，不能误伤）。
+    assert "Bob" not in rt.active_guest_names
+    assert "Alice" in rt.active_guest_names
+
+
 async def test_cancel_and_drain_agent_runs_handles_already_done_task() -> None:
     rt = _make_runtime()
 

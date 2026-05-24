@@ -90,6 +90,30 @@ def test_drops_message_end_error_and_cancelled() -> None:
     assert seen == []
 
 
+def test_flush_to_clears_buffer_even_when_router_raises() -> None:
+    """router 在某条 propose 投递时抛 —— 剩余项仍尝试投出，buffer 必清。"""
+    sink = BatchMessageSink(run_id="run_x", downstream=lambda _: None)
+    sink(_env(ChahuaEventType.TASK_PROPOSAL, data={"k": 1}))
+    sink(_env(ChahuaEventType.TASK_PROPOSAL, data={"k": 2}))
+    sink(_env(ChahuaEventType.TASK_PROPOSAL, data={"k": 3}))
+
+    seen: list[int] = []
+
+    def flaky_router(env: ChahuaEnvelope) -> None:
+        idx = env.data["k"]
+        seen.append(idx)
+        if idx == 2:
+            raise RuntimeError("ws closed")
+
+    sink.flush_to(flaky_router)
+
+    # 三条全都尝试过；第 2 条抛但循环继续。
+    assert seen == [1, 2, 3]
+    # buffer 已清，重复 flush no-op。
+    sink.flush_to(lambda e: seen.append(99))
+    assert 99 not in seen
+
+
 def test_buffers_task_proposal_and_flushes() -> None:
     """TASK_PROPOSAL 缓冲；flush_to(router) 一次性下发，重复 flush 无副作用。"""
     inflight_seen: list[ChahuaEnvelope] = []

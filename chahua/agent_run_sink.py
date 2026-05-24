@@ -34,9 +34,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from .events import ChahuaEnvelope, ChahuaEventType, EnvelopeSink, STATUS_OK
+
+_log = logging.getLogger(__name__)
 
 
 # 白名单中"丢"的类型显式枚举 —— 改这个集合即改 bg run 的事件可见性。
@@ -129,12 +132,26 @@ class BatchMessageSink:
         ``router`` 通常 ≡ ``self._downstream``（同一 ``runtime.router``）；签名分开是为
         测试 / wrapper finally 的语义清晰：bind 已退出，sink 不再可用、必须经 runtime
         router 直发。重复 flush 是 no-op（buffer 已清）。
+
+        **每条单独 try/except + WARN**：router 在投递某一条时抛（如底层 ws 已断），
+        必须保证后续 propose 还能尝试投出去，并最终 ``clear`` —— 否则 batch_sink GC
+        后部分 envelope 永远丢失（与 `cancel_and_drain_agent_runs` 的「不向调用方传播
+        异常」同口径）。
         """
         if not self._proposal_buffer:
             return
-        for env in self._proposal_buffer:
-            router(env)
-        self._proposal_buffer.clear()
+        try:
+            for env in self._proposal_buffer:
+                try:
+                    router(env)
+                except Exception:
+                    _log.warning(
+                        "BatchMessageSink.flush_to: router raised on %s; "
+                        "envelope dropped",
+                        env.type.value, exc_info=True,
+                    )
+        finally:
+            self._proposal_buffer.clear()
 
 
 def _with_run_id(env: ChahuaEnvelope, run_id: str) -> ChahuaEnvelope:

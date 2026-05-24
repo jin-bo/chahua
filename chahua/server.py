@@ -36,6 +36,9 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from ._paths import Paths
+from .agent_run import AgentRun
+from .agent_run_sink import BatchMessageSink
+from .context_renderer import render_agent_run_block
 from .config import ISOLATION_GLOBAL
 from ._server_helpers import (
     check_keys_whitelist as _check_keys_whitelist,
@@ -48,6 +51,7 @@ from .events import (
     NOOP_SINK,
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
+    new_turn_id,
 )
 from .room_runtime import (
     ROUTER_MODE_BACKGROUND,
@@ -853,6 +857,184 @@ class ChahuaServer:
             runtime.set_inflight(None, None)
             # P9：handoff drain 跑完后，后台 runtime 已 idle → 自毁。
             self._maybe_self_destruct_background_runtime(runtime)
+
+    async def _run_agent_background(
+        self, runtime: RoomRuntime, run: AgentRun,
+    ) -> None:
+        """P11：单条 bg run 的执行 wrapper —— 由 inbound (C8) / 工具 (C11) 经
+        ``asyncio.create_task`` 启动，挂在 ``runtime.agent_run_tasks[run.run_id]``。
+
+        承载语义：bg run **不走** ``run_pending_handoff()``（handoff 是队列串行），
+        **也不走** ``_let_speak()`` (前台 turn 才用)，wrapper 自己补回：
+        ① 直接调 ``TeaGuest.speak(..., record_debug=False, sink=BatchMessageSink)``；
+        ② 成功拿到 ``msg`` 后 ``orch.cursor.set(guest_name, msg.seq)`` —— 补
+        ``_let_speak`` 的 cursor 推进；否则 bg 茶客下次 onboarding 把自己的产物
+        当未读重喂。
+        ③ **不**改 ``_cooldown`` / ``_consecutive_ai_turns`` —— bg run 与前台调度
+        独立，绝不污染前台节奏；
+        ④ ``task_id`` 启动时**冻结**（用 ``run.task_id``），其它字段（``<recent_messages>``
+        / ``<room>`` / ``<room_summary>``）走 live 视图，与 handoff drain 口径一致。
+
+        wrapper 顺序见 docs/P11 §「wrapper finally 顺序」（两层 try/finally + 每步
+        best-effort）：
+
+        外层 finally 唯一职责：``runtime.active_guest_names.discard(guest_name)`` ——
+        保证任一步抛异常 target 必定释放（前台 / 同 target 第二条 inbound 能解锁）。
+        随后 ``_maybe_self_destruct_background_runtime`` 让「只剩 bg run」收尾的
+        后台 runtime 自毁（P9 既有触发点没覆盖纯 bg run 场景）。
+
+        内层 finally 按序：
+          ① detect new artifacts —— 经 router 直发（绕开 BatchMessageSink）；
+          ② flush propose 缓冲；
+          ③ pop ``agent_runs`` / ``agent_run_tasks``（**无条件**，先于 emit terminal
+             —— 避免快照在间隙重投死 run）；
+          ④ emit terminal envelope（AGENT_RUN_FINISHED / _CANCELLED / _ERROR）。
+
+        terminal_type 三分流：``speak`` 返 ``msg`` → FINISHED；``CancelledError``
+        重抛 → CANCELLED（让 asyncio task 正确 cancelled）；``msg is None`` 或
+        其它异常 → ERROR。**不**扩展 ``AgentRun.status``，注册表仍 running-only。
+
+        每步 try/except + WARN —— 不阻挡 finally 后续步骤；最坏情况 emit terminal
+        失败仍跑外层 discard（前端经 ``room_info.background_runs`` 切回房重建一致性）。
+        """
+        run_id = run.run_id
+        guest_name = run.guest_name
+        terminal_type = ChahuaEventType.AGENT_RUN_ERROR
+        msg = None
+        # batch_sink 在「context 构建失败前」可能为 None —— finally flush 阶段必须先判。
+        batch_sink: Optional[BatchMessageSink] = None
+        try:
+            try:
+                guest = runtime.session.orchestrator.get_guest(guest_name)
+                if guest is None:
+                    # 极小竞态：登记 run 与 wrapper 启动之间该茶客被移除；记录后由外层
+                    # finally 走 emit ERROR + discard，与「正常异常路径」语义一致。
+                    raise RuntimeError(
+                        f"bg run target {guest_name!r} not in orchestrator"
+                    )
+                # context_message：onboarding 走 cursor.get，附 <agent_run_task> 块
+                # 注入指令。task_id 已经在 AgentRun 上冻结，本轮所有 message_* /
+                # transcript 落盘也带这个 tag（P5/P6 口径）。
+                ctx = runtime.session.orchestrator._build_context_for(
+                    guest_name,
+                    task_id=run.task_id,
+                    extra_blocks=[
+                        render_agent_run_block(
+                            instruction=run.instruction,
+                            issued_by=run.issued_by,
+                            source_guest=run.source_guest,
+                        ),
+                    ],
+                )
+                batch_sink = BatchMessageSink(
+                    run_id=run_id, downstream=runtime.router,
+                )
+                turn_id = new_turn_id()
+                try:
+                    msg = await guest.speak(
+                        ctx,
+                        turn_id=turn_id,
+                        sink=batch_sink,
+                        task_id=run.task_id,
+                        record_debug=False,  # bg run 不进 debug 视图（P11.1 §「TurnRecorder 串台修复」）
+                    )
+                    if msg is not None:
+                        terminal_type = ChahuaEventType.AGENT_RUN_FINISHED
+                        # 补 _let_speak 的 cursor 推进 —— bg 茶客下次 onboarding 不重喂自己。
+                        # 不改 _cooldown / _consecutive_ai_turns（设计 §「后台执行路径」）。
+                        runtime.session.orchestrator.cursor.set(guest_name, msg.seq)
+                except asyncio.CancelledError:
+                    terminal_type = ChahuaEventType.AGENT_RUN_CANCELLED
+                    raise
+            except asyncio.CancelledError:
+                # 重抛到 wrapper 外层让 asyncio task 标 cancelled —— 内层 finally 已跑。
+                raise
+            except Exception:
+                # 非 cancel 异常（如 get_guest=None race / _build_context_for 失败）—— log
+                # + swallow，让 terminal_type 保持 ERROR、外层 finally 正常收尾 +
+                # 注册表清空。不 swallow 会让 asyncio task 抛出未捕获异常 + 前端经
+                # room_info 重建时仍能见死 run。
+                _log.exception("bg run %s: wrapper inner crashed", run_id)
+            finally:
+                # ① detect new artifacts —— 经 router 直发（绕开 batch_sink）。
+                try:
+                    runtime.session.orchestrator._kick_detect_new_artifacts(
+                        runtime.router, run.task_id,
+                    )
+                except Exception:
+                    _log.warning(
+                        "bg run %s: _kick_detect_new_artifacts failed",
+                        run_id, exc_info=True,
+                    )
+                # ② flush propose 缓冲 —— context 构建失败前 batch_sink 仍是 None,
+                # 跳过即可（没有缓冲可 flush）。
+                if batch_sink is not None:
+                    try:
+                        batch_sink.flush_to(runtime.router)
+                    except Exception:
+                        _log.warning(
+                            "bg run %s: flush_propose_buffer failed",
+                            run_id, exc_info=True,
+                        )
+                # ③ pop 注册表（先于 emit terminal——避免 snapshot 在间隙重投死 run）。
+                runtime.agent_runs.pop(run_id, None)
+                runtime.agent_run_tasks.pop(run_id, None)
+                # ④ emit terminal envelope。
+                try:
+                    self._emit_agent_run_terminal(
+                        runtime, run, terminal_type, msg,
+                    )
+                except Exception:
+                    _log.warning(
+                        "bg run %s: emit terminal failed", run_id, exc_info=True,
+                    )
+        finally:
+            # 外层 finally 唯一职责：discard guest_name + 自毁判定。
+            runtime.active_guest_names.discard(guest_name)
+            try:
+                self._maybe_self_destruct_background_runtime(runtime)
+            except Exception:
+                _log.warning(
+                    "bg run %s: self destruct failed", run_id, exc_info=True,
+                )
+
+    def _emit_agent_run_terminal(
+        self,
+        runtime: RoomRuntime,
+        run: AgentRun,
+        terminal_type: ChahuaEventType,
+        msg,  # Optional[Message]
+    ) -> None:
+        """构造并下发 AGENT_RUN_FINISHED / _CANCELLED / _ERROR envelope。
+
+        data 字段与 :func:`chahua.server_room_snapshot._project_agent_runs` 投影
+        同构，让前端 envelope 与 ``room_info.background_runs`` 单点渲染逻辑共用。
+        """
+        data: dict = {
+            "run_id": run.run_id,
+            "guest_name": run.guest_name,
+            "issued_by": run.issued_by,
+        }
+        if run.task_id is not None:
+            data["task_id"] = run.task_id
+        if run.source_guest is not None:
+            data["source_guest"] = run.source_guest
+        # ERROR 路径补 reason：speak() 返 None 表示「被吞的异常」—— 没有具体错文，
+        # 用占位 "speak_failed" 让前端能稳定渲一句话；详细异常已 _log.exception。
+        if terminal_type is ChahuaEventType.AGENT_RUN_ERROR:
+            data["error"] = "speak_failed"
+        # 与 ROOM_BACKGROUND_FINISHED 同口径：envelope.room_id 用 room.name
+        # （前端按 room.name 路由前台/后台房间里程碑）。
+        runtime.router(
+            ChahuaEnvelope(
+                room_id=runtime.session.room.name,
+                turn_id=None,
+                guest_name=run.guest_name,
+                message_id=msg.message_id if msg is not None else None,
+                type=terminal_type,
+                data=data,
+            )
+        )
 
     async def _handle_inbound(self, data: dict, sink: EnvelopeSink) -> None:
         """分派一条客户端消息到对应 handler。

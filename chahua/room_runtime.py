@@ -211,6 +211,15 @@ class RoomRuntime:
         的 ``CancelledError``（wrapper 内部正确重抛、用于 asyncio task 标 cancelled）
         与非 ``CancelledError`` 异常一并收成结果项；后者 WARN 后继续 drain 下一个，
         不抛。这条职责边界让 ``clear_room`` / ``aclose`` 的 finally 不被中断。
+
+        **兜底清理（pre-start cancel race）**：调用方在 ``create_task`` 与协程首次
+        进入 ``step`` 之间就 ``task.cancel()`` 时（如 inbound 队列里 ``agent_run_start``
+        紧接 ``clear_room`` 时），CPython 在首次 step 把 ``CancelledError`` 注入
+        协程的「未启动状态」—— wrapper body 一行都不跑，外层 / 内层 finally 都不
+        执行 → ``agent_runs`` / ``agent_run_tasks`` / ``active_guest_names`` 三件套
+        条目留死。drain 等 gather 返回后再扫一遍：把所有还在表里的 run 用其
+        ``guest_name`` 从 ``active_guest_names`` 里清掉，再 ``clear`` 两个 dict。
+        正常路径（wrapper 跑过 finally）此时三件套已是空，sweep 是 no-op。
         """
         tasks = list(self.agent_run_tasks.values())
         if not tasks:
@@ -226,6 +235,19 @@ class RoomRuntime:
                 _log.warning(
                     "bg run wrapper raised during drain: %r", result, exc_info=result,
                 )
+        # 兜底 sweep：见 docstring「pre-start cancel race」。``guest_name`` 经此清掉，
+        # 而非 ``active_guest_names.clear()`` —— 前台 / handoff `_let_speak` 也写
+        # 同一 set，整 clear 会误伤当前 speak 中的前台茶客。
+        if self.agent_runs:
+            leaked_count = len(self.agent_runs)
+            for leaked in self.agent_runs.values():
+                self.active_guest_names.discard(leaked.guest_name)
+            _log.warning(
+                "drain swept %d bg run(s) whose wrapper finally never ran "
+                "(pre-start cancel race)", leaked_count,
+            )
+        self.agent_runs.clear()
+        self.agent_run_tasks.clear()
 
     async def cancel_and_drain_inflight(self) -> None:
         """cancel 当前 turn task **并等它收尾**。
