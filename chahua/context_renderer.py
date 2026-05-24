@@ -82,11 +82,13 @@ def render_managed_session_block(manager: str, budget: int) -> str:
     纯函数 —— 措辞固定、不读 store、不背状态。经 ``extra_blocks`` 注入到
     ``<speak_instruction>`` 之前；只管理者回合注入，worker 回合不注入。
 
-    告诉管理者三件事：① 你在托管会话中，复查后直接 ``propose_delegate`` 指派下一步，
+    告诉管理者四件事：① 你在托管会话中，复查后直接 ``propose_delegate`` 指派下一步，
     托管期自动生效、不要交回用户；② 工具 ack 若说「等用户采纳」在托管会话中请忽略
     （第 ② 条专门作废 P7.4 ``propose_*`` 工具 ack 的等待语义 —— 为保
     ``handoff_tools.py`` 零改动不改工具，改由本块纠偏）；③ Goal 达成用
-    ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）。
+    ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）；
+    ④ P11.2：多人并发用 ``spawn_agent_runs`` —— 绕开 budget 做并发分发
+    （budget 控制管理者**串行**复查深度；``spawn_*`` 是并行后台调度，两者正交）。
 
     ``manager`` 走 ``quoteattr`` 转义防 XML 属性注入（与 ``<room>`` 等块同口径）。
     """
@@ -98,6 +100,9 @@ def render_managed_session_block(manager: str, budget: int) -> str:
         "托管期内这些提议会自动入队生效，无需用户逐次采纳；不要说「请用户决定」「等你确认」。\n"
         "- 若 propose_delegate / propose_panel 工具返回「已提议……等用户采纳」一类"
         "等待语义，在托管会话中请**忽略**它 —— 你的 delegate / panel 已自动生效，照常继续推进。\n"
+        "- 需要**并发**派工（多人同步审稿 / 多线索分头排查）时用 spawn_agent_runs —— "
+        "绕开托管 budget 做并行后台分发，不扣预算、不计连发上限。**别**用 propose_panel "
+        "并发（panel 仍是串行 drain）。\n"
         "- 当任务目标已达成、不需要再派活时，用 task_propose_status(\"done\") 收尾"
         "（这个提议会交给用户确认、不自动生效），并停止派活。\n"
         f"- 当前剩余托管预算：{rounds} 轮复查。预算用尽、或你这一轮不再派活时，托管会话自动结束。\n"
