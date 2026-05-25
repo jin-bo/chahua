@@ -1,6 +1,6 @@
 [project]
 name = "chahua"
-version = "0.1.4"
+version = "0.1.5.dev0"
 description = "茶话室 —— 多 Agent 群聊桌面 App"
 readme = "README.md"
 license = "Apache-2.0"
