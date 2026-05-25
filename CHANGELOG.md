@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-25
+
+详见 [`docs/releases/v0.1.4.md`](docs/releases/v0.1.4.md)。
+
+### Added
+- **P11 后台 Agent —— 同房间 Agent 并行执行**（2026-05-24 ~ 2026-05-25，详见 [`docs/P11-后台 Agent.md`](docs/P11-后台%20Agent.md)）：把房间从「一个 in-flight turn」升级为「一个前台 turn + 多个并发后台 run」。同房间最多 4 条并发 bg run。
+  - **P11.1 用户手动后台指派**（C1-C11，12 commits）：`AgentRun` frozen dataclass + `RoomRuntime.agent_runs` / `agent_run_tasks` / `active_guest_names` 三件套；`BatchMessageSink` 事件白名单（流式 / debug 一律丢 + `TASK_PROPOSAL` 缓冲到 wrapper finally 才 flush）；`_run_agent_background` wrapper 两层 try/finally + 6 步收尾；`agent_run_start` / `agent_run_cancel` inbound + `/bg <茶客> <指令>` 斜杠命令 + UI 弹窗；4 道校验（target 在场 / task_id 未关闭 / `guest_busy(target) == False` / `len(agent_runs) < MAX_AGENT_RUNS_PER_ROOM=4`）；`cancel_and_drain_all()` 5 步 race-free 清理（带 MTS 先 `end_managed_session(user_cancel)` 再 cancel drain）；4 个 `AGENT_RUN_*` envelope + `room_info.background_runs` 字段（不 bump `schema_version`）；scoring busy 三档过滤（`find_user_mention` / broadcast / `scorables` 均排除 busy 茶客，gather 后重读 busy）；前端 sidebar 茶客行 `.guest-bg-run` 圆点指示 + composer 上方 bg run 列表条（per-run 取消）。
+  - **P11.2 茶客侧 `spawn_agent_run(s)` 工具**（C11 / C12 + 2 fix，4 commits）：`SpawnAgentRunTool` + `SpawnAgentRunsTool`（`AsyncToolBase` 子类经 `run_coroutine_threadsafe` 桥回 host event loop 让 `create_task` 工作）；上限 `max_agent_runs_per_tool_call = 4`；同批次 target 不可重复；server 端 `_start_agent_run` 单点登记 helper + `_make_start_agent_run(runtime)` 工厂（切房经 `_attach_runtime_state` 重绑回调）；MTS × spawn 边界：`intercept_task_proposal` 在 envelope 类型层过滤、`<managed_session>` prompt 第 ④ 条加「并发用 spawn_agent_runs 不用 propose_panel」提示。
+  - **P11.2.X MTS × bg run 续命闭环**（PR #14，含 Codex 11 轮 review 收敛 13 项）：管理者 spawn 的 bg run 完成时自动 enqueue 一次管理者复查 + 扣 1 budget。`AgentRun` 加 `mts_managed` / `mts_manager_at_spawn` / `mts_session_id_at_spawn` 三个 spawn 时刻冻结字段；`ManagedSession.session_id` 单调递增 counter 区分跨 MTS 实例（CPython 内存地址会被 GC 复用，不能用 `id()`）。`advance_after_bg_completion` 4 道守卫（MTS 活 / manager 身份 / session_id / stop_reason 含 `BUDGET_EXHAUSTED` + queue-empty 窄化防多 bg race 清队列）。bg wrapper finally step ⑤ 6 个 helper 实现「advance 单跑 + dispatch/advance 拆分 + 双路 deferral（user turn / handoff drain）+ non-FINISHED 兜底（CANCELLED/ERROR mts_managed bg）+ self_destruct 补 + 先 `-1` counter 再 evaluate 防自屏蔽」race-free 闭环。drain 收尾两处 `MANAGER_FINISHED` 都加 `has_pending_mts_bg()` 守卫，bg pending 时安静退出 drain。`busy_alive()` 接 `pending_mts_continuations` counter 防 deferred callback 前 background runtime self_destruct 误销。`_start_agent_run` 拒 `target == manager_guest`。Maya `task-management` SKILL.md MTS 分支同步从「不要 spawn」改为「可以 spawn，每 bg 完成系统自动调度复查 1 次扣 1 budget」+ 新增「激活前提」段限制 SKILL 只在有 `<current_task>` 块时执行。
+
+### Changed
+- **orchestrator 按子域拆 5 个 slot**（2026-05-24，PR #13）：把 1500+ 行的 `Orchestrator` 主类按子域拆成 5 slot 模块（`_orchestrator_chain.py` AIChainOps / `_orchestrator_handoff_drain.py` HandoffDrainOps / `_orchestrator_handoff_queue.py` HandoffQueueOps / `_orchestrator_managed_session.py` ManagedSessionOps / `_orchestrator_scoring.py` ScoringOps），主类经 `_install_orchestrator_slots(orch)` 单点装配。公开 API 全部保兼容（薄转发 / `@property` + setter），既有 1000+ 测试零改动。
+
 ## [0.1.3] - 2026-05-23
 
 详见 [`docs/releases/v0.1.3.md`](docs/releases/v0.1.3.md)。
