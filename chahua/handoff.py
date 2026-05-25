@@ -65,6 +65,19 @@ MANAGED_SESSION_REASON_USER_STOPPED = "user_stopped"
 MANAGED_SESSION_REASON_USER_CANCEL = "user_cancel"
 
 
+_MTS_SESSION_ID_COUNTER: int = 0
+
+
+def _mint_mts_session_id() -> int:
+    """Codex round 5 P2：MTS 实例的进程内单调递增 id —— 区分跨 MTS 实例的 bg 续命
+    场景。用 ``id()`` 不行（CPython 内存地址会被复用），用 counter 保证每个新建的
+    ``ManagedSession`` 拿到独一无二的 id（即便前一个刚被 end + GC）。
+    """
+    global _MTS_SESSION_ID_COUNTER
+    _MTS_SESSION_ID_COUNTER += 1
+    return _MTS_SESSION_ID_COUNTER
+
+
 @dataclass
 class ManagedSession:
     """托管任务会话（MTS）运行态（P8.3，docs/P8.3-原生自动推进.md §3.1）。
@@ -84,6 +97,11 @@ class ManagedSession:
 
     budget: int
     """剩余复查回合数。每次「worker→管理者」回调扣 1；kickoff 不耗（docs §2.2）。"""
+
+    session_id: int = field(default_factory=_mint_mts_session_id)
+    """进程内单调递增 id —— Codex round 5 P2 修：``advance_after_bg_completion`` 用
+    本字段区分跨 MTS 实例（旧 MTS 的 bg 不能续命到同管理者的新 MTS）。``id()`` 会
+    随 GC 复用地址，必须用 counter。"""
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,7 +30,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ._orchestrator_chain import AIChainOps
 from ._orchestrator_consts import _UNSET
@@ -156,6 +156,12 @@ class Orchestrator:
         # 旧测试夹具裸构 ``Orchestrator``（active_guest_names is None）时 let_speak
         # 跳过 set 维护——保持 P11 之前测试零改。
         self.active_guest_names: Optional[set[str]] = None
+        # P11.2.X：``RoomRuntime.has_pending_mts_bg`` 的窄注入点 —— drain 收尾
+        # （``run_pending_handoff``）凭此判断「MTS 还要不要等」，若仍有 manager-
+        # attributed bg 未完成，不触发 ``MANAGER_FINISHED`` 收尾。
+        # server ``_attach_runtime_state`` 重绑指向当前 runtime 的 bound method；
+        # 测试 / 裸构默认 ``lambda: False``（无 bg run）保 P11 之前行为零改。
+        self._has_pending_mts_bg: Callable[[], bool] = lambda: False
 
         # P5.4 茶客自动归集：每个 pick 周期末尾扫 active task 的 ``artifacts/``，
         # diff "上次扫到的文件名 set" emit hint + ``task_info``。逻辑搬到

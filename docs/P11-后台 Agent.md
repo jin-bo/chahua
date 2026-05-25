@@ -226,8 +226,11 @@ finally:
 ## MTS × `spawn_agent_run`
 
 - MTS `_intercept_task_proposal` 只拦 `TASK_PROPOSAL`，**不**拦 `agent_run_*`。
-- 管理者用 `spawn_*` 不消耗 MTS budget、不计入 `_consecutive_ai_turns`，但仍占 `max_agent_runs_per_room`。
-- 这是有意的：MTS budget 控制串行深度、`spawn_*` 是并行调度，两者正交。工具描述 / MTS 启动提示写明「MTS 中可用 `spawn_agent_runs` 绕开 budget 做并发分发」。
+- 管理者 `spawn_*` 创建 bg run 时**不立即扣 budget**、**不增 `_consecutive_ai_turns`**，但仍占 `max_agent_runs_per_room`。
+- **P11.2.X 续命闭环**：管理者 spawn 的 bg run（`source_guest == ms.manager_guest`）在 `_start_agent_run` 时刻被打上 `mts_managed=True` 快照。每条这样的 bg run 完成时（wrapper finally step ⑤），自动 `enqueue_handoff(DELEGATE, target=manager)` + `budget-=1` + emit `managed_session_advanced`；若房间已无 inflight，主动起 `_run_handoff_turn` 消费新 enqueue 项。drain 收尾兜底带 `_has_pending_mts_bg()` 守卫，仍有 manager-attributed bg 未完成时不触发 `MANAGER_FINISHED` —— 安静退出 drain 让 bg 完成回调来 wake。
+- **budget 语义**：从「每个 worker→manager 桥扣 1」扩展为「每个 manager→worker（含 bg）→manager 桥扣 1」—— spawn N 个 bg ≈ 用 N budget；启动 MTS 时 budget 须够覆盖预期 spawn 总数 + 后续接力次数。budget=0 时上一轮 manager 仍能跑完（`stop_reason` 在 turn 开始前还是 None）；turn 末尾 advance_after_turn 走 `BUDGET_EXHAUSTED` 收尾。
+- **退化保护**：bg 跑期间 MTS 被独立结束（user_cancel / task_closed / budget_exhausted）时，wrapper finally 续命的 None 守卫返 False，跳过续命；spawn 时刻的 `mts_managed=True` 只反映「spawn 时 MTS 活」，不强求「完成时仍活」。
+- 工具描述 / MTS 启动提示 / SKILL.md MTS 分支同步说明「MTS 中可用 `spawn_agent_runs`：每位 bg 完成会自动调度管理者复查一次，扣 1 budget」。SKILL 不再教「bg 完成后自留 `propose_delegate(target=self)` 兜底卡」—— MTS 内系统自动续命，自留卡反而被 hook 静默吞掉。
 
 ## 前端
 

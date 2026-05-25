@@ -31,6 +31,9 @@ class _FakeOrchestrator:
     def __init__(self, guests: tuple[str, ...]) -> None:
         self.guest_names: tuple[str, ...] = guests
         self.active_guest_names: Optional[set[str]] = None
+        # P11.2.X F9：_start_agent_run 读 ``managed_session`` 公开 @property（不再
+        # ``getattr`` 兜底）—— 测试 fake 必须显式提供同名 attr，None 即「无 MTS」。
+        self.managed_session = None
 
 
 class _FakeRoom:

@@ -203,9 +203,14 @@ class HandoffDrainOps:
                 # `not has_next` 还可能是「队首项 cost 撞顶」—— 此时 _handoff_queue 非空，
                 # 该项是管理者真派下的活，应留队等 cap reset 后续 drain，不能当
                 # manager_finished 结束并清队（Codex review P2）。
+                # P11.2.X 续命守卫：管理者 spawn 的 bg run 仍在跑 → MTS 等 bg 完成
+                # 由 wrapper finally 续 enqueue 管理者复查（``advance_after_bg_completion``）；
+                # 此时如果 MANAGER_FINISHED 收尾，bg 完成后 MTS 已死、续命 no-op、
+                # manager 复查永不发生。安静退出 drain 让 bg 来 wake。
                 if (
                     orch._mts_ops._managed_session is not None
                     and not orch._handoff_queue
+                    and not orch._has_pending_mts_bg()
                 ):
                     orch._mts_ops.end_managed_session(
                         sink, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
@@ -216,9 +221,12 @@ class HandoffDrainOps:
         # 光 / cost 撞顶）上面 body 内的收尾兜底跑不到。补一处：MTS 还活着且队列已空
         # → manager_finished（Codex review P2）。cost-break 留了能跑的队首项 → 队列
         # 非空 → 不结束（那是「下次用户触发再续」的暂停，不是终止）。
+        # P11.2.X 续命守卫：与 body 内同理 —— manager-attributed bg 未完成时不
+        # 收尾，让 wrapper finally 经 ``advance_after_bg_completion`` 续 enqueue。
         if (
             orch._mts_ops._managed_session is not None
             and not orch._handoff_queue
+            and not orch._has_pending_mts_bg()
         ):
             orch._mts_ops.end_managed_session(
                 sink, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
