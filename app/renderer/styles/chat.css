@@ -6,6 +6,19 @@
   width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
   flex-shrink: 0; margin-top: 2px;
 }
+/* 双击头像 = 拍一拍 → 指派下一句。pointer 是可点击提示；patted 由 JS 在 dblclick 时
+   赋上、动画结束自然停（动画态 forwards 无所谓——下一次拍前会先 remove 重启）。 */
+.msg-avatar-pat { cursor: pointer; }
+.msg-avatar-pat:hover { box-shadow: 0 0 0 2px rgba(120, 160, 110, 0.45); }
+.msg-avatar-patted { animation: msg-avatar-pat-bounce 380ms ease-out; }
+@keyframes msg-avatar-pat-bounce {
+  0%   { transform: translateX(0) scale(1); }
+  20%  { transform: translateX(-3px) scale(1.08); }
+  40%  { transform: translateX(3px) scale(1.08); }
+  60%  { transform: translateX(-2px) scale(1.04); }
+  80%  { transform: translateX(2px) scale(1.02); }
+  100% { transform: translateX(0) scale(1); }
+}
 
 /* 气泡通用：圆角、padding、最大宽 75%（短消息自动收缩）。一边角削成 4px 当"尾巴"指方向。
    position:relative 给 .bubble-copy 提供定位锚（绝对定位 hover 出现的复制按钮）。 */

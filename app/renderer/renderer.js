@@ -289,8 +289,17 @@ const {
   stickToBottom,
   afterAppendMessage: messageFilter.afterAppendMessage,
   onRequestReview: requestReview,
+  onPatGuest: patGuest,
   artifactCallbacks,
 });
+
+// 「拍一拍」—— 双击茶客头像 → handoff_delegate。镜像 assign_popover 单人路径的 inbound
+// （target = 被拍者，无 reason）；socket 已断则静默。
+function patGuest(name) {
+  if (!connection.isConnected()) return;
+  send({ type: Inbound.HANDOFF_DELEGATE, target: name });
+  setStatus("", `拍了拍「${name}」—— 已指派下一句`);
+}
 
 // ── sidebar 装配（room_info）────────────────────────────────────────
 

@@ -32,6 +32,8 @@ export function createChatStream({
   stickToBottom,
   afterAppendMessage,
   onRequestReview,
+  // 「拍一拍」—— 双击茶客头像触发；调用方按 handoff_delegate 转发。缺省时只渲不挂监听。
+  onPatGuest = null,
   // 「气泡后挂图片 / 下载链」用：调用方注入 `{onRequestPreview(rel), onRequestDownload(rel)}`，
   // 缺省时挂件依然渲染、但点击 / 占位图字节无回路（适合无 ws 测试 harness）。
   artifactCallbacks = null,
@@ -51,7 +53,21 @@ export function createChatStream({
     if (messageId) li.dataset.messageId = messageId;
     if (taskId) li.dataset.taskId = taskId;
     li.dataset.speaker = speaker;
-    li.appendChild(makeAvatar(speaker, "msg-avatar"));
+    const avatarEl = makeAvatar(speaker, "msg-avatar");
+    if (onPatGuest) {
+      avatarEl.classList.add("msg-avatar-pat");
+      avatarEl.title = `双击拍一拍「${speaker}」—— 指派下一句`;
+      avatarEl.addEventListener("dblclick", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        // 重启 CSS 动画：先移除 class 触发回流再加回。
+        avatarEl.classList.remove("msg-avatar-patted");
+        void avatarEl.offsetWidth;
+        avatarEl.classList.add("msg-avatar-patted");
+        onPatGuest(speaker);
+      });
+    }
+    li.appendChild(avatarEl);
     const bubble = document.createElement("div");
     bubble.className = "bubble bubble-guest";
     const header = document.createElement("div");
