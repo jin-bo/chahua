@@ -56,6 +56,30 @@ class AgentRun:
     source_guest: Optional[str] = None
     """``issued_by == "agent"`` 时的发起茶客名（``spawn_*`` 调用方）；``"user"`` 时为 ``None``。"""
 
+    mts_managed: bool = False
+    """spawn 时刻 MTS 快照：``True`` 当且仅当 ``_start_agent_run`` 创建本 run 时
+    房间 MTS 活、且 ``source_guest == ms.manager_guest``。bg wrapper finally 凭此
+    决定是否在 run 结束后续命 MTS（enqueue 管理者复查 + 扣 1 budget），与 P11.2.X
+    「每 bg 完成 → 调度管理者复查一次」语义对齐。
+
+    **spawn 时刻冻结**，不跟随后续 MTS 状态变化 —— bg 跑期间 MTS 若被
+    cancel/budget_exhausted 结束，wrapper finally 的「MTS 仍活」守卫会跳过续命。
+    """
+
+    mts_manager_at_spawn: Optional[str] = None
+    """spawn 时刻 MTS 的 ``manager_guest`` 身份（当 ``mts_managed=True`` 时必填）。
+    code-review F3 修：MTS 跑期间用户可能 stop + 重启新 MTS 换主，``advance_after_bg_completion``
+    必须用本字段 vs 当前 ``ms.manager_guest`` 校验「这条 bg 对应的还是原管理者吗」，
+    不匹配则跳过续命（不能把 Bob 复查任务硬塞给原本 Alice 该处理的工作）。``None``
+    对应 ``mts_managed=False``。"""
+
+    mts_session_id_at_spawn: Optional[int] = None
+    """spawn 时刻 MTS 的会话身份（``ManagedSession`` 对象 ``id()``）。**Codex round 5
+    P2**：仅校验 ``manager_guest`` 不够 —— 用户 stop MTS A、重启 MTS B 用同一管理者
+    时旧守卫会通过、A 的 bg 完成时会污染 B 的 budget / queue。本字段冻结 spawn 时的
+    ``ManagedSession`` 对象 id，``advance_after_bg_completion`` 比对 ``id(current_ms)``
+    严格区分两个 MTS 实例。``None`` 对应 ``mts_managed=False``。"""
+
     created_at_ms: int = field(default_factory=now_ms)
     """创建时间戳（Unix ms）。``default_factory`` 在每次实例化时调用 :func:`now_ms` —
     保证直接构造 ``AgentRun(...)`` 也能拿到真实时间戳（不靠 :func:`create` 工厂兜底），
@@ -70,11 +94,16 @@ def create(
     task_id: Optional[str] = None,
     issued_by: IssuedBy = AGENT_RUN_ISSUED_BY_USER,
     source_guest: Optional[str] = None,
+    mts_managed: bool = False,
+    mts_manager_at_spawn: Optional[str] = None,
+    mts_session_id_at_spawn: Optional[int] = None,
 ) -> AgentRun:
     """工厂 —— mint ``run_id`` + 打时间戳。
 
     inbound / ``spawn_*`` 工具走同一入口构造 ``AgentRun``，保证 ``run_id`` 形态与
-    时间戳口径统一。
+    时间戳口径统一。``mts_managed`` / ``mts_manager_at_spawn`` / ``mts_session_id_at_spawn``
+    由 ``_start_agent_run`` 在 spawn 时刻按 MTS 快照传入（三者一致：``mts_managed=True``
+    时 manager 与 session_id 都非 None）。
     """
     return AgentRun(
         run_id=new_agent_run_id(),
@@ -84,5 +113,8 @@ def create(
         task_id=task_id,
         issued_by=issued_by,
         source_guest=source_guest,
+        mts_managed=mts_managed,
+        mts_manager_at_spawn=mts_manager_at_spawn,
+        mts_session_id_at_spawn=mts_session_id_at_spawn,
         created_at_ms=now_ms(),
     )

@@ -132,6 +132,112 @@ class ManagedSessionOps:
             return MANAGED_SESSION_REASON_CAP_REACHED
         return None
 
+    def advance_after_bg_completion(
+        self,
+        sink: EnvelopeSink,
+        *,
+        bg_guest_name: str,
+        mts_manager_at_spawn: Optional[str] = None,
+        mts_session_id_at_spawn: Optional[int] = None,
+    ) -> bool:
+        """P11.2.X：bg run 完成后续命 MTS —— 扣 1 budget + enqueue 管理者复查 +
+        emit ``managed_session_advanced``。返 ``True`` = MTS 续上（调用方需保证有
+        drain 在跑或主动起一个）；``False`` = 跳过（MTS 已不活 / 换主 / 已耗尽 /
+        task 关 / cap 撞）。
+
+        语义对齐：bg run（manager spawned）扮演 worker 角色，完成相当于 worker→
+        manager 桥；与现有 :meth:`advance_after_turn` 的 worker 路径完全等价
+        （budget-=1 + enqueue + emit_advanced）。**budget 是「管理者复查回合数」语义**
+        —— 每次 bg 完成触发一次复查就该扣 1。
+
+        **四档跳过分支**（code-review F2 + F3）：
+        ① MTS 不活（``_managed_session is None``）—— bg 跑期间已被
+           ``end_managed_session``（user_cancel / task_closed 等）独立结束。
+        ② **manager 身份不匹配**（``mts_manager_at_spawn != ms.manager_guest``）——
+           spawn 时管理者 Alice，bg 跑期间用户 stop MTS A、重启 MTS B 换主 Bob。本
+           bg 不该把 Alice 的工作硬塞给 Bob 复查（reason 文案也指向错对象）。
+        ③ **`stop_reason()` 命中**（budget/task_closed/cap_reached）—— 与
+           :meth:`advance_after_turn` 同口径预判：bg 完成时若 MTS 已该结束（如另一
+           个并发 bg 桥刚把 budget 扣到 0），直接走 ``end_managed_session(reason)``
+           而非继续 enqueue 一个无用复查 turn 烧管理者一次 LLM 调用。
+        ④ **budget 已 ≤0**（极端竞态：stop_reason 没显示但本地预判）—— ``stop_reason``
+           走 ``budget <= 0`` 判定，这里冗余但显式：避免 ``managed_session_advanced``
+           emit ``remaining_budget: -1`` 反人类数。
+
+        正常路径：① stop_reason 不命中 → ② 扣 1 budget → ③ enqueue 管理者复查 →
+        ④ emit_advanced + queue_snapshot → 返 True。
+        """
+        ms = self._managed_session
+        if ms is None:
+            return False
+        # F3 守卫：spawn 时刻 manager vs 当前 manager 不匹配 → 跳过。
+        if (
+            mts_manager_at_spawn is not None
+            and mts_manager_at_spawn != ms.manager_guest
+        ):
+            _log.warning(
+                "advance_after_bg_completion: spawn-time manager %r != current "
+                "manager %r — bg run is orphaned across MTS sessions, skipping",
+                mts_manager_at_spawn, ms.manager_guest,
+            )
+            return False
+        # Codex round 5 P2 守卫：spawn 时刻 MTS session_id（``ManagedSession.session_id``
+        # 单调递增）vs 当前 ms.session_id 不匹配 → 跳过。覆盖「同管理者重启 MTS」漏洞
+        # —— manager_guest 一致但 ManagedSession 是新实例（session_id 不同），旧 MTS
+        # 的 bg 不能续命到新 MTS。用 counter 而非 ``id()`` 因 CPython 内存地址会被 GC 复用。
+        if (
+            mts_session_id_at_spawn is not None
+            and mts_session_id_at_spawn != ms.session_id
+        ):
+            _log.warning(
+                "advance_after_bg_completion: spawn-time MTS session_id %r != "
+                "current %r — bg run belongs to a previous MTS instance, skipping",
+                mts_session_id_at_spawn, ms.session_id,
+            )
+            return False
+        # F2 + Codex P2 (round 3/4) 守卫：stop_reason 命中分两类处理：
+        #
+        # - ``BUDGET_EXHAUSTED``：多 bg deferred callback 串跑时的特定 race ——
+        #   ① cb_bg1: budget=1>0, decrement=0, enqueue review_bob, start drain1。
+        #   ② cb_bg2 紧接跑: advance → stop_reason → budget=0 → BUDGET_EXHAUSTED。
+        #   若直接 end_managed_session 会清队列 → drain1 还没启动就看到队列空 →
+        #   review_bob 丢失。加 queue-empty 守卫：cb_bg2 见队列非空（review_bob）→
+        #   不 end 不动队列，仅 return False 跳过自己 enqueue（budget 已耗尽），drain1
+        #   正常跑 review_bob，review_bob 完成后下一轮 advance_after_turn 按
+        #   BUDGET_EXHAUSTED 正确收尾。
+        #
+        # - ``TASK_CLOSED`` / ``CAP_REACHED``：任务关 / cap 撞 —— 这些 stop reason
+        #   与队列内容无关，队列里残留 review 跑也无意义（任务都关了 / cap 撞了再跑
+        #   会破 cap 不变量）。**Codex round 4 P2-A**：原版误把 BUDGET 守卫推广到所有
+        #   stop reason 会让 task_closed 时 MTS 卡住不 end，drain 也不会被起 → MTS
+        #   永远活；窄化守卫仅 BUDGET_EXHAUSTED 才分流。
+        #
+        # **这条守卫只能加在 bg path，不能加在 advance_after_turn**（后者动了会破
+        # 「budget=N → 最多 N worker turn」严格语义，见
+        # test_budget_one_runs_one_worker_then_exhausted）。
+        stop = self.stop_reason()
+        if stop:
+            if (
+                stop == MANAGED_SESSION_REASON_BUDGET_EXHAUSTED
+                and self.orch._handoff_ops._queue
+            ):
+                # 多 bg race 场景：让队列里的 review 跑完，advance_after_turn 收尾。
+                return False
+            # TASK_CLOSED / CAP_REACHED / (BUDGET + queue 空) → 正常 end。
+            self.end_managed_session(sink, reason=stop)
+            return False
+        ms.budget -= 1
+        self.orch._handoff_ops.enqueue_handoff(
+            HandoffItem(
+                kind=HandoffKind.DELEGATE,
+                target=ms.manager_guest,
+                reason=f"bg {bg_guest_name} 已完成 · 托管复查",
+            )
+        )
+        self.orch._handoff_ops.emit_handoff_queue_snapshot(sink)
+        self._emit_advanced(sink, ms)
+        return True
+
     def advance_after_turn(
         self, item: HandoffItem, sink: EnvelopeSink,
     ) -> None:

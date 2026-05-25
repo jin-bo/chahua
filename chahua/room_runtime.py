@@ -137,6 +137,13 @@ class RoomRuntime:
     agent_run_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     active_guest_names: set[str] = field(default_factory=set)
 
+    # P11.2.X Codex P2 修：bg → MTS 续命「延迟到 inflight done」机制的待跑计数。
+    # 当 bg wrapper finally step ⑤ 因有 inflight（handoff drain 或 user turn）而延后
+    # 续命时，先在这里 +1；done_callback 跑完 advance + 起 drain 后 -1。drain 收尾兜
+    # 底的 ``has_pending_mts_bg()`` 守卫读 ``agent_runs`` + 本计数 OR 起来 —— 若 bg
+    # 已 pop 但 deferred advance 还没跑，仍能让 MTS 等住不被误触 MANAGER_FINISHED 收尾。
+    pending_mts_continuations: int = 0
+
     def inflight_alive(self) -> bool:
         """该房间是否有 turn / handoff drain 正在跑。
 
@@ -151,8 +158,31 @@ class RoomRuntime:
         ``bool(agent_runs)`` 即权威活跃状态（P11 设计 §「运行态」）。"""
         return bool(self.agent_runs)
 
+    def has_pending_mts_bg(self) -> bool:
+        """该房间是否还有 ``mts_managed=True`` 的存活 bg run **或**已 pop 但 deferred
+        续命动作未完成的 bg run。
+
+        P11.2.X「MTS × spawn 续命」用：
+        - drain 收尾兜底（``run_pending_handoff``）凭此判断「MTS 还要不要等」——
+          若仍有 manager-attributed bg 未完成 / 仍有延迟续命未跑，不触发
+          ``MANAGER_FINISHED`` 收尾，让 bg 完成回调来 enqueue 复查。
+        - bg wrapper finally 续命 step 不直接读本 helper（它判定 ``run.mts_managed``
+          自身字段即可），但「最后一个 manager bg 收尾、其他 manager bg 是否还在」
+          的诊断查询经此走。
+
+        **Codex P2 修**：``agent_runs`` 在 wrapper finally 第 ③ 步就被 pop，但第 ⑤
+        步若因 inflight 非空而 deferred 到 done_callback，期间 ``has_pending_mts_bg``
+        会假性返 False → drain 误触 MANAGER_FINISHED → MTS 死、deferred callback
+        再跑时 ms is None 续命 no-op → 管理者复查丢失。``pending_mts_continuations``
+        计数让 deferred 期 has_pending 仍为 True，drain 守卫正确等住。
+        """
+        return (
+            any(run.mts_managed for run in self.agent_runs.values())
+            or self.pending_mts_continuations > 0
+        )
+
     def busy_alive(self) -> bool:
-        """该房间是否有「任意」活跃运行（前台 turn or bg run）。
+        """该房间是否有「任意」活跃运行（前台 turn or bg run or 待跑 MTS 续命）。
 
         **P11 设计 §「运行态」窄替换**：本方法只在「runtime 生命周期 / 房间 busy
         展示」分支替代 ``inflight_alive``：
@@ -163,8 +193,19 @@ class RoomRuntime:
         前台 turn 控制语义（cancel 按钮、单 in-flight 防御）**仍走** ``inflight_alive``
         —— 后台 bg run 是用户自己拉起的并行工作，不能被「停止当前回答」误杀，也不
         阻止新前台 user_message 起新 turn。
+
+        **Codex P1 (round 2)**：``pending_mts_continuations > 0`` 也算 busy ——
+        deferred 续命 callback 还没跑、advance + 起 drain 还在等当前 inflight done。
+        若此时 ``_run_turn`` / ``_run_handoff_turn`` 的 finally 调 self_destruct，
+        background runtime 会被销毁、callback 跑时 runtime 已 close、续命 no-op、
+        review 丢失。把待跑计数计入 busy 让 self_destruct 等住、callback 起 drain
+        后 drain finally 再触发真正的 self_destruct。
         """
-        return self.inflight_alive() or self.has_active_runs()
+        return (
+            self.inflight_alive()
+            or self.has_active_runs()
+            or self.pending_mts_continuations > 0
+        )
 
     def guest_busy(self, name: str) -> bool:
         """名为 ``name`` 的茶客是否「已占用 / 即将 speak」。
@@ -185,8 +226,18 @@ class RoomRuntime:
 
         两字段必须 same-time live or same-time None —— assertion 把漂移在写入点
         炸出来（原 ``ChahuaServer._set_inflight`` 的语义，P9 下沉到 runtime）。
+
+        **F11 防覆盖**：写入新非空 task 时旧槽必须为空（None）或已 done()。否则就是
+        「把一个未跑完 finally 的 task 引用顶掉」—— 旧 task finally 接着跑会 ``set
+        _inflight(None, None)`` 把刚设的新 task 引用清掉，新 task 失去 strong ref。
         """
         assert (task is None) == (kind is None), (task, kind)
+        if task is not None:
+            old = self.inflight_task
+            assert old is None or old.done(), (
+                f"set_inflight overwriting live slot: old={old!r} kind={self.inflight_kind!r}, "
+                f"new task={task!r} kind={kind!r}"
+            )
         self.inflight_task = task
         self.inflight_kind = kind
 

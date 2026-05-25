@@ -34,6 +34,14 @@ class _FakeOrch:
     def __init__(self, guest_names: tuple[str, ...]) -> None:
         self.guest_names: tuple[str, ...] = guest_names
         self.active_guest_names: Optional[set[str]] = None
+        # P11.2.X F9：_start_agent_run 读 ``managed_session`` 公开 @property。
+        self.managed_session = None
+        # _make_start_agent_run 闭包在 task_id=None 时默认填 active task_id。
+        # fake 默认 None（与"无活跃任务"一致），关心 active 的测试覆盖此 attr。
+        self._active_task_id: Optional[str] = None
+
+    def snapshot_active_task_id(self) -> Optional[str]:
+        return self._active_task_id
 
 
 class _FakeRoom:
@@ -311,6 +319,54 @@ async def test_make_start_agent_run_callback_returns_run_id_tuple() -> None:
     # source_guest 透传到 AgentRun。
     assert rt.agent_runs[run_id].source_guest == "Carol"
     assert rt.agent_runs[run_id].issued_by == AGENT_RUN_ISSUED_BY_AGENT
+    # 房间无活跃任务（_FakeOrch 默认 active_task_id=None）—— run 不绑任何 task。
+    assert rt.agent_runs[run_id].task_id is None
+    await _drain(rt)
+
+
+async def test_make_start_agent_run_defaults_task_id_to_active() -> None:
+    """``_make_start_agent_run`` 闭包默认行为：调用方未传 ``task_id`` 时，
+    自动填房间当前 active task_id。
+
+    场景：管理者茶客调 ``spawn_agent_run`` 不传 task_id —— bg agent 应自动拿到
+    ``<current_task>`` 上下文（绑 active task）。茶客 prompt 里看不到 task_id 字符串，
+    这是工具事实可用的唯一路径。
+    """
+    sink: list[ChahuaEnvelope] = []
+    srv, rt = _make_server(
+        sink, guest_names=("Bob",), tasks={"t-active": _FakeTask("open")},
+    )
+    rt.session.orchestrator._active_task_id = "t-active"  # type: ignore[attr-defined]
+    cb = srv._make_start_agent_run(rt)
+    run_id, err = cb(
+        target="Bob", instruction="x", task_id=None, source_guest="Carol",
+    )
+    assert err is None
+    assert run_id is not None
+    # 闭包默认填了 active —— run 绑到 active task。
+    assert rt.agent_runs[run_id].task_id == "t-active"
+    await _drain(rt)
+
+
+async def test_make_start_agent_run_explicit_task_id_overrides_active() -> None:
+    """调用方显式传 ``task_id`` 时仍走显式值（默认逻辑只在 None 时触发）。"""
+    sink: list[ChahuaEnvelope] = []
+    srv, rt = _make_server(
+        sink, guest_names=("Bob",),
+        tasks={
+            "t-active": _FakeTask("open"),
+            "t-other": _FakeTask("open"),
+        },
+    )
+    rt.session.orchestrator._active_task_id = "t-active"  # type: ignore[attr-defined]
+    cb = srv._make_start_agent_run(rt)
+    run_id, err = cb(
+        target="Bob", instruction="x",
+        task_id="t-other", source_guest="Carol",
+    )
+    assert err is None
+    assert run_id is not None
+    assert rt.agent_runs[run_id].task_id == "t-other"
     await _drain(rt)
 
 

@@ -65,7 +65,10 @@ from .room_runtime import (
     RoomEventRouter,
     RoomRuntime,
 )
-from .handoff import MANAGED_SESSION_REASON_USER_CANCEL
+from .handoff import (
+    MANAGED_SESSION_REASON_MANAGER_FINISHED,
+    MANAGED_SESSION_REASON_USER_CANCEL,
+)
 from .orchestrator import OrchestratorConfig
 # Re-export 给测试 / 外部调用方（``from chahua.server import _llm_summary`` 路径不变）。
 from .server_room_snapshot import (  # noqa: F401
@@ -334,6 +337,10 @@ class ChahuaServer:
         调用点：``_session.setter``（首次 / 同房重建）+ ``_switch_room``（切房目标）。
         """
         runtime.session.orchestrator.active_guest_names = runtime.active_guest_names
+        # P11.2.X：把 has_pending_mts_bg 谓词绑到 orchestrator —— drain 收尾兜底
+        # （``run_pending_handoff``）凭此判断「MTS 还要不要等」。bound method 闭合
+        # runtime，切房经 _attach_runtime_state 重绑即指向新 runtime。
+        runtime.session.orchestrator._has_pending_mts_bg = runtime.has_pending_mts_bg
         # P11.2 C11：每个 guest 槽位指向当前 runtime 的回调。``register_agent_run_tools``
         # 在 ``TeaGuest.__init__`` 时用闭包 ``lambda: self.start_agent_run`` 注册，工具
         # 实例每次 ``execute`` 经 getter 读 instance attr —— 装配期写一次，运行期读多次。
@@ -354,6 +361,16 @@ class ChahuaServer:
 
         ``issued_by`` 在工具路径恒 ``"agent"``（spawn 工具是茶客调用产物）；inbound
         路径不经此回调、直接调 ``_start_agent_run`` 传 ``"user"``。
+
+        **task_id 默认值**：调用方传 ``None`` 时闭包会默认填房间当前 active task_id
+        （经 ``orchestrator.snapshot_active_task_id()``）。原因：茶客 prompt 上下文里
+        看不到 task_id 字符串值（``<current_task>`` 块只暴露 ``status`` 属性，不暴露 id），
+        ``spawn_agent_run`` 工具的可选 ``task_id`` 参数对茶客事实上不可达；默认绑 active
+        让管理者派出去的 bg agent 自动拿到 ``<current_task>`` 上下文（plan / status 文件
+        清单），否则 bg agent 只能凭 instruction 字面摸黑工作。房间无活跃任务时
+        ``snapshot_active_task_id()`` 返 ``None``，行为与改前一致。**inbound 不走此闭包**
+        （直接调 ``_start_agent_run``），UI 端的 ``agent_run_start`` 帧仍按用户显式意图
+        传 task_id，不做默认。
         """
         def start(
             *,
@@ -362,6 +379,8 @@ class ChahuaServer:
             task_id: Optional[str] = None,
             source_guest: Optional[str] = None,
         ) -> tuple[Optional[str], Optional[str]]:
+            if task_id is None:
+                task_id = runtime.session.orchestrator.snapshot_active_task_id()
             run, err = self._start_agent_run(
                 runtime,
                 target=target,
@@ -430,7 +449,43 @@ class ChahuaServer:
                 f"房间 bg run 数已达上限 {MAX_AGENT_RUNS_PER_ROOM}，稍后再试"
             )
 
+        # P11.2.X 快照 MTS 状态：读 ``managed_session`` 公开 @property（code-review F9
+        # 改：原 ``getattr(orch, '_managed_session', None)`` 默认值会静默吞 @property
+        # body 内的 AttributeError 让真初始化 bug 退化为「mts_managed 永远 False」；
+        # 改直接走 @property 让 init bug 立即抛出，测试 fake 必须显式装一致的 attr）。
+        ms = runtime.session.orchestrator.managed_session
+
+        # 5. F12：MTS 活时拒绝 ``target == manager_guest`` —— 否则该 bg run 期间 bg agent
+        # 调 ``propose_delegate`` / ``propose_panel`` 会满足 ``proposer == manager`` 被
+        # ``intercept_task_proposal`` 自动入 MTS 队列污染托管会话；且本 bg 是 user 手起
+        # （``mts_managed=False`` 因 ``source_guest`` 通常 None）→ 不会触发 step ⑤ 续命，
+        # 工作量错配。MTS 内要让管理者本人发言，请用前台 ``@manager`` 或 stop MTS 再交互。
+        if (
+            ms is not None
+            and target == ms.manager_guest
+        ):
+            return None, (
+                f"target={target!r} 是当前 MTS 管理者，bg run 指向管理者会污染托管"
+                f"队列（intercept hook 自动入队），请改用 @{target} 或先 stop MTS"
+            )
+
         # ── 校验通过：登记 + 启动 wrapper + emit started ──
+        # P11.2.X：spawn 时刻 MTS 快照 —— 当且仅当 MTS 活、且 source_guest 就是当前
+        # 管理者本人时，标记本 bg 为「manager-attributed」。bg wrapper finally 凭此
+        # 决定要不要在 run 结束时续命 MTS（enqueue 管理者复查 + 扣 1 budget）。
+        # 用户手起的 bg（issued_by="user", source_guest=None）天然 False；其他茶客
+        # spawn 本管理者也不算 manager-attributed —— 只有管理者自己 spawn 才算。
+        mts_managed = (
+            ms is not None
+            and source_guest is not None
+            and source_guest == ms.manager_guest
+        )
+        # F3：冻结 spawn 时刻 manager 身份，wrapper finally 凭此校验「跑完时还是同一个
+        # 管理者吗」—— 防 MTS 跑期间换主把 Alice 的复查塞给 Bob。
+        # Codex round 5 P2：再加 session_id（``ManagedSession`` 对象 id）严格区分跨
+        # MTS 实例 —— 同管理者重启新 MTS 时旧 bg 不能续命到新 MTS（污染 budget/queue）。
+        mts_manager_at_spawn = ms.manager_guest if mts_managed else None
+        mts_session_id_at_spawn = ms.session_id if mts_managed else None
         run = create_agent_run(
             room_id=runtime.room_id,
             guest_name=target,
@@ -438,6 +493,9 @@ class ChahuaServer:
             task_id=task_id,
             issued_by=issued_by,
             source_guest=source_guest,
+            mts_managed=mts_managed,
+            mts_manager_at_spawn=mts_manager_at_spawn,
+            mts_session_id_at_spawn=mts_session_id_at_spawn,
         )
         # 登记顺序：**先** ``active_guest_names.add(target)`` —— ``guest_busy``
         # 的唯一数据源，CLAUDE.md §「运行态」明确「add 必先于任何 await」。再
@@ -1194,6 +1252,39 @@ class ChahuaServer:
                     _log.warning(
                         "bg run %s: emit terminal failed", run_id, exc_info=True,
                     )
+                # ⑤ P11.2.X MTS 续命：本 run 是 manager-attributed（spawn 时刻管理者
+                # 本人 spawn 且 MTS 活）且**正常完成**（非 CANCELLED / ERROR）→ 扣 1
+                # budget + enqueue 管理者复查 + emit advanced；若房间已无 inflight →
+                # 主动起 _run_handoff_turn 消费；若 user turn 在跑 → 注册 done_callback
+                # 等 user turn 完成后再起 drain。MTS 已结束 / 换主 / stop_reason 命中
+                # → ``advance_after_bg_completion`` 守卫返 False 跳过续命。
+                #
+                # 守卫细节（code-review F1/F4/F6/F8）：
+                # - F1：CANCELLED / ERROR 终态不续命。用户主动 cancel 了 bg、或 bg 内
+                #   部 crash —— 这两类「不算管理者复查触发」（reason 文案『已完成』也
+                #   不诚实）。FINISHED 才是「真正交付了产物」可触发管理者复查。
+                # - F4：user turn 在跑时不要硬抢 inflight 槽，但 stranded 复查项不能等
+                #   下次 user_message 才被动 pick up（budget 已扣、advanced 已 emit）。
+                #   用 ``add_done_callback`` 让 user turn 完成后立刻起 drain。
+                # - F6：``create_task`` 失败（如 event loop closing）→ MTS 状态已不一
+                #   致（budget 减、enqueue、advanced 发完但 drain 起不来）→ 兜底
+                #   ``end_managed_session(user_cancel)`` 让 MTS 显式 terminate 而非
+                #   悬挂，前端能看到 ENDED 而非永久『等待中』。
+                # - F8：原 ``assert ms is not None`` 在 python -O 下被剥光，TOCTOU 也
+                #   可race。改 ``if ms is None: return`` 显式分支。
+                if run.mts_managed:
+                    if terminal_type is ChahuaEventType.AGENT_RUN_FINISHED:
+                        self._continue_mts_after_bg(
+                            runtime, run, run_id=run_id, guest_name=guest_name,
+                        )
+                    else:
+                        # Codex round 8 P2：CANCELLED / ERROR 终态 —— 无 review 可加
+                        # 但若本 bg 是最后一个 pending mts bg，drain 的 has_pending
+                        # guard 之前为它守住了 MTS，现在没人会触发收尾 → MTS 永久卡。
+                        # 检查并主动 end_managed_session(MANAGER_FINISHED) 兜底。
+                        self._handle_mts_bg_terminal_non_finished(
+                            runtime, run_id=run_id,
+                        )
         finally:
             # 外层 finally 唯一职责：discard guest_name + 自毁判定。
             runtime.active_guest_names.discard(guest_name)
@@ -1203,6 +1294,366 @@ class ChahuaServer:
                 _log.warning(
                     "bg run %s: self destruct failed", run_id, exc_info=True,
                 )
+
+    def _handle_mts_bg_terminal_non_finished(
+        self, runtime: RoomRuntime, *, run_id: str,
+    ) -> None:
+        """Codex round 8 / 9 P2 修：mts_managed bg 以 CANCELLED / ERROR 终态结束的兜底。
+
+        ``advance_after_bg_completion`` 不能用（没有 review 该 enqueue），但需要保证
+        MTS 不被这条 bg 永久守在「等 review」状态。本方法按以下顺序判断：
+
+        - inflight 有 → **defer 到 inflight done** 后递归 re-evaluate。**Codex round 9
+          P2**：原版假设「inflight 自然 evaluate」只对 handoff drain 成立 —— ``_run_turn``
+          (user turn) 没有 MTS guard 逻辑，user turn 结束只清 inflight 不动 MTS，会让
+          MTS 永久卡。Defer 到 inflight done 强制 re-evaluate。
+        - 仍有其他 pending mts bg（agent_runs 中 mts_managed=True 的 / counter>0）
+          → 等它们完成回调时统一评估，不动。
+        - 队列还有项 → 起一个 drain 让 ``run_pending_handoff`` 跑完（队列项跑完自然
+          触发 advance_after_turn → stop_reason → end_managed_session）。
+        - 队列空 + 无 inflight + 无其他 mts bg + MTS 仍活 → 直接调
+          ``end_managed_session(MANAGER_FINISHED)``。这是「最后一个 bg 失败 / 取消，
+          管理者没有任何后续可做」语义。
+        """
+        if runtime.inflight_alive():
+            # Codex round 9 P2: 不能 return 走人，必须 defer 重 evaluate。
+            self._defer_mts_non_finished_cleanup_to_inflight(
+                runtime, run_id=run_id,
+            )
+            return
+        if runtime.has_pending_mts_bg():
+            return
+        ms = runtime.session.orchestrator.managed_session
+        if ms is None:
+            return
+        if runtime.session.orchestrator._handoff_queue:
+            # 队列有其他项，起 drain 让 run_pending_handoff 跑完，自然走 stop_reason 收尾。
+            try:
+                self._start_mts_continuation_drain(runtime, ms.task_id, run_id)
+            except Exception:
+                _log.warning(
+                    "bg run %s: trigger drain after non-FINISHED failed",
+                    run_id, exc_info=True,
+                )
+            return
+        # 真无后续 → 直接结束 MTS。
+        try:
+            runtime.session.orchestrator._mts_ops.end_managed_session(
+                runtime.router, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
+            )
+        except Exception:
+            _log.warning(
+                "bg run %s: MANAGER_FINISHED end after non-FINISHED failed",
+                run_id, exc_info=True,
+            )
+
+    def _defer_mts_non_finished_cleanup_to_inflight(
+        self, runtime: RoomRuntime, *, run_id: str,
+    ) -> None:
+        """Codex round 9 P2 helper：把 ``_handle_mts_bg_terminal_non_finished``
+        的再评估延迟到当前 inflight done 后跑。
+
+        counter += 1 让 ``has_pending_mts_bg()`` 持续守住 MTS / busy_alive 守住
+        runtime；callback 中递归调 ``_handle_mts_bg_terminal_non_finished``
+        （它可能再 defer，链长被 inflight 完成自然封顶）。
+        """
+        inflight_task = runtime.inflight_task
+        if inflight_task is None or inflight_task.done():
+            # 极端 race：被调用前 inflight 又清了 → 直接 evaluate（避免无谓 defer）。
+            self._handle_mts_bg_terminal_non_finished(runtime, run_id=run_id)
+            return
+        runtime.pending_mts_continuations += 1
+        runtime_ref = runtime
+        run_id_snap = run_id
+
+        def _on_inflight_done(_done_task: object) -> None:
+            # Codex round 10 P2：必须**先**减 counter 再调 handler ——
+            # handler 内部 ``runtime.has_pending_mts_bg()`` 会读 counter；如果
+            # counter 还含本 callback 自身，handler 自检 has_pending=True 直接 return
+            # → MTS 卡死。先减让 has_pending 正确反映「还有别的 bg / 别的 defer 吗」。
+            # 若 handler 触发新 defer，那个 defer 会再 +1 counter，与现在的 -1 平衡。
+            runtime_ref.pending_mts_continuations -= 1
+            try:
+                self._handle_mts_bg_terminal_non_finished(
+                    runtime_ref, run_id=run_id_snap,
+                )
+            except Exception:
+                _log.warning(
+                    "bg run %s: deferred non-FINISHED cleanup failed",
+                    run_id_snap, exc_info=True,
+                )
+            try:
+                self._maybe_self_destruct_background_runtime(runtime_ref)
+            except Exception:
+                _log.warning(
+                    "bg run %s: deferred non-FINISHED self_destruct failed",
+                    run_id_snap, exc_info=True,
+                )
+
+        inflight_task.add_done_callback(_on_inflight_done)
+
+    def _continue_mts_after_bg(
+        self,
+        runtime: RoomRuntime,
+        run: AgentRun,
+        *,
+        run_id: str,
+        guest_name: str,
+    ) -> None:
+        """P11.2.X step ⑤ 实现：MTS 续命 + 起 drain。
+
+        合 code-review F1 / F4 / F6 / F8 / F9 + **Codex P2 deferral** 六项修订 ——
+        调用方已守卫 ``run.mts_managed == True`` + ``terminal_type == AGENT_RUN_FINISHED``，
+        本方法只关心后续路由。任一步抛异常都吞 WARN，外层 finally 继续走。
+
+        路由（按 inflight 状态分流）：
+        - **无 inflight** → 立即 ``_run_mts_continuation_advance``（同步跑 advance +
+          起 drain）。这是「单 bg / drain 已 idle」的快速路径。
+        - **有 inflight（handoff drain or user turn）** → 延迟到 inflight done 后再
+          跑 advance + 起 drain；同时 ``runtime.pending_mts_continuations += 1`` 让
+          drain 的 ``MANAGER_FINISHED`` 兜底守卫 ``has_pending_mts_bg()`` 仍返 True
+          不收尾。
+
+        **为何 handoff drain 也要 defer**（Codex P2 finding）：原版让 handoff drain
+        在 peek 阶段自然消费 enqueue 的 review；但若 bg 在 drain 跑 manager turn 时
+        completion，``advance_after_bg_completion`` 会同步 decrement budget。drain 的
+        ``advance_after_turn`` 在 manager turn 结束时调 ``stop_reason()`` 看到
+        ``budget <= 0`` → 触发 ``end_managed_session(BUDGET_EXHAUSTED)`` → 清队列
+        → review 丢失。延迟到 drain done 后再 decrement / enqueue 就避开了这段窗口
+        （那时 drain 已退出，advance_after_turn 不会再跑）。
+
+        异常兜底（F6）：deferred 路径 / 直接路径任一步抛 → ``end_managed_session
+        (user_cancel)`` 防 MTS 悬挂。
+        """
+        inflight_task = runtime.inflight_task
+        if inflight_task is None or inflight_task.done():
+            # 无 inflight → 立即跑（drain 已 idle，advance 安全无并发）。
+            self._run_mts_continuation_advance(
+                runtime, run, run_id=run_id, guest_name=guest_name,
+            )
+            return
+        # 有 inflight（handoff 或 user turn）→ 延迟到 done。
+        self._defer_mts_continuation_to_inflight(
+            runtime, run, run_id=run_id, guest_name=guest_name,
+        )
+
+    def _defer_mts_continuation_to_inflight(
+        self,
+        runtime: RoomRuntime,
+        run: AgentRun,
+        *,
+        run_id: str,
+        guest_name: str,
+    ) -> None:
+        """Schedule ``_run_mts_continuation_advance`` 等当前 inflight done 后再跑。
+
+        counter += 1 让 ``has_pending_mts_bg()`` 守住 MTS / busy_alive 守住 runtime；
+        callback 中跑 advance 后 counter -= 1 + 补一次 self_destruct 判定（round 4
+        P2-B）。**Codex round 6 P2**：本 helper 也被 ``_run_mts_continuation_advance``
+        递归调用 —— 当 advance 后发现 inflight 被新 user turn race 抢占（典型：上一
+        inflight done 与 deferred callback 之间用户发了新消息），就再 defer 到新
+        inflight 的 done，避免 review stranded。
+
+        递归终止：每次只挂一个 done_callback 到当前 inflight；inflight 必有限完成
+        （asyncio 任务），链长被用户消息频率自然封顶。
+        """
+        inflight_task = runtime.inflight_task
+        if inflight_task is None or inflight_task.done():
+            # 极端 race：被调用前 inflight 已清 → 直接跑 advance。
+            self._run_mts_continuation_advance(
+                runtime, run, run_id=run_id, guest_name=guest_name,
+            )
+            return
+        runtime.pending_mts_continuations += 1
+        runtime_ref = runtime
+        run_ref = run
+        run_id_snap = run_id
+        guest_name_snap = guest_name
+
+        def _on_inflight_done(_done_task: object) -> None:
+            try:
+                self._run_mts_continuation_advance(
+                    runtime_ref, run_ref,
+                    run_id=run_id_snap, guest_name=guest_name_snap,
+                )
+            except Exception:
+                _log.warning(
+                    "bg run %s: deferred MTS continuation failed",
+                    run_id_snap, exc_info=True,
+                )
+            finally:
+                runtime_ref.pending_mts_continuations -= 1
+                # Codex round 4 P2-B：counter 归 0 后必须再补一次自毁判定 ——
+                # 否则当 callback 返 False 不起新 drain（MTS 已 end / 换主 / budget
+                # 全消耗），busy_alive 此刻为 False 但 inflight 的 finally 早已跑过
+                # self_destruct（被 counter>0 拒），无人再触发 → background runtime
+                # 留死。``_maybe_self_destruct_background_runtime`` 自带「前台 runtime
+                # 不动」+「busy 不动」的双层守卫，重复调用安全幂等。
+                try:
+                    self._maybe_self_destruct_background_runtime(runtime_ref)
+                except Exception:
+                    _log.warning(
+                        "bg run %s: deferred self_destruct check failed",
+                        run_id_snap, exc_info=True,
+                    )
+
+        inflight_task.add_done_callback(_on_inflight_done)
+
+    def _run_mts_continuation_advance(
+        self,
+        runtime: RoomRuntime,
+        run: AgentRun,
+        *,
+        run_id: str,
+        guest_name: str,
+    ) -> None:
+        """跑 ``advance_after_bg_completion`` 一次 + 转交 dispatch（start drain 或
+        re-defer）。
+
+        **承重契约（Codex round 7 P2）**：advance **每个 bg run 只能跑一次** —— 否则
+        会重复扣 budget 重复 enqueue review。本方法跑 advance 后立即 hand off 给
+        :meth:`_dispatch_mts_drain_or_defer`，后者只做调度（start drain / 再次 defer）
+        不再 touch advance。re-defer 的 callback 直接调 ``_dispatch_*``，不会回到
+        本方法。
+
+        共用于直接路径（无 inflight，``_continue_mts_after_bg`` 直调）和 deferred 路径
+        （inflight done callback）—— 两路径都是「advance 还没跑」入口。
+        """
+        try:
+            ms_ops = runtime.session.orchestrator._mts_ops
+            continued = ms_ops.advance_after_bg_completion(
+                runtime.router,
+                bg_guest_name=guest_name,
+                mts_manager_at_spawn=run.mts_manager_at_spawn,
+                mts_session_id_at_spawn=run.mts_session_id_at_spawn,
+            )
+            if not continued:
+                return
+            self._dispatch_mts_drain_or_defer(
+                runtime, run, run_id=run_id, guest_name=guest_name,
+            )
+        except Exception:
+            _log.warning(
+                "bg run %s: MTS 续命失败 — ending MTS to avoid hang", run_id,
+                exc_info=True,
+            )
+            # F6 兜底：advance 已成功但 drain 起不来 → end MTS 防悬挂。
+            try:
+                runtime.session.orchestrator._mts_ops.end_managed_session(
+                    runtime.router, reason=MANAGED_SESSION_REASON_USER_CANCEL,
+                )
+            except Exception:
+                _log.warning(
+                    "bg run %s: MTS recovery end_managed_session failed",
+                    run_id, exc_info=True,
+                )
+
+    def _dispatch_mts_drain_or_defer(
+        self,
+        runtime: RoomRuntime,
+        run: AgentRun,
+        *,
+        run_id: str,
+        guest_name: str,
+    ) -> None:
+        """advance 已跑完，按 inflight 状态决定起 drain 还是再 defer。
+
+        **Codex round 7 P2**：与 ``_run_mts_continuation_advance`` 拆开 —— 后者负责
+        advance 一次，本方法只做调度。re-defer 时 callback 调本方法（**不**回到
+        advance），保证 advance 全 lifecycle 跑一次。
+
+        - MTS 已 None（advance 后 TOCTOU） → log + return（无可继续）。
+        - 无 inflight → 起 drain。
+        - inflight 仍活（race：新 user turn 抢占）→ 再次 defer 到新 inflight done，
+          counter+=1 守住 MTS；新 inflight 跑完后 callback 再走 dispatch（递归终止
+          条件：新 inflight 必有限完成）。
+        """
+        # F8：assert → if/return 显式判断（python -O 安全 + TOCTOU 兜底）。
+        ms = runtime.session.orchestrator.managed_session
+        if ms is None:
+            _log.warning(
+                "bg run %s: advance_after_bg_completion returned True but "
+                "MTS now None (TOCTOU); skipping drain start", run_id,
+            )
+            return
+        if runtime.inflight_alive():
+            # Codex round 6 P2: race — 新 user turn 抢占 inflight，再 defer。
+            self._defer_mts_dispatch_to_inflight(
+                runtime, run, run_id=run_id, guest_name=guest_name,
+            )
+            return
+        self._start_mts_continuation_drain(runtime, ms.task_id, run_id)
+
+    def _defer_mts_dispatch_to_inflight(
+        self,
+        runtime: RoomRuntime,
+        run: AgentRun,
+        *,
+        run_id: str,
+        guest_name: str,
+    ) -> None:
+        """advance 已跑完，inflight 被 race 抢占 → defer dispatch（不再 advance）。
+
+        与 :meth:`_defer_mts_continuation_to_inflight` 区别：前者 callback 走完整
+        advance + dispatch 链（首次 defer，advance 未跑），本方法 callback 只走
+        ``_dispatch_mts_drain_or_defer``（advance 已跑、只剩调度）。
+        """
+        inflight_task = runtime.inflight_task
+        if inflight_task is None or inflight_task.done():
+            # 极端：调用前 inflight 又清了 → 直接 dispatch（不 advance）。
+            self._dispatch_mts_drain_or_defer(
+                runtime, run, run_id=run_id, guest_name=guest_name,
+            )
+            return
+        runtime.pending_mts_continuations += 1
+        runtime_ref = runtime
+        run_ref = run
+        run_id_snap = run_id
+        guest_name_snap = guest_name
+
+        def _on_inflight_done(_done_task: object) -> None:
+            try:
+                self._dispatch_mts_drain_or_defer(
+                    runtime_ref, run_ref,
+                    run_id=run_id_snap, guest_name=guest_name_snap,
+                )
+            except Exception:
+                _log.warning(
+                    "bg run %s: re-deferred MTS dispatch failed",
+                    run_id_snap, exc_info=True,
+                )
+            finally:
+                runtime_ref.pending_mts_continuations -= 1
+                try:
+                    self._maybe_self_destruct_background_runtime(runtime_ref)
+                except Exception:
+                    _log.warning(
+                        "bg run %s: re-deferred self_destruct check failed",
+                        run_id_snap, exc_info=True,
+                    )
+
+        inflight_task.add_done_callback(_on_inflight_done)
+
+    def _start_mts_continuation_drain(
+        self, runtime: RoomRuntime, task_id: str, run_id: str,
+    ) -> None:
+        """启动新的 ``_run_handoff_turn`` 消费 MTS 续命刚 enqueue 的复查项。
+
+        分离方法是为「无 inflight」与「user-turn done_callback」两条路径共用，且让
+        ``asyncio.create_task`` 失败时的 F6 兜底（end_managed_session）落到单点。
+        ``create_task`` 在事件循环 closing / loop 异常时可能抛 ``RuntimeError``。
+        """
+        try:
+            bg_drain = asyncio.create_task(
+                self._run_handoff_turn(runtime, task_id=task_id),
+            )
+            runtime.set_inflight(bg_drain, INFLIGHT_KIND_HANDOFF)
+        except Exception:
+            _log.warning(
+                "bg run %s: create MTS continuation drain failed", run_id,
+                exc_info=True,
+            )
+            raise  # 上抛让外层 _continue_mts_after_bg 走 F6 兜底
 
     def _emit_agent_run_terminal(
         self,
@@ -1323,7 +1774,13 @@ class ChahuaServer:
         # P11 C9：走 5 步 helper —— 单清前台 turn 不够：bg run 让 busy_alive() 真，
         # _switch_room 仍走 demote 转后台分支，违反「background runtime 永不含 global
         # 茶客」不变量；必须把 bg run 也 drain 干净才能让 busy_alive() 为 False 走 close。
+        # F5：先 end MTS 再 cancel drain —— 与 _aclose_one_runtime 同口径，避免 bg
+        # wrapper finally step ⑤ 在 MTS 还活时跑续命污染队列 / emit 多余 advanced。
+        # F1 已保 cancel 终态跳过 step ⑤，本步骤是补「正常完成 + 切房同 tick」竞态。
         if self._foreground_session_has_global_guest():
+            self._maybe_end_managed_session(
+                sink, reason=MANAGED_SESSION_REASON_USER_CANCEL,
+            )
             await self._cancel_and_drain_all_foreground()
         self._switch_room(room_id, sink)
         # P9 §5.3：切房可能把旧前台转入后台 —— 超 MAX_BACKGROUND_ROOMS 即淘汰最早者。
@@ -1334,6 +1791,11 @@ class ChahuaServer:
     async def _inbound_clear_room(self, data: dict, sink: EnvelopeSink) -> None:
         # P11 C9：reset_room 前必须把 bg run wrapper finally 跑完（否则 detect /
         # cursor.set / emit terminal 会写入已 reset 的房间）；走 5 步 helper 保证。
+        # F5：先 end MTS 再 drain —— 防 bg wrapper finally step ⑤ 在 reset 前抢着
+        # 跑续命（advanced 帧污染 UI / budget 减完后立刻被 reset 抹掉）。
+        self._maybe_end_managed_session(
+            sink, reason=MANAGED_SESSION_REASON_USER_CANCEL,
+        )
         await self._cancel_and_drain_all_foreground()
         self._clear_room(sink)
 

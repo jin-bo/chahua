@@ -38,6 +38,19 @@ class _FakeOrch:
     def __init__(self, guest_names: tuple[str, ...]) -> None:
         self.guest_names: tuple[str, ...] = guest_names
         self.active_guest_names: Optional[set[str]] = None
+        self._managed_session: Optional[object] = None
+        # _make_start_agent_run 闭包在 task_id=None 时默认填 active task_id。
+        # MTS 边界测试默认 None（与"无活跃任务"一致）。
+        self._active_task_id: Optional[str] = None
+
+    @property
+    def managed_session(self) -> Optional[object]:
+        # P11.2.X F9：_start_agent_run 走 ``managed_session`` 公开 @property；测试夹具
+        # 仍按既有约定写 ``_managed_session``，此处 forward 保兼容。
+        return self._managed_session
+
+    def snapshot_active_task_id(self) -> Optional[str]:
+        return self._active_task_id
 
 
 class _FakeRoom:
