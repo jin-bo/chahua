@@ -36,7 +36,7 @@ from chahua.handoff import (
 from chahua.orchestrator import Orchestrator, OrchestratorConfig
 from chahua.room import Room
 from chahua.room_runtime import RoomRuntime, RoomEventRouter
-from chahua.server import ChahuaServer
+from chahua.server import ChahuaServer, _install_handler_slots
 from chahua.task import Task
 from chahua.user_md import USER_SPEAKER_ID, UserConfig
 
@@ -302,6 +302,8 @@ def _make_minimal_runtime(orch) -> tuple[ChahuaServer, RoomRuntime]:
     srv = object.__new__(ChahuaServer)
     srv._runtimes = {"r": rt}
     srv._foreground_id = "r"
+    # P11 slot 拆分：``_start_agent_run`` 转发到 ``_agent_run_ops``，必装。
+    _install_handler_slots(srv)
     # 让 wrapper 立即返回，不要真起 bg 执行 —— 本测试只验登记瞬间的 mts_managed 标志。
 
     async def fake_wrapper(runtime: RoomRuntime, run) -> None:

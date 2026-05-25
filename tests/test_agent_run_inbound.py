@@ -15,6 +15,7 @@ from chahua.events import (
     NOTICE_LEVEL_ERROR,
 )
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
+from chahua._server_agent_run import AgentRunOps
 from chahua.server import ChahuaServer
 from chahua.server_inbound_agent_run import (
     AgentRunHandlers,
@@ -83,6 +84,9 @@ def _make_server(
     srv._runtimes = {"rid": rt}
     srv._foreground_id = "rid"
     srv.agent_run = AgentRunHandlers(srv)
+    # P11 slot 拆分：inbound 经 ``srv._start_agent_run`` 薄转发到 ``_agent_run_ops``，
+    # 必须装 ops slot；其它 inbound handler slot 本测试不触不必装。
+    srv._agent_run_ops = AgentRunOps(srv)
     notices: list[tuple[str, str]] = []
 
     def emit_notice(sink: Any, *, level: str, text: str) -> None:

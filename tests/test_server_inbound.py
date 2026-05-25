@@ -203,6 +203,12 @@ class _SpyServer(ChahuaServer):
         # agent_run slot 同上 —— 装真实 AgentRunHandlers 仅为解析路径。
         from chahua.server_inbound_agent_run import AgentRunHandlers
         self.agent_run = AgentRunHandlers(self)
+        # ``_agent_run_ops`` 也要装，否则后续若有路由测 dispatch INBOUND_AGENT_RUN_START 经
+        # spy fixture 会触发 ``srv._start_agent_run`` forwarder → 读 ``self._agent_run_ops``
+        # AttributeError（forwarder 不带 lazy fallback）。当前测试没走这条路径但显式装齐
+        # 保未来零陷阱。
+        from chahua._server_agent_run import AgentRunOps
+        self._agent_run_ops = AgentRunOps(self)
         self._inbound_handlers = _bind_inbound_handlers(self)
 
     async def _cancel_and_drain_inflight(self) -> None:  # type: ignore[override]

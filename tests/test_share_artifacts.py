@@ -1110,7 +1110,9 @@ class TestRollingBaselinePerf:
     def test_baseline_reused_across_calls(
         self, monkeypatch, tmp_path: Path,
     ) -> None:
-        from chahua import transport_bridge as tb
+        # P10 artifact attribution 拆 slot 后实际 ``_list_share_rels`` 调用点在
+        # :mod:`chahua._transport_artifact_attribution`，故 monkeypatch 目标改这里。
+        from chahua import _transport_artifact_attribution as attr
         from chahua.transport_bridge import ChahuaTransport
         from agentao.transport import AgentEvent, EventType
         share = tmp_path / "share"
@@ -1122,11 +1124,11 @@ class TestRollingBaselinePerf:
             message_artifacts=registry, share_dir=share,
         )
         scan_count = {"n": 0}
-        orig = tb._list_share_rels
+        orig = attr._list_share_rels
         def counting(*a, **kw):
             scan_count["n"] += 1
             return orig(*a, **kw)
-        monkeypatch.setattr(tb, "_list_share_rels", counting)
+        monkeypatch.setattr(attr, "_list_share_rels", counting)
         with transport.bind(
             sink=_TransportSink(), turn_id="t1", message_id="msg_p",
         ):

@@ -23,7 +23,7 @@ from chahua.events import (
     NOOP_SINK,
 )
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
-from chahua.server import ChahuaServer
+from chahua.server import ChahuaServer, _install_handler_slots
 from chahua.server_inbound_agent_run import MAX_AGENT_RUNS_PER_ROOM
 
 
@@ -99,6 +99,9 @@ def _make_server(
     )
     srv._runtimes = {"rid": rt}
     srv._foreground_id = "rid"
+    # P11 slot 拆分：``_start_agent_run`` / ``_make_start_agent_run`` 转发到
+    # ``_agent_run_ops``，必装；``_run_agent_background`` 仍可经下方 instance attr 替换。
+    _install_handler_slots(srv)
 
     # 替 _run_agent_background：不真跑 wrapper（外层测它），返一个 done task。
     async def fake_wrapper(runtime: RoomRuntime, run: Any) -> None:

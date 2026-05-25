@@ -18,7 +18,7 @@ import pytest
 from chahua._orchestrator_scoring import ScoringOps
 from chahua.events import NOOP_SINK
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
-from chahua.server import ChahuaServer
+from chahua.server import ChahuaServer, _install_handler_slots
 
 
 # ── 最小桩：scoring slot 只关心 ``_guests`` / ``_build_context_for`` / ``cursor`` / ``config`` ──
@@ -165,6 +165,9 @@ def test_attach_runtime_state_shares_set_with_orchestrator() -> None:
         session=_Session(),  # type: ignore[arg-type]
         router=RoomEventRouter(NOOP_SINK),
     )
+    # P11 slot 拆分：``_attach_runtime_state`` 内部经 ``_make_start_agent_run``
+    # 走 ``_agent_run_ops``，必装。
+    _install_handler_slots(srv)
 
     srv._attach_runtime_state(rt)
 

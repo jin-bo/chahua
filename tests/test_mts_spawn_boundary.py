@@ -28,7 +28,7 @@ from chahua.events import (
     TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
 )
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
-from chahua.server import ChahuaServer
+from chahua.server import ChahuaServer, _install_handler_slots
 
 
 # ── 复用 helper 测试夹具 ──────────────────────────────────────────────────────
@@ -86,6 +86,8 @@ def _make_server(
     )
     srv._runtimes = {"rid": rt}
     srv._foreground_id = "rid"
+    # P11 slot 拆分：``_make_start_agent_run`` / ``_start_agent_run`` 转发到 slot。
+    _install_handler_slots(srv)
 
     async def fake_wrapper(runtime: RoomRuntime, run) -> None:
         return None

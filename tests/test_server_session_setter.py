@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from chahua.events import NOOP_SINK
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
-from chahua.server import ChahuaServer
+from chahua.server import ChahuaServer, _install_handler_slots
 
 
 class _FakeRoomConfig:
@@ -44,6 +44,9 @@ def _server(foreground: str, *background: str) -> ChahuaServer:
     for bg in background:
         srv._runtimes[bg] = _runtime(bg)
     srv._foreground_id = foreground
+    # P11 slot 拆分：``_session`` setter 调 ``_attach_runtime_state`` → 经
+    # ``_make_start_agent_run`` 走 ``_agent_run_ops``，必装。
+    _install_handler_slots(srv)
     return srv
 
 

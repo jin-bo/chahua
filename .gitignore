@@ -40,3 +40,6 @@ docs/personas/*.png
 
 # Macs being Macs
 .DS_Store
+
+# Qoder 
+.qoder/

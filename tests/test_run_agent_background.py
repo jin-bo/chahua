@@ -28,7 +28,7 @@ from chahua.events import (
     STATUS_OK,
 )
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
-from chahua.server import ChahuaServer
+from chahua.server import ChahuaServer, _install_handler_slots
 
 
 class _StubCursor:
@@ -150,6 +150,8 @@ def _server(rt: RoomRuntime) -> ChahuaServer:
     srv = object.__new__(ChahuaServer)
     srv._runtimes = {rt.room_id: rt}
     srv._foreground_id = rt.room_id
+    # P11 slot 拆分：``_run_agent_background`` 是薄转发到 ``_agent_run_ops``，必装。
+    _install_handler_slots(srv)
     return srv
 
 
