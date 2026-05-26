@@ -69,6 +69,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - `server_entry.py` — `chahua-server` CLI 入口。argparse / 端口分配 / stdin EOF watcher。
 - `admin.py` + `admin_{guest,persona,room,user,toml}.py` — admin 按域拆分：guest（添删改 + LLM）/ persona（MCP trust / skills）/ room（创建 / 切房 / update_room_{llm,toml}）/ user（USER.md / 头像）/ toml（`_render_room_toml` 结构化重写）。
 - `persona_assets.py` + `trust.py` — persona sibling `mcp.json` + `skills/` 装载；MCP 走信任门（`persona-trust.json` + UI popover）。skills 软链 + copytree 兜底。
+- `persona_manifest.py` — P12 `persona.toml` 解析。`PersonaManifest` frozen dataclass + 严格白名单（顶层 / `[defaults]` / `[defaults.guest]` 三级）。两条入口共享私有 `_parse_dict`：`load_persona_manifest(persona_dir)`（文件，缺即 None）/ `parse_persona_manifest_bytes(blob)`（in-memory dry-run，给 `persona_import._write_files` 落盘前用）。**全失败统一 PersonaManifestError**（含 UnicodeDecodeError / TOMLDecodeError / OSError）。`_opt_str` 用 strip + 空→None 对齐 legacy `_read_persona_toml_name`。承重契约见「persona 包 manifest（P12）」子段。
 - `server.py` + `server_inbound_{admin,task,io,settings,handoff,agent_run}.py` + `_server_helpers.py` — ws 生命周期 / 帧路由 / room snapshot 在 `server.py`；30+ `_inbound_*` handler 切到 **6 个 handler 类**（`AdminHandlers` / `IOHandlers` / `SettingsHandlers` / `TaskHandlers` / `HandoffHandlers` / `AgentRunHandlers`）—— **组合而非多继承**。`_install_handler_slots(srv)` 是 slot 装配唯一真理源；`_INBOUND_ROUTES` 帧字符串 → 属性路径映射在 `server.py` 顶层维护，`__init__` 经 `operator.attrgetter` 一次性解析。**改 `_inbound_*` 先看 slot 归属**：admin / task / io / settings / handoff（+ MTS）/ agent_run（bg run）。测试夹具用 `object.__new__(ChahuaServer)` 时必须 `_install_handler_slots(srv)` 装回 slot。
 - `agent_run.py` + `agent_run_sink.py` — P11 后台 agent run：`AgentRun` frozen dataclass + `BatchMessageSink`（envelope 白名单过滤 + `TASK_PROPOSAL` 缓冲到 finally + `run_id` 注入 + `flush_to(router)`）。`room_runtime.py` 加 `agent_runs` / `agent_run_tasks` / `active_guest_names` + `has_active_runs()` / `busy_alive()` / `guest_busy()` + `cancel_and_drain_agent_runs()`（末尾 defensive sweep 防 pre-start cancel race）。`server.py::_run_agent_background` 是 wrapper，与 `_run_turn` 平行的 bg 执行入口（5 步 finally 见不变量）。
 
@@ -96,6 +97,17 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **API key 永不进 toml / envelope**。toml 最多写 `api_key_env`；envelope 只下发 `api_key_env` 名 + `api_key_ready` bool。
 - **`[[guest.extra_mcp_servers]]` 自动信任，persona sidecar `mcp.json` 走 trust 门**。前者用户手写 toml = 意图；后者可能从 GitHub 导入任意可执行须 UI 勾选。同名房间级覆盖 persona。
 - **isolation 切换不自动迁移记忆**。`isolation` 决定茶客 cwd；切换后旧路径 `.agentao/memory.db` / `sessions/` 原样保留。
+
+### persona 包 manifest（P12）
+
+- **`persona.toml` 顶层 `schema_version` 必填且当前唯一合法值 = 1**。缺 / != 1 → `PersonaManifestError`。**Why**：第三方/社区包跨版本兼容的唯一锚点。未来加字段不 bump；破坏性变更才 bump。
+- **严格白名单：未知键 → `PersonaManifestError`**。顶层 / `[defaults]` / `[defaults.guest]` 三级都校验。与 `room.toml` 同口径。**不**预留「未来口袋」—— P12.2 真要加 `[requires]`，到时白名单加一行就行。
+- **`[defaults.guest]` 字段子集严格 ⊂ `_ALLOWED_GUEST_KEYS` 且不含 `name` / `persona` / LLM 四件套**。**Why**：persona 包是可分发资产；带 LLM 配置等于把作者本地 env 变量名泄漏给装它的人。`name` / `persona` 由 picker 自动填，不在 manifest。
+- **`[defaults.guest]` + 顶层 `summary` 仅在「加入房间」一次性 inflate，之后房间 `room.toml` 与 manifest 解绑**。作者更新 manifest **不**自动重 inflate；想让新默认生效需用户从房间删除该茶客再重新加入（npm `package.json` 同款语义）。
+- **picker 三级 fallback：`persona.toml`.display_name → 老 `<stem>.toml`.`[guest].name` → 文件名 stem**。`persona.toml` 与 `<stem>.toml` 同时存在时取前者。**display_name 缺 / 空 / 全空白时不跳第 2 档**（与 `_read_persona_toml_name` legacy 口径一致）。summary 仅 manifest 提供 —— 坏 manifest 时 summary 与 display_name 一起退（防出现「display 来自 legacy 但 summary 来自 manifest」不一致状态）。
+- **permission / isolation 默认值合一仅在 admin 层；frontend → inbound → admin 全链路用 `None` 表示「用户未显式选」**。frontend `modals.js` 不送 `permission` 字段、inbound `_inbound_add_guest` / `_inbound_create_room` 保留 None、admin `_build_guest_with_manifest_defaults` 三级 coalesce（入参 > manifest > `DEFAULT_MODE`）一律 `is not None`，**禁** `or DEFAULT_MODE`。**Why**：`or` 会把 `""` 这类显式坏值静默吞 → 用户 typo 永不可见、P12 等于白做。（注：现存 `_render_room_toml:257` + `config.py:595` 跨 phase `or DEFAULT_MODE` 是 P12 之前既有行为，breadcrumb 测在 `test_admin_guest_inflate.py::test_empty_permission_swallowed_by_renderer_breadcrumb` 钉住。）
+- **消费路径严格 fail-fast；discover 是唯一 `WARN+None` 例外**。`add_guest` / `create_room` / `persona_import` 遇坏 manifest → `PersonaManifestError` 向上抛 → inbound `_emit_notice(level=error)`；`create_room` 事务性：所有 guest 的 manifest 先解析成功才 `mkdir(exist_ok=False)`，任一坏 → 目录不建。`persona_import._validate_manifest_pre_write` 在 `_write_files` 之前对采集到 files 里**根级小写 `persona.toml`** 字节做 dry-run；`Persona.toml` 等错名同样拒（跨平台 case-insensitive FS 旁路守卫）。`discover_personas` 是唯一允许 `try/except + WARN + None` 的路径 —— 可见性优先，让 picker 不至于因为坏 manifest 整个 persona 消失。
+- **仅 dir-form 才查 manifest，flat-form 跳过**。flat-form md 的 parent 是 `chahua/personas/` 本身；误置一份根级 `persona.toml` 会让所有内置 persona 共享同份 `[defaults.guest]` —— 两处守卫同语义不同写法：`admin_room._build_guest_with_manifest_defaults` 内联判定 `md_abs.parent.name != PERSONAS_REL_DIR.name`；`admin_persona._resolve_display_and_summary` 接 `is_dir_form: bool` 形参，由 `discover_personas` 的两段循环（flat `glob('*.md')` vs dir-form `iterdir`）分别传值。
 
 ### 权限、持久化、事件契约
 
