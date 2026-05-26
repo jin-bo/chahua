@@ -20,6 +20,7 @@ from typing import Optional
 from ._paths import Paths
 from .config import read_avatar_data_uri
 from .persona_assets import search_roots
+from .persona_manifest import PersonaManifestError, load_persona_manifest
 
 _log = logging.getLogger(__name__)
 
@@ -68,23 +69,62 @@ def _read_persona_toml_name(md_path: Path) -> Optional[str]:
     return name or None
 
 
+def _resolve_display_and_summary(
+    md_path: Path, *, is_dir_form: bool
+) -> tuple[Optional[str], Optional[str]]:
+    """Picker ``display_name`` + ``summary`` 三级 fallback（P12 C2）。
+
+    - 仅 dir-form 才查 ``persona.toml``（flat-form 包没 manifest 入口，强行查会把
+      ``personas/persona.toml`` 当目标 —— 不存在但语义错；显式分流更稳）。
+    - 三级：``persona.toml.display_name`` → 老 ``<stem>.toml.[guest].name`` → ``None``
+      （调用方再退到目录名 / 文件名 stem）。summary **仅** manifest 提供 ——
+      legacy ``<stem>.toml`` 无对应字段，且 manifest 坏时 summary 一并退 ``None``
+      （discover 不让 summary 与 display_name 出现不一致状态）。
+    - 容错：dir-form 持坏 manifest 不让整个 persona 在 picker 里消失 —— WARN 一次
+      + 走 legacy 回退（plan §"承重不变量" 第 7 条：discover 是唯一允许 ``WARN+None``
+      的调用方）。
+
+    返回 ``(display_name, summary)``。
+    """
+    if is_dir_form:
+        try:
+            manifest = load_persona_manifest(md_path.parent)
+        except PersonaManifestError as e:
+            _log.warning(
+                "persona manifest 坏，picker 走 legacy 兜底：%s（%s）",
+                md_path.parent / "persona.toml", e,
+            )
+            manifest = None
+        if manifest is not None:
+            # display_name 严格三级 fallback：manifest 缺时仍要落到 legacy <stem>.toml，
+            # 不能跳到调用方的 stem 兜底（plan §"承重不变量"第 5 条）。summary 是 manifest
+            # 独占字段，不走 legacy。
+            display = manifest.display_name
+            if display is None:
+                display = _read_persona_toml_name(md_path)
+            return (display, manifest.summary)
+    return (_read_persona_toml_name(md_path), None)
+
+
 def discover_personas(paths: Paths) -> list[dict]:
     """扫所有 persona 候选，按 name 升序、user_data 优先 dedup。
 
-    返回 `[{persona, name, avatar_data_uri}, ...]`：
+    返回 `[{persona, name, avatar_data_uri, summary}, ...]`：
 
     - `persona`：相对路径字符串 `chahua/personas/<dir>.md`（flat）或
       `chahua/personas/<dir>/<dir>.md`（dir form，import 出来的包），可塞
       `[[guest]].persona` 字段。
-    - `name`：picker 显示用 + 加入房间后 `[[guest]].name` 字段值。优先取 sibling
-      `<dir>.toml` 里 `[guest].name`（如 Yvonne.toml 写 ``name = "伊冯"``）；缺
-      sidecar 时退到文件名 stem（同时也是大多数内置 persona 的形态）。
+    - `name`：picker 显示用 + 加入房间后 `[[guest]].name` 字段值。三级 fallback：
+      dir-form 的 `persona.toml`.display_name → 老 `<stem>.toml` `[guest].name` →
+      文件名 stem（同时也是大多数内置 persona 的形态）。
     - `avatar_data_uri`：与 md sibling 同名 `.png`；缺图返 `None`。
+    - `summary`（P12 C2 新增）：dir-form `persona.toml`.summary；flat-form / 无
+      manifest / manifest 坏 → `None`。前端 picker 按存在与否决定渲不渲一行 副标题。
 
     给前端 sidebar"添加茶客"picker 用。
 
     **两种磁盘布局**：flat（`<Name>.md` 直接在 `personas/` 下）+ dir form（`<Name>/<Name>.md`
-    在子目录里，sibling 还可能有 `mcp.json` / `skills/`）。dir form 由
+    在子目录里，sibling 还可能有 `mcp.json` / `skills/` / `persona.toml`）。dir form 由
     :func:`chahua.persona_import.import_from_folder` / :func:`import_from_github` 写出来；
     flat 是 ship-with-app 的内置 persona 形态。同名时 user_data 胜（dedup by display name）。
     """
@@ -96,11 +136,13 @@ def discover_personas(paths: Paths) -> list[dict]:
             continue
         # flat：`<Name>.md`
         for md in sorted(personas_dir.glob("*.md")):
-            name = _read_persona_toml_name(md) or md.stem
+            display_name, summary = _resolve_display_and_summary(md, is_dir_form=False)
+            name = display_name or md.stem
             seen_by_name[name] = {
                 "persona": str(PERSONAS_REL_DIR / md.name),
                 "name": name,
                 "avatar_data_uri": read_avatar_data_uri(md.with_suffix(".png")),
+                "summary": summary,
             }
         # dir form：`<Name>/<Name>.md`（与目录同名）；找不到同名 md 时退化为目录里
         # 唯一一份 `*.md`，与 persona_import._derive_name 的兼容口径一致。
@@ -114,11 +156,13 @@ def discover_personas(paths: Paths) -> list[dict]:
                 if len(mds) != 1:
                     continue
                 md = mds[0]
-            name = _read_persona_toml_name(md) or sub.name
+            display_name, summary = _resolve_display_and_summary(md, is_dir_form=True)
+            name = display_name or sub.name
             seen_by_name[name] = {
                 "persona": str(PERSONAS_REL_DIR / sub.name / md.name),
                 "name": name,
                 "avatar_data_uri": read_avatar_data_uri(md.with_suffix(".png")),
+                "summary": summary,
             }
     return [seen_by_name[n] for n in sorted(seen_by_name)]
 

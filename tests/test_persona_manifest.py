@@ -160,6 +160,59 @@ chahua = ">=0.1.5"
 # ── 字段类型 / 值校验 ───────────────────────────────────────────────────
 
 
+def test_display_name_empty_string_becomes_none(tmp_path: Path) -> None:
+    # 与 admin_persona._read_persona_toml_name 的 legacy 口径一致：空 → None。
+    persona_dir = _write(
+        tmp_path,
+        """\
+schema_version = 1
+display_name = ""
+""",
+    )
+    m = load_persona_manifest(persona_dir)
+    assert m is not None
+    assert m.display_name is None
+
+
+def test_display_name_whitespace_only_becomes_none(tmp_path: Path) -> None:
+    persona_dir = _write(
+        tmp_path,
+        """\
+schema_version = 1
+display_name = "   "
+""",
+    )
+    m = load_persona_manifest(persona_dir)
+    assert m is not None
+    assert m.display_name is None
+
+
+def test_display_name_stripped(tmp_path: Path) -> None:
+    persona_dir = _write(
+        tmp_path,
+        """\
+schema_version = 1
+display_name = "  伊冯  "
+""",
+    )
+    m = load_persona_manifest(persona_dir)
+    assert m is not None
+    assert m.display_name == "伊冯"
+
+
+def test_summary_empty_becomes_none(tmp_path: Path) -> None:
+    persona_dir = _write(
+        tmp_path,
+        """\
+schema_version = 1
+summary = ""
+""",
+    )
+    m = load_persona_manifest(persona_dir)
+    assert m is not None
+    assert m.summary is None
+
+
 def test_display_name_wrong_type(tmp_path: Path) -> None:
     persona_dir = _write(
         tmp_path,

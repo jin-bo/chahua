@@ -193,7 +193,12 @@ def _parse_dict(data: object, *, source: str) -> PersonaManifest:
 
 
 def _opt_str(data: dict, key: str, *, source: str) -> Optional[str]:
-    """读可选 str 字段，缺 → None；非 str → :class:`PersonaManifestError`。"""
+    """读可选 str 字段，缺 / 空 / 全空白 → ``None``；非 str → :class:`PersonaManifestError`。
+
+    strip + 空→None 与 :func:`chahua.admin_persona._read_persona_toml_name` 的 legacy
+    口径保持一致 —— 否则同一份 picker 来自两条入口时空字符串语义会漂（legacy 退 ``None``
+    走 stem 兜底，本入口若保留 ``""`` 会让 picker 渲一行空名）。
+    """
     if key not in data:
         return None
     v = data[key]
@@ -201,4 +206,5 @@ def _opt_str(data: dict, key: str, *, source: str) -> Optional[str]:
         raise PersonaManifestError(
             f"{source}: {key} 必须是 str，收到 {type(v).__name__}"
         )
-    return v
+    v = v.strip()
+    return v or None

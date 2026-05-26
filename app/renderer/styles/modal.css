@@ -309,7 +309,21 @@
   object-fit: cover;
   flex-shrink: 0;
 }
-.persona-picker .persona-name { flex: 1; }
+.persona-picker .persona-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;  /* 让 .persona-summary 的 ellipsis 生效 */
+}
+/* .persona-name 不再需要 flex:1 —— 水平 flex 撑开靠父 .persona-text 持 flex:1。 */
+.persona-picker .persona-summary {
+  font-size: 11px;
+  color: #8a8278;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .persona-picker .persona-hint {
   font-size: 11px;
   color: #aaa;

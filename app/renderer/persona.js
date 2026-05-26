@@ -28,10 +28,20 @@ export function renderPersonaPicker(rootEl, { personas, multi, excludeNames, onP
     li.dataset.persona = p.persona;
     li.dataset.name = p.name;
     li.appendChild(makeAvatarImg(p.avatar_data_uri, "persona-avatar", p.name));
+    // 名字 + （可选）summary 包一层垂直容器，让 .persona-hint 仍在右侧、布局零回归。
+    const text = document.createElement("div");
+    text.className = "persona-text";
     const name = document.createElement("span");
     name.className = "persona-name";
     name.textContent = p.name;
-    li.appendChild(name);
+    text.appendChild(name);
+    if (p.summary) {
+      const summary = document.createElement("span");
+      summary.className = "persona-summary";
+      summary.textContent = p.summary;
+      text.appendChild(summary);
+    }
+    li.appendChild(text);
     if (excludeNames && excludeNames.has(p.name)) {
       li.classList.add("disabled");
       const tag = document.createElement("span");
