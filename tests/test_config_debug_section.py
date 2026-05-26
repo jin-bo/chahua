@@ -15,7 +15,7 @@ from chahua.config import DebugConfig, RoomConfigError, load_room_config
 def _seed_room(env_paths):
     return admin.create_room(
         paths=env_paths, room_id="debug-cfg", name="debug cfg test",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -24,7 +24,7 @@ def _write_toml(rc, extra: str) -> None:
         '[room]\nname = "x"\n\n'
         + extra
         + '\n\n[[guest]]\nname = "宝总"\n'
-        'persona = "chahua/personas/宝总.md"\npermission = "read-only"\n'
+        'persona = "chahua/personas/宝总/宝总.md"\npermission = "read-only"\n'
     )
     (rc.room_dir / "room.toml").write_text(body, encoding="utf-8")
 
@@ -80,7 +80,7 @@ def test_section_must_be_table(env_paths):
         'debug = "oops"\n\n'
         '[room]\nname = "x"\n\n'
         '[[guest]]\nname = "宝总"\n'
-        'persona = "chahua/personas/宝总.md"\npermission = "read-only"\n'
+        'persona = "chahua/personas/宝总/宝总.md"\npermission = "read-only"\n'
     )
     (rc.room_dir / "room.toml").write_text(body, encoding="utf-8")
     with pytest.raises(RoomConfigError, match=r"\[debug\].*表"):

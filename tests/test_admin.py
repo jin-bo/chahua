@@ -40,7 +40,7 @@ def test_discover_personas_scans_app_root(paths):
     assert {"宝总", "汪小姐", "范总", "玲子", "爷叔"}.issubset(names)
     # persona 字段是相对路径，可塞 [[guest]].persona。
     one = next(p for p in found if p["name"] == "宝总")
-    assert one["persona"] == "chahua/personas/宝总.md"
+    assert one["persona"] == "chahua/personas/宝总/宝总.md"
     # 头像 data URI 可有可无；宝总.png 在仓库里 → 必有。
     assert one["avatar_data_uri"] and one["avatar_data_uri"].startswith("data:image/png;base64,")
 
@@ -99,7 +99,7 @@ def test_create_room_writes_loadable_toml(paths):
         name="客厅",
         topic="周末闲聊",
         rules="保持中文",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     assert rc.name == "客厅"
     assert rc.topic == "周末闲聊"
@@ -113,12 +113,12 @@ def test_create_room_writes_loadable_toml(paths):
 def test_create_room_rejects_existing(paths):
     admin.create_room(
         paths=paths, room_id="dup", name="dup",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     with pytest.raises(FileExistsError):
         admin.create_room(
             paths=paths, room_id="dup", name="dup-另名",
-            guests=[{"persona": "chahua/personas/汪小姐.md"}],
+            guests=[{"persona": "chahua/personas/汪小姐/汪小姐.md"}],
         )
 
 
@@ -126,12 +126,12 @@ def test_create_room_rejects_duplicate_room_name(paths):
     """P9：[room].name 跨房唯一 —— 同名会让后台房间里程碑分流误判。"""
     admin.create_room(
         paths=paths, room_id="room-a", name="项目组",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     with pytest.raises(ValueError, match="已被占用"):
         admin.create_room(
             paths=paths, room_id="room-b", name="项目组",
-            guests=[{"persona": "chahua/personas/汪小姐.md"}],
+            guests=[{"persona": "chahua/personas/汪小姐/汪小姐.md"}],
         )
     # 拒绝后不留半成品目录。
     assert not (paths.user_data_root / "rooms" / "room-b").exists()
@@ -141,11 +141,11 @@ def test_update_room_toml_rejects_rename_to_existing_name(paths):
     """raw 编辑器把房间改名成另一个房已用的名字 → RoomConfigError，磁盘回滚。"""
     admin.create_room(
         paths=paths, room_id="room-a", name="甲房",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     rc_b = admin.create_room(
         paths=paths, room_id="room-b", name="乙房",
-        guests=[{"persona": "chahua/personas/汪小姐.md"}],
+        guests=[{"persona": "chahua/personas/汪小姐/汪小姐.md"}],
     )
     raw = (rc_b.room_dir / "room.toml").read_text(encoding="utf-8")
     collided = raw.replace('"乙房"', '"甲房"')
@@ -159,7 +159,7 @@ def test_update_room_toml_allows_keeping_own_name(paths):
     """raw 编辑保持自己原名（不算与自己冲突）—— 改 topic 等其它字段应成功。"""
     rc = admin.create_room(
         paths=paths, room_id="room-a", name="甲房", topic="旧话题",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     raw = (rc.room_dir / "room.toml").read_text(encoding="utf-8")
     edited = raw.replace("旧话题", "新话题")
@@ -181,7 +181,7 @@ def test_create_room_normalizes_room_id(paths):
     """room_id 含路径分隔符等禁字符 → 替换成 -，不会 traversal 出 rooms/。"""
     rc = admin.create_room(
         paths=paths, room_id="../sneak", name="sneak",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     assert rc.room_dir.parent == paths.user_data_root / "rooms"
     assert rc.room_dir.name == "-sneak"  # `..` 被洗成 `-`，不在 rooms/ 之外。
@@ -195,7 +195,7 @@ def test_create_room_requires_at_least_one_guest(paths):
 def test_delete_room_removes_directory(paths):
     rc = admin.create_room(
         paths=paths, room_id="rm-me", name="rm",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     assert rc.room_dir.is_dir()
     admin.delete_room(paths=paths, room_id="rm-me", current_room_id="other")
@@ -205,7 +205,7 @@ def test_delete_room_removes_directory(paths):
 def test_delete_room_refuses_current(paths):
     admin.create_room(
         paths=paths, room_id="here", name="here",
-        guests=[{"persona": "chahua/personas/宝总.md"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     with pytest.raises(ValueError):
         admin.delete_room(paths=paths, room_id="here", current_room_id="here")
@@ -224,12 +224,12 @@ def _seed_room(paths, *, with_guests):
 def test_add_guest_appends_and_persists(paths):
     rc = _seed_room(
         paths,
-        with_guests=[{"persona": "chahua/personas/宝总.md"}],
+        with_guests=[{"persona": "chahua/personas/宝总/宝总.md"}],
     )
     rc2 = admin.add_guest(
         paths=paths,
         room_dir=rc.room_dir,
-        persona="chahua/personas/汪小姐.md",
+        persona="chahua/personas/汪小姐/汪小姐.md",
     )
     names = [g.name for g in rc2.guests]
     assert names == ["宝总", "汪小姐"]
@@ -239,11 +239,11 @@ def test_add_guest_appends_and_persists(paths):
 
 
 def test_add_guest_rejects_duplicate_name(paths):
-    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总/宝总.md"}])
     with pytest.raises(ValueError):
         admin.add_guest(
             paths=paths, room_dir=rc.room_dir,
-            persona="chahua/personas/宝总.md",
+            persona="chahua/personas/宝总/宝总.md",
         )
 
 
@@ -251,8 +251,8 @@ def test_remove_guest_drops_entry(paths):
     rc = _seed_room(
         paths,
         with_guests=[
-            {"persona": "chahua/personas/宝总.md"},
-            {"persona": "chahua/personas/汪小姐.md"},
+            {"persona": "chahua/personas/宝总/宝总.md"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md"},
         ],
     )
     rc2 = admin.remove_guest(paths=paths, room_dir=rc.room_dir, name="汪小姐")
@@ -260,7 +260,7 @@ def test_remove_guest_drops_entry(paths):
 
 
 def test_remove_last_guest_refused(paths):
-    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总/宝总.md"}])
     with pytest.raises(ValueError):
         admin.remove_guest(paths=paths, room_dir=rc.room_dir, name="宝总")
 
@@ -269,8 +269,8 @@ def test_update_guest_permission_persists(paths):
     rc = _seed_room(
         paths,
         with_guests=[
-            {"persona": "chahua/personas/宝总.md", "permission": "read-only"},
-            {"persona": "chahua/personas/汪小姐.md", "permission": "read-only"},
+            {"persona": "chahua/personas/宝总/宝总.md", "permission": "read-only"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md", "permission": "read-only"},
         ],
     )
     rc2 = admin.update_guest_permission(
@@ -289,7 +289,7 @@ def test_debug_section_preserved_across_structured_rewrite(paths):
     设定。早先 :class:`TomlSnapshot` 缺 ``debug`` 字段 → 重写时静默丢段 →
     默认 ``enabled=true`` 复活 → prompt 捕获被悄悄重开。
     """
-    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总/宝总.md"}])
     # 模拟用户手动 append [debug]（载入期合法 —— 段缺时也 fall back 默认）。
     toml_path = rc.room_dir / "room.toml"
     toml_path.write_text(
@@ -311,7 +311,7 @@ def test_debug_section_preserved_across_structured_rewrite(paths):
 
 
 def test_update_guest_permission_rejects_invalid(paths):
-    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总/宝总.md"}])
     with pytest.raises(ValueError, match="permission"):
         admin.update_guest_permission(
             paths=paths, room_dir=rc.room_dir, name="宝总", permission="god-mode"
@@ -324,7 +324,7 @@ def test_update_guest_permission_rejects_invalid(paths):
 
 
 def test_update_guest_permission_unknown_name(paths):
-    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总.md"}])
+    rc = _seed_room(paths, with_guests=[{"persona": "chahua/personas/宝总/宝总.md"}])
     with pytest.raises(ValueError, match="不在房间"):
         admin.update_guest_permission(
             paths=paths, room_dir=rc.room_dir, name="不在场", permission="workspace-write"
@@ -335,8 +335,8 @@ def test_remove_unknown_guest_refused(paths):
     rc = _seed_room(
         paths,
         with_guests=[
-            {"persona": "chahua/personas/宝总.md"},
-            {"persona": "chahua/personas/汪小姐.md"},
+            {"persona": "chahua/personas/宝总/宝总.md"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md"},
         ],
     )
     with pytest.raises(ValueError):
@@ -349,7 +349,7 @@ def test_remove_unknown_guest_refused(paths):
 def _seed_room_for_llm(paths):
     return admin.create_room(
         paths=paths, room_id="llm", name="llm",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -547,8 +547,8 @@ def test_update_guest_llm_preserves_other_guests_and_room_llm(paths):
     rc = admin.create_room(
         paths=paths, room_id="multi", name="multi",
         guests=[
-            {"persona": "chahua/personas/宝总.md", "name": "宝总"},
-            {"persona": "chahua/personas/汪小姐.md", "name": "汪小姐"},
+            {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md", "name": "汪小姐"},
         ],
     )
     admin.update_room_llm(
@@ -576,7 +576,7 @@ def test_legacy_provider_field_rejected_with_hint(paths):
     rc = _seed_room_for_llm(paths)
     bad_toml = (
         '[room]\nname = "x"\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\n'
         'provider = "openai"\nmodel = "openai/gpt-4"\n'
     )
     with pytest.raises(RoomConfigError, match=r"model = \"<provider>/<model>\""):
@@ -589,7 +589,7 @@ def test_legacy_provider_field_rejected_with_hint(paths):
 def _seed_room_for_isolation(paths):
     return admin.create_room(
         paths=paths, room_id="iso", name="iso",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -661,7 +661,7 @@ def test_legacy_isolation_load_rejected_bad_value(paths):
     rc = _seed_room_for_isolation(paths)
     bad = (
         '[room]\nname = "x"\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\n'
         'isolation = "rogue"\n'
     )
     with pytest.raises(RoomConfigError, match=r"isolation="):
@@ -693,7 +693,7 @@ def test_isolation_preserved_alongside_llm_mutator(paths):
 def _seed_room_for_extra_mcp(paths):
     return admin.create_room(
         paths=paths, room_id="mcp", name="mcp",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -702,7 +702,7 @@ def test_extra_mcp_round_trip_via_raw_toml(paths):
     rc = _seed_room_for_extra_mcp(paths)
     new_toml = (
         '[room]\nname = "mcp"\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\npermission = "read-only"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\npermission = "read-only"\n\n'
         '[[guest.extra_mcp_servers]]\n'
         'name = "web-search"\n'
         'command = "npx"\n'
@@ -822,7 +822,7 @@ def test_extra_mcp_load_rejects_duplicate_in_raw_toml(paths):
     rc = _seed_room_for_extra_mcp(paths)
     bad_toml = (
         '[room]\nname = "x"\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\n\n'
         '[[guest.extra_mcp_servers]]\nname = "dup"\ncommand = "a"\n\n'
         '[[guest.extra_mcp_servers]]\nname = "dup"\ncommand = "b"\n'
     )
@@ -834,7 +834,7 @@ def test_extra_mcp_load_rejects_unknown_entry_key(paths):
     rc = _seed_room_for_extra_mcp(paths)
     bad_toml = (
         '[room]\nname = "x"\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\n\n'
         '[[guest.extra_mcp_servers]]\nname = "w"\ncommand = "c"\ncwd = "/tmp"\n'
     )
     with pytest.raises(RoomConfigError, match=r"未知字段"):
@@ -887,7 +887,7 @@ def test_update_user_md_rejects_oversized(paths):
 def _seed_room_for_update(paths):
     return admin.create_room(
         paths=paths, room_id="upd-room", name="待改",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -901,7 +901,7 @@ def test_update_room_toml_round_trip(paths):
         '\n'
         '[[guest]]\n'
         'name       = "宝总"\n'
-        'persona    = "chahua/personas/宝总.md"\n'
+        'persona    = "chahua/personas/宝总/宝总.md"\n'
         'permission = "read-only"\n'
     )
     rc2 = admin.update_room_toml(rc.room_dir, new_toml, paths=paths)
@@ -1001,7 +1001,7 @@ def test_update_user_avatar_clears_lru_cache(paths, tmp_path):
 def _seed_room_for_orch(paths):
     return admin.create_room(
         paths=paths, room_id="orch", name="orch",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -1100,7 +1100,7 @@ def test_orchestrator_overrides_unknown_key_rejected(paths):
     bad_toml = (
         '[room]\nname = "x"\n'
         'nonexistent_orch_field = 0.5\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\n'
     )
     with pytest.raises(RoomConfigError):
         admin.update_room_toml(rc.room_dir, bad_toml, paths=paths)
@@ -1114,7 +1114,7 @@ def test_toml_writer_escapes_quotes_and_backslashes(paths):
         name='含 " 引号 \\ 反斜杠',
         topic="多行\n第二行",
         rules="制表\t符",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": '宝"总'}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": '宝"总'}],
     )
     rc2 = load_room_config(rc.room_dir, paths=paths)
     assert rc2.name == '含 " 引号 \\ 反斜杠'

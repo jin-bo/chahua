@@ -40,7 +40,7 @@ def session_and_srv(env_paths):
     rc = admin.create_room(
         paths=env_paths, room_id="t1", name="t1",
         guests=[
-            {"persona": f"chahua/personas/{n}.md", "name": n}
+            {"persona": f"chahua/personas/{n}/{n}.md", "name": n}
             for n in _PERSONAS
         ],
     )

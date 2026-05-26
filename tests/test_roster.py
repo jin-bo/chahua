@@ -23,14 +23,14 @@ from conftest import NoopScorer, NoopSummarizer
 def _seed_room(env_paths):
     return admin.create_room(
         paths=env_paths, room_id="roster-cfg", name="roster test",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
 def _write_toml(rc, guest_extra: str) -> None:
     (rc.room_dir / "room.toml").write_text(
         '[room]\nname = "x"\n\n[[guest]]\nname = "宝总"\n'
-        'persona = "chahua/personas/宝总.md"\npermission = "read-only"\n'
+        'persona = "chahua/personas/宝总/宝总.md"\npermission = "read-only"\n'
         + guest_extra,
         encoding="utf-8",
     )

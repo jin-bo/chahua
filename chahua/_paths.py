@@ -13,7 +13,7 @@ dev 兼容：两个 env 都不设 → 都回退到包目录的父（仓库根）
 Electron main 进程显式 export ``CHAHUA_APP_ROOT`` / ``CHAHUA_USER_DATA`` 给 sidecar，
 两根独立解析。
 
-persona 搜索：``room.toml`` 里 ``persona = "chahua/personas/宝总.md"`` 这种相对路径
+persona 搜索：``room.toml`` 里 ``persona = "chahua/personas/宝总/宝总.md"`` 这种相对路径
 按 ``find_in_data_then_app`` 双根搜 —— user_data 优先（用户可 override），fall through
 到 app（bundle 自带）。
 """

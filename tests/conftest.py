@@ -212,7 +212,7 @@ def task_inbound_srv(env_paths, monkeypatch):
 
     rc = admin.create_room(
         paths=env_paths, room_id="t1", name="t1",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     session = build_room_session(rc.room_dir, env_paths)
     srv = object.__new__(ChahuaServer)

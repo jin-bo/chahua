@@ -19,8 +19,8 @@ def test_reset_room_clears_each_guest_agent_messages(env_paths):
     rc = admin.create_room(
         paths=env_paths, room_id="t1", name="t1",
         guests=[
-            {"persona": "chahua/personas/宝总.md", "name": "宝总"},
-            {"persona": "chahua/personas/汪小姐.md", "name": "汪小姐"},
+            {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md", "name": "汪小姐"},
         ],
     )
     session = build_room_session(rc.room_dir, env_paths)
@@ -49,8 +49,8 @@ def test_reset_room_isolates_clear_history_exception(env_paths, caplog):
     rc = admin.create_room(
         paths=env_paths, room_id="t1", name="t1",
         guests=[
-            {"persona": "chahua/personas/宝总.md", "name": "宝总"},
-            {"persona": "chahua/personas/汪小姐.md", "name": "汪小姐"},
+            {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md", "name": "汪小姐"},
         ],
     )
     session = build_room_session(rc.room_dir, env_paths)
@@ -85,7 +85,7 @@ def test_reset_room_does_not_touch_memory_db(env_paths, tmp_path):
     """
     rc = admin.create_room(
         paths=env_paths, room_id="t1", name="t1",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     session = build_room_session(rc.room_dir, env_paths)
     try:

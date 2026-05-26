@@ -172,13 +172,27 @@ def test_neither_manifest_nor_legacy(paths):
     assert p["summary"] is None
 
 
-def test_flat_form_builtin_summary_always_none(paths):
-    # 仓库自带的 5 位都是 flat-form（chahua/personas/范总.md），不应去查 manifest，
-    # summary 一律 None。
+def test_builtin_personas_have_summary_after_p12_1(paths):
+    """P12.1 把仓库自带 5 位迁到 dir-form + manifest，每位都有 summary。
+    （P12.1 前是 flat-form，summary 一律 None。）"""
     found = admin.discover_personas(paths)
     for builtin_name in ("宝总", "汪小姐", "范总", "玲子", "爷叔"):
         p = _find(found, builtin_name)
-        assert p["summary"] is None, f"flat-form {builtin_name} summary 应是 None"
+        assert isinstance(p["summary"], str) and p["summary"], (
+            f"P12.1 后内置 {builtin_name} 应有 summary"
+        )
+
+
+def test_pure_flat_form_summary_always_none(paths):
+    """合成一个真 flat-form persona（personas/<Name>.md 直接放根，无子目录），验证
+    flat-form 路径不查 manifest、summary 始终 None。
+    """
+    md = paths.user_data_root / "chahua" / "personas" / "FlatOnly.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("I am flat", encoding="utf-8")
+    found = admin.discover_personas(paths)
+    p = _find(found, "FlatOnly")
+    assert p["summary"] is None
 
 
 # ── 坏 manifest 容错 ────────────────────────────────────────────────
@@ -226,8 +240,9 @@ def test_broken_toml_syntax_visible(paths):
 # ── user_data 优先覆盖 app_root 内置 ──────────────────────────────────
 
 
-def test_user_data_dir_form_overrides_app_root_flat(paths):
-    # app_root 自带 flat-form "范总"；user_data 注入 dir-form "范总" with manifest summary。
+def test_user_data_persona_overrides_app_root_builtin(paths):
+    """user_data 注入的 dir-form 范总 应覆盖 app_root 自带的 dir-form 范总
+    （P12.1 起内置 5 位都是 dir-form；P12.1 前测的是 dir-form-overrides-flat）。"""
     persona_dir = paths.user_data_root / PERSONAS_DIR_REL / "范总"
     persona_dir.mkdir(parents=True)
     (persona_dir / "范总.md").write_text("override soul", encoding="utf-8")

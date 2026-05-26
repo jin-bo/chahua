@@ -31,7 +31,7 @@ from chahua.session import build_room_session
 def session_and_srv(env_paths):
     rc = admin.create_room(
         paths=env_paths, room_id="t1", name="t1",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     session = build_room_session(rc.room_dir, env_paths)
     srv = object.__new__(ChahuaServer)
@@ -88,7 +88,7 @@ def session_capture(session_and_srv, monkeypatch):
 async def test_add_guest_no_permission_key_passes_none(session_capture):
     _, srv, cap = session_capture
     await srv._handle_inbound(
-        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐.md"},
+        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐/汪小姐.md"},
         lambda e: None,
     )
     assert len(cap.add_calls) == 1
@@ -98,7 +98,7 @@ async def test_add_guest_no_permission_key_passes_none(session_capture):
 async def test_add_guest_explicit_null_passes_none(session_capture):
     _, srv, cap = session_capture
     await srv._handle_inbound(
-        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐.md", "permission": None},
+        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐/汪小姐.md", "permission": None},
         lambda e: None,
     )
     assert len(cap.add_calls) == 1
@@ -108,7 +108,7 @@ async def test_add_guest_explicit_null_passes_none(session_capture):
 async def test_add_guest_explicit_string_passes_through(session_capture):
     _, srv, cap = session_capture
     await srv._handle_inbound(
-        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐.md", "permission": "ask"},
+        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐/汪小姐.md", "permission": "ask"},
         lambda e: None,
     )
     assert len(cap.add_calls) == 1
@@ -118,7 +118,7 @@ async def test_add_guest_explicit_string_passes_through(session_capture):
 async def test_add_guest_non_str_non_none_is_ignored(session_capture):
     _, srv, cap = session_capture
     await srv._handle_inbound(
-        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐.md", "permission": 42},
+        {"type": INBOUND_ADD_GUEST, "persona": "chahua/personas/汪小姐/汪小姐.md", "permission": 42},
         lambda e: None,
     )
     # 整帧被忽略 —— admin 不调用。
@@ -135,7 +135,7 @@ async def test_create_room_no_permission_key_passes_through(session_capture):
             "type": INBOUND_CREATE_ROOM,
             "room_id": "r2",
             "name": "r2",
-            "guests": [{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+            "guests": [{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
         },
         lambda e: None,
     )
@@ -152,7 +152,7 @@ async def test_create_room_null_permission_passes_through(session_capture):
             "room_id": "r2",
             "name": "r2",
             "guests": [
-                {"persona": "chahua/personas/宝总.md", "name": "宝总", "permission": None},
+                {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总", "permission": None},
             ],
         },
         lambda e: None,
@@ -169,7 +169,7 @@ async def test_create_room_string_permission_passes_through(session_capture):
             "room_id": "r2",
             "name": "r2",
             "guests": [
-                {"persona": "chahua/personas/宝总.md", "name": "宝总", "permission": "ask"},
+                {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总", "permission": "ask"},
             ],
         },
         lambda e: None,
@@ -186,7 +186,7 @@ async def test_create_room_guest_non_str_permission_ignored(session_capture):
             "room_id": "r2",
             "name": "r2",
             "guests": [
-                {"persona": "chahua/personas/宝总.md", "name": "宝总", "permission": 42},
+                {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总", "permission": 42},
             ],
         },
         lambda e: None,

@@ -2,10 +2,12 @@
 
 persona 包有两种磁盘形态（见 :func:`chahua.admin.discover_personas`）：
 
-- **flat**：``chahua/personas/<Name>.md`` —— 仓库自带 ship persona，单文件，
-  ``parent`` 是公共 ``personas/`` 目录，不会有 per-persona sidecar。
-- **dir form**：``chahua/personas/<Name>/<Name>.md`` —— 由 ``persona_import``
-  写出，``parent`` 是私有子目录，``mcp.json`` / ``skills/`` 才有意义。
+- **flat**：``chahua/personas/<Name>.md`` —— 历史 ship 形态，``parent`` 是公共
+  ``personas/`` 目录，不会有 per-persona sidecar。P12.1 起内置 5 位（宝总 / 汪小姐 /
+  范总 / 玲子 / 爷叔）都迁到 dir form；flat 仅作为格式仍受支持（社区包可继续用）。
+- **dir form**：``chahua/personas/<Name>/<Name>.md`` —— 由 ``persona_import`` 写出
+  + P12.1 起内置 persona 也是这形态，``parent`` 是私有子目录，``mcp.json`` /
+  ``skills/`` / ``persona.toml`` 才有意义。
 
 本模块只在 dir form 下扫 sidecar；flat 形态 ``mcp_servers=None`` / ``skills_dir=None``。
 判断口径：persona md 的父目录名 != ``_PERSONAS_DIR_NAME``。

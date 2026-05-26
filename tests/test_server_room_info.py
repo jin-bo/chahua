@@ -124,8 +124,8 @@ def _capture_room_info(env_paths) -> dict:
     rc = admin.create_room(
         paths=env_paths, room_id="info", name="info",
         guests=[
-            {"persona": "chahua/personas/宝总.md", "name": "宝总"},
-            {"persona": "chahua/personas/汪小姐.md", "name": "汪小姐"},
+            {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md", "name": "汪小姐"},
         ],
     )
     admin.update_guest_extra_mcp(
@@ -193,7 +193,7 @@ def test_emit_room_info_room_default_llm_from_toml(env_paths):
     """[room.llm] 在 toml 里写过 → source = "room"，model 反映 toml 段，不是 env。"""
     rc = admin.create_room(
         paths=env_paths, room_id="rdef", name="rdef",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     admin.update_room_llm(
         paths=env_paths, room_dir=rc.room_dir, section="room",

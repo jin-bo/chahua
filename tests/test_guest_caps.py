@@ -17,7 +17,7 @@ def _session(env_paths):
         paths=env_paths,
         room_id="t1",
         name="t1",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     return build_room_session(rc.room_dir, env_paths)
 

@@ -50,7 +50,7 @@ def test_emit_mts_snapshot_replays_started_when_active(env_paths):
     """MTS 在跑 → emit_managed_session_snapshot 补发一帧 managed_session_started。"""
     rc = admin.create_room(
         paths=env_paths, room_id="mts", name="mts",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     session = build_room_session(rc.room_dir, env_paths)
     try:
@@ -79,7 +79,7 @@ def test_emit_mts_snapshot_noop_when_no_session(env_paths):
     """无 MTS → emit_managed_session_snapshot 空操作。"""
     rc = admin.create_room(
         paths=env_paths, room_id="nomts", name="nomts",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     session = build_room_session(rc.room_dir, env_paths)
     try:
@@ -127,15 +127,15 @@ def test_rooms_available_busy_flag(env_paths):
     """注册表里 inflight_alive 的房标 busy；其余房 busy=False。"""
     admin.create_room(
         paths=env_paths, room_id="alpha", name="alpha",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     admin.create_room(
         paths=env_paths, room_id="beta", name="beta",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     admin.create_room(
         paths=env_paths, room_id="gamma", name="gamma",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     # alpha 后台续跑（busy），beta 在注册表但 idle，gamma 不在注册表。
     srv = _server_with_runtimes(
@@ -155,7 +155,7 @@ def test_rooms_available_busy_flag_empty_registry(env_paths):
     """注册表为空 → 所有房 busy=False。"""
     admin.create_room(
         paths=env_paths, room_id="solo", name="solo",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
     srv = _server_with_runtimes(env_paths)
     rooms = _rooms_available_with_busy(srv)

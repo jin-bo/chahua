@@ -25,7 +25,7 @@ def _build_session(env_paths, *, permission: str = "read-only"):
         paths=env_paths,
         room_id="t",
         name="t",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总", "permission": permission}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总", "permission": permission}],
     )
     return build_room_session(rc.room_dir, env_paths)
 

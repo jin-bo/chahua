@@ -51,7 +51,7 @@ def _seed_room_with_one_guest(paths: Paths) -> RoomConfig:
     """种一个已有一位茶客（宝总）的房间，回出 RoomConfig。"""
     return admin.create_room(
         paths=paths, room_id="r1", name="r1",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -106,7 +106,7 @@ def test_default_mode_when_no_manifest_or_explicit(paths):
     rc = _seed_room_with_one_guest(paths)
     rc2 = admin.add_guest(
         paths=paths, room_dir=rc.room_dir,
-        persona="chahua/personas/汪小姐.md", name="汪小姐",
+        persona="chahua/personas/汪小姐/汪小姐.md", name="汪小姐",
         permission=None,
     )
     assert _find_guest(rc2, "汪小姐").permission == DEFAULT_MODE
@@ -206,23 +206,28 @@ def test_empty_permission_swallowed_by_renderer_breadcrumb(paths):
 
 def test_flat_form_does_not_consult_root_persona_toml(paths):
     """flat-form persona 的 md.parent 是 chahua/personas/ 本身 —— 若误置一份
-    persona.toml 在根，不应让所有内置 persona 共享同份 [defaults.guest]。
-    `_build_guest_with_manifest_defaults` 需有 dir-form 判定守卫。"""
-    # 在 user_data 下 chahua/personas/persona.toml 投毒 —— 任何 dir-form 都不该读它
+    persona.toml 在根，不应让 flat-form persona 继承它的 [defaults.guest]。
+    `_build_guest_with_manifest_defaults` 需有 dir-form 判定守卫。
+
+    P12.1 后内置 5 位都迁到 dir-form，需手工合成一个真 flat-form persona 测这条守卫。
+    """
+    # 合成真 flat-form persona —— 直接 personas/<N>.md 无子目录
+    flat_md = paths.user_data_root / PERSONAS_DIR_REL / "FlatVictim.md"
+    flat_md.parent.mkdir(parents=True, exist_ok=True)
+    flat_md.write_text("I am flat", encoding="utf-8")
+    # 在 personas/ 根投毒 persona.toml —— flat-form 守卫不去读它
     poison = paths.user_data_root / PERSONAS_DIR_REL / "persona.toml"
-    poison.parent.mkdir(parents=True, exist_ok=True)
     poison.write_text(
         'schema_version = 1\n[defaults.guest]\npermission = "workspace-write"\n',
         encoding="utf-8",
     )
-    # 加 flat-form 内置 persona —— 不应继承毒丸
     rc = _seed_room_with_one_guest(paths)
     rc2 = admin.add_guest(
         paths=paths, room_dir=rc.room_dir,
-        persona="chahua/personas/汪小姐.md", name="汪小姐",
+        persona="chahua/personas/FlatVictim.md", name="FlatVictim",
     )
-    # 必须是 DEFAULT_MODE 而非 workspace-write
-    assert _find_guest(rc2, "汪小姐").permission == DEFAULT_MODE
+    # 必须是 DEFAULT_MODE 而非 workspace-write —— 验 dir-form 守卫生效
+    assert _find_guest(rc2, "FlatVictim").permission == DEFAULT_MODE
 
 
 # ── 双根 resolve ─────────────────────────────────────────────────────

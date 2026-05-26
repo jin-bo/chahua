@@ -331,7 +331,7 @@ async def test_add_guest_ok(srv: _SpyServer):
     await srv._handle_inbound(
         {
             "type": INBOUND_ADD_GUEST,
-            "persona": "chahua/personas/宝总.md",
+            "persona": "chahua/personas/宝总/宝总.md",
             "name": None,  # 允许 null
             "permission": "workspace-write",
         },
@@ -340,7 +340,7 @@ async def test_add_guest_ok(srv: _SpyServer):
     assert srv.cancel_drain_count == 1
     assert srv.calls == [(
         "_add_guest",
-        {"persona": "chahua/personas/宝总.md", "name": None, "permission": "workspace-write"},
+        {"persona": "chahua/personas/宝总/宝总.md", "name": None, "permission": "workspace-write"},
     )]
 
 

@@ -32,6 +32,26 @@ from .llm_spec import LLM_TOML_FIELDS, LLMSpec
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 
 
+def _try_p12_1_dir_form_rewrite(persona_raw: str) -> Optional[str]:
+    """flat-form `chahua/personas/<N>.md` → dir-form `chahua/personas/<N>/<N>.md`。
+
+    pre-P12.1 老 room.toml 写法的 backward-compat shim。命中即返回 dir-form 字符串，
+    不命中（已是 dir-form / 不是 personas/ 下 / 后缀不对）返回 None。
+
+    判定保守：必须严格匹配「`chahua/personas/` 前缀 + 单层文件名 + `.md` 后缀」，避免误
+    rewrite 用户自定义路径。
+    """
+    prefix = "chahua/personas/"
+    suffix = ".md"
+    if not (persona_raw.startswith(prefix) and persona_raw.endswith(suffix)):
+        return None
+    stem_part = persona_raw[len(prefix) : -len(suffix)]
+    if not stem_part or "/" in stem_part:
+        # 已是 dir-form（含 "/"）或空 → 不 rewrite
+        return None
+    return f"{prefix}{stem_part}/{stem_part}{suffix}"
+
+
 @lru_cache(maxsize=128)
 def read_avatar_data_uri(persona_path: Path) -> Optional[str]:
     """与 persona md sibling 同名的 ``.png`` → ``data:image/png;base64,...``；缺图返 ``None``。
@@ -176,7 +196,7 @@ class GuestConfig:
         return self.persona_path.read_text(encoding="utf-8")
 
     def read_avatar_data_uri(self) -> Optional[str]:
-        """头像约定：与 persona md sibling 同名只换 ``.png``（``chahua/personas/宝总.png``）。
+        """头像约定：与 persona md sibling 同名只换 ``.png``（``chahua/personas/宝总/宝总.png``）。
 
         缺图返 ``None``，前端按缺省渲染（不挂 ``<img>``）。压缩到 128px PNG 时一张
         ~30KB，5 茶客约 150KB on wire 单帧塞得下；将来加更大的人头或更多茶客时
@@ -584,6 +604,22 @@ def _build_guests(
         # 双根搜：user_data 优先 → app fall through。打包后 ship 的 personas 在
         # app_root/chahua/personas/，用户自定义放 user_data_root 同位置即 override。
         hit = paths.find_in_data_then_app(persona_raw)
+        if hit is None:
+            # P12.1 backward-compat：pre-P12.1 内置 persona 是 flat-form
+            # `chahua/personas/<N>.md`；P12.1 起改 dir-form `chahua/personas/<N>/<N>.md`。
+            # 老 room.toml 还会写 flat-form 路径 —— 这里自动尝试 dir-form 升级，
+            # 让升级后的用户不至于因为路径漂移整个房间打不开。WARN 一次提示用户改 toml。
+            rewritten = _try_p12_1_dir_form_rewrite(persona_raw)
+            if rewritten is not None:
+                hit = paths.find_in_data_then_app(rewritten)
+                if hit is not None:
+                    import logging as _logging  # 避免顶层 import 循环
+                    _logging.getLogger(__name__).warning(
+                        "%s: [[guest]] %r persona 路径 %r 自动升级到 dir-form %r。"
+                        "建议改 room.toml 把 persona 改成新形式。",
+                        toml_path, name, persona_raw, rewritten,
+                    )
+                    persona_raw = rewritten
         if hit is None:
             raise RoomConfigError(
                 f"{toml_path}: [[guest]] {name!r} 的 persona 文件不存在：{persona_raw}\n"

@@ -173,8 +173,8 @@ def test_flat_form_builtin_no_manifest_default_permission(paths):
     rc = admin.create_room(
         paths=paths, room_id="r1", name="r1",
         guests=[
-            {"persona": "chahua/personas/宝总.md", "name": "宝总"},
-            {"persona": "chahua/personas/汪小姐.md", "name": "汪小姐"},
+            {"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"},
+            {"persona": "chahua/personas/汪小姐/汪小姐.md", "name": "汪小姐"},
         ],
     )
     assert _find_guest(rc, "宝总").permission == DEFAULT_MODE

@@ -54,7 +54,7 @@ def _clear_llm_env(monkeypatch):
 def _seed_room(paths) -> RoomConfig:
     return admin.create_room(
         paths=paths, room_id="default-spec", name="默认 spec",
-        guests=[{"persona": "chahua/personas/宝总.md", "name": "宝总"}],
+        guests=[{"persona": "chahua/personas/宝总/宝总.md", "name": "宝总"}],
     )
 
 
@@ -119,7 +119,7 @@ def test_room_llm_unknown_field_rejected(tmp_path: Path, paths):
     bad = (
         '[room]\nname = "x"\n\n'
         '[room.llm]\nmodel = "openai/gpt-4"\nnovelfield = 1\n\n'
-        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总.md"\n'
+        '[[guest]]\nname = "宝总"\npersona = "chahua/personas/宝总/宝总.md"\n'
         'permission = "read-only"\n'
     )
     (rc.room_dir / "room.toml").write_text(bad, encoding="utf-8")
