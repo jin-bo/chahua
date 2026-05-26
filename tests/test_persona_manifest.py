@@ -348,6 +348,23 @@ schema_version = 1
 # ── 坏 toml 语法 ───────────────────────────────────────────────────────
 
 
+def test_load_rejects_miscased_filename(tmp_path: Path) -> None:
+    """跨平台 case-strict 守卫：dir 里只有 ``Persona.toml``（错名）→ PersonaManifestError。
+
+    与 :func:`chahua.persona_import._validate_manifest_pre_write` 的 C4 守卫同口径。
+    macOS APFS / Windows NTFS 上 ``Path('persona.toml').is_file()`` 会匹配错名，没守卫
+    会让接受/拒绝行为跨平台漂（reviewer Codex P3）。
+    """
+    persona_dir = tmp_path / "Yvonne"
+    persona_dir.mkdir()
+    # 故意写错大小写 —— 注意 macOS APFS case-insensitive，无法同时存在两个名字。
+    (persona_dir / "Persona.toml").write_text(
+        "schema_version = 1\n", encoding="utf-8"
+    )
+    with pytest.raises(PersonaManifestError, match="大小写不对"):
+        load_persona_manifest(persona_dir)
+
+
 def test_load_bad_toml_syntax(tmp_path: Path) -> None:
     persona_dir = _write(tmp_path, "schema_version = 1\n[unclosed\n")
     with pytest.raises(PersonaManifestError, match="TOML"):

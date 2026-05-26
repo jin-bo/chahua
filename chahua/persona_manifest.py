@@ -65,6 +65,27 @@ def load_persona_manifest(persona_dir: Path) -> Optional[PersonaManifest]:
     由 inbound handler 转 NOTICE 给用户（承重不变量第 7 条）。
     """
     toml_path = persona_dir / "persona.toml"
+    # **跨平台 case-strict 守卫**：macOS APFS / Windows NTFS 是 case-insensitive，
+    # ``Path("persona.toml").is_file()`` 会静默匹配 ``Persona.toml`` 等错名；Linux ext4
+    # 不会 —— 不加守卫直接 load 会让"接受 / 拒绝错名"行为跨平台漂。与
+    # :mod:`chahua.persona_import` 的 C4 ``_validate_manifest_pre_write`` 同口径：
+    # 发现错名 → :class:`PersonaManifestError`，让用户改成 ``persona.toml`` 全小写。
+    try:
+        entries = {p.name for p in persona_dir.iterdir() if p.is_file()}
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        # ``iterdir`` 失败（权限等）静默退到正常路径，依赖下方的 is_file 兜底。
+        entries = set()
+    miscased = [
+        n for n in entries
+        if n != "persona.toml" and n.lower() == "persona.toml"
+    ]
+    if miscased and "persona.toml" not in entries:
+        raise PersonaManifestError(
+            f"{persona_dir / miscased[0]}: persona.toml 文件名大小写不对，"
+            f"请改成全小写 ``persona.toml``。"
+        )
     if not toml_path.is_file():
         return None
     try:
