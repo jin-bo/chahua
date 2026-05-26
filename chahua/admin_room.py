@@ -25,7 +25,7 @@ from typing import Any, Literal, Optional, Sequence
 
 from ._paths import Paths
 from ._persist import write_bytes_atomic, write_text_atomic
-from .admin_persona import normalize_room_id
+from .admin_persona import PERSONAS_REL_DIR, normalize_room_id
 from .admin_toml import (
     GuestSnapshot,
     TomlSnapshot,
@@ -47,6 +47,7 @@ from .config import (
 from .llm_spec import LLMSpec
 from .permissions import DEFAULT_MODE
 from .persona_assets import persona_relative
+from .persona_manifest import PersonaManifest, load_persona_manifest
 
 _log = logging.getLogger(__name__)
 
@@ -177,6 +178,60 @@ def _persona_to_relative(persona_path: Path, paths: Paths) -> str:
     return persona_relative(persona_path, paths)
 
 
+def _build_guest_with_manifest_defaults(
+    *,
+    paths: Paths,
+    name: str,
+    persona: str,
+    explicit_permission: Optional[str],
+) -> GuestSnapshot:
+    """构造一份新 `[[guest]]` snapshot dict —— 把 persona manifest 的 [defaults.guest]
+    + 顶层 summary 三级 inflate 到字段。
+
+    单一来源 —— :func:`chahua.admin_guest.add_guest` 与 :func:`create_room` 共调，
+    保证 plan §"承重不变量"第 4 / 6 条「字段 coalesce 顺序一致 + 仅在 admin 层 coalesce」
+    不漂。
+
+    coalesce 规则（一律 ``is not None`` 判定，禁止 ``or``——空字符串这类显式坏值应在
+    校验层失败、不被 ``or`` 吞掉，plan §"承重不变量"第 6 条）：
+
+    - **permission**：``explicit_permission`` 非 None → 用入参；否则 manifest
+      ``defaults_guest_permission`` 非 None → 用 manifest；否则 :data:`DEFAULT_MODE`。
+    - **isolation**：manifest 非 None → 用 manifest；否则**不写** snapshot 字段
+      （由 :class:`RoomConfig` 的 :data:`DEFAULT_ISOLATION` 在 load 时兜底）。
+    - **summary**：manifest 非 None → 用 manifest；否则不写（``resolve_guest_summary``
+      退到中央 LLM 摘要缓存）。
+
+    persona md 走双根 resolve（``paths.find_in_data_then_app``）；找不到 → manifest=None，
+    "persona 不存在" 由后续 :func:`load_room_config` 报。manifest 在但解析错 → 直接抛
+    :class:`PersonaManifestError`，由 inbound 层转 NOTICE 给用户（plan §"承重不变量"第 7 条）。
+    """
+    md_abs = paths.find_in_data_then_app(persona)
+    manifest: Optional[PersonaManifest] = None
+    # 仅 dir-form 才查 manifest —— flat-form md 的 parent 是 chahua/personas/ 本身，
+    # 误置一份 persona.toml 在根会让所有内置 persona 共享同份 [defaults.guest]
+    # （admin_persona._resolve_display_and_summary 同款守卫）。判定：parent.name 不等于
+    # personas 目录名 = dir-form 子目录。
+    if md_abs is not None and md_abs.parent.name != PERSONAS_REL_DIR.name:
+        # PersonaManifestError 向上抛 —— 消费路径严格 fail-fast。
+        manifest = load_persona_manifest(md_abs.parent)
+
+    if explicit_permission is not None:
+        perm = explicit_permission
+    elif manifest is not None and manifest.defaults_guest_permission is not None:
+        perm = manifest.defaults_guest_permission
+    else:
+        perm = DEFAULT_MODE
+
+    g: GuestSnapshot = {"name": name, "persona": persona, "permission": perm}
+    if manifest is not None:
+        if manifest.defaults_guest_isolation is not None:
+            g["isolation"] = manifest.defaults_guest_isolation
+        if manifest.summary is not None:
+            g["summary"] = manifest.summary
+    return g
+
+
 # ── room CRUD ────────────────────────────────────────────────────────────
 
 
@@ -205,15 +260,24 @@ def create_room(
     if not guests:
         raise ValueError("至少要有一位茶客")
 
+    # 事务性：所有 guest 的 manifest 必须先全部解析成功才 mkdir，避免某位 guest
+    # 持坏 manifest 时留下半成品房间目录（plan §"承重不变量"第 7 条）。
     # name 缺省 = persona 文件名（与 add_guest 同口径）。前端可只传 persona 一个字段。
-    normalized_guests: list[dict] = []
+    # permission 入站允许 None（"用户未显式选"），admin 层做 manifest defaults 三级 coalesce
+    # —— plan §"承重不变量"第 6 条禁止 `or DEFAULT_MODE` 这类 eager-default 吞值。
+    normalized_guests: list[GuestSnapshot] = []
     for g in guests:
-        gname = (g.get("name") or "").strip() or Path(str(g["persona"])).stem
-        normalized_guests.append({
-            "name": gname,
-            "persona": str(g["persona"]),
-            "permission": g.get("permission") or DEFAULT_MODE,
-        })
+        persona = str(g["persona"])
+        gname = (g.get("name") or "").strip() or Path(persona).stem
+        explicit_perm = g.get("permission")  # None 时走 manifest / DEFAULT_MODE
+        normalized_guests.append(
+            _build_guest_with_manifest_defaults(
+                paths=paths,
+                name=gname,
+                persona=persona,
+                explicit_permission=explicit_perm,
+            )
+        )
 
     room_dir = paths.user_data_root / "rooms" / room_id
     # mkdir(exist_ok=False) 自身就会 raise FileExistsError；不另设 if exists 兜底。

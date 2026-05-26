@@ -345,15 +345,18 @@ async def test_add_guest_ok(srv: _SpyServer):
 
 
 async def test_add_guest_default_permission(srv: _SpyServer):
-    """permission 缺 / falsy → DEFAULT_MODE。"""
-    from chahua.permissions import DEFAULT_MODE
+    """permission 缺 → 透传 None 给 admin 层。
 
+    P12 C3 承重不变量第 6 条：默认值合一仅在 admin 层；inbound 全链路用 None 表示
+    "用户未显式选"。manifest defaults → DEFAULT_MODE 三级 coalesce 在
+    :func:`chahua.admin_room._build_guest_with_manifest_defaults` 内完成，不在 inbound。
+    """
     await srv._handle_inbound(
         {"type": INBOUND_ADD_GUEST, "persona": "p.md"},
         _sink,
     )
     assert srv.calls == [(
-        "_add_guest", {"persona": "p.md", "name": None, "permission": DEFAULT_MODE}
+        "_add_guest", {"persona": "p.md", "name": None, "permission": None}
     )]
 
 

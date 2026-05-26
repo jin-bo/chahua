@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal, Optional, Sequence
 
 from ._paths import Paths
 from .admin_room import (
+    _build_guest_with_manifest_defaults,
     _read_existing_for_mutate,
     _rewrite_and_validate,
     _validate_llm_spec_dict,
@@ -42,21 +43,31 @@ def add_guest(
     room_dir: Path,
     persona: str,
     name: Optional[str] = None,
-    permission: str = DEFAULT_MODE,
+    permission: Optional[str] = None,
 ) -> RoomConfig:
     """往现有房间加一位茶客。返回新的 `RoomConfig`。
 
     `name` 缺省 = persona 文件名（不带 .md）。重名拒绝。persona 文件不存在 / 权限非法
     等问题靠校验路径（重新 `load_room_config`）兜底。
+
+    `permission=None` 表示「用户未显式选」—— admin 层走 persona manifest
+    `[defaults.guest].permission` → `DEFAULT_MODE` 三级 coalesce（plan §"承重不变量"
+    第 6 条）。manifest 里有 `[defaults.guest].isolation` / 顶层 `summary` 时也一并
+    inflate 到新 `[[guest]]` 字段。manifest 坏 → :class:`PersonaManifestError` 向上抛，
+    inbound 层转 NOTICE 给前端。
     """
     snapshot = _read_existing_for_mutate(room_dir, paths)
     if name is None or not name.strip():
         name = Path(persona).stem
     if any(g["name"] == name for g in snapshot["guests"]):
         raise ValueError(f"已有同名茶客：{name!r}")
-    snapshot["guests"] = list(snapshot["guests"]) + [
-        {"name": name, "persona": persona, "permission": permission}
-    ]
+    new_guest = _build_guest_with_manifest_defaults(
+        paths=paths,
+        name=name,
+        persona=persona,
+        explicit_permission=permission,
+    )
+    snapshot["guests"] = list(snapshot["guests"]) + [new_guest]
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
 

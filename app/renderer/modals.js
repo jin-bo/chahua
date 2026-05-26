@@ -7,7 +7,7 @@
 // 名单。openModal / closeModal 由 renderer 传入（decision_support 等也共用同一对）。
 // 全部 modal 的「点 backdrop / × / ESC 关闭」通用兜底也在这里一并挂。
 
-import { Inbound, DEFAULT_PERMISSION, buildOwnerOptionData } from "./events.js";
+import { Inbound, buildOwnerOptionData } from "./events.js";
 import { renderPersonaPicker, createPersonaImport } from "./persona.js";
 
 export function wireModals({
@@ -33,11 +33,13 @@ export function wireModals({
       multi: false,
       excludeNames: inRoom,
       onPick: (p) => {
+        // 不送 permission 字段 —— admin 层根据 persona manifest [defaults.guest].permission
+        // 与 DEFAULT_MODE 做三级 coalesce（P12 C3 承重不变量第 6 条：默认值合一仅在 admin
+        // 层，frontend/inbound 全链路用 None 表示「用户未显式选」）。
         send({
           type: Inbound.ADD_GUEST,
           persona: p.persona,
           name: p.name,
-          permission: DEFAULT_PERMISSION,
         });
         setStatus("", `添加茶客 ${p.name}…`);
         closeModal(addGuestModal);
@@ -77,10 +79,10 @@ export function wireModals({
       window.alert("至少选 1 位茶客");
       return;
     }
+    // 同 ADD_GUEST：不送 permission，admin 层走 manifest defaults → DEFAULT_MODE 三级 coalesce。
     const guestsPayload = selected.map((li) => ({
       persona: li.dataset.persona,
       name: li.dataset.name,
-      permission: DEFAULT_PERMISSION,
     }));
     // room_id 用 name 直接当目录名 —— server 端 normalize_room_id 会再洗一遍非法字符；
     // 暴露独立 id 字段会增加 UI 复杂度（用户难以理解 id vs name 的区别）。

@@ -22,8 +22,8 @@ from ._server_helpers import (
     require_str,
 )
 from .events import EnvelopeSink, NOTICE_LEVEL_ERROR
-from .permissions import DEFAULT_MODE
 from .persona_assets import persona_relative
+from .persona_manifest import PersonaManifestError
 
 _log = logging.getLogger(__name__)
 
@@ -56,10 +56,15 @@ class AdminHandlers:
         *,
         persona: str,
         name: Optional[str],
-        permission: str,
+        permission: Optional[str],
         sink: EnvelopeSink,
     ) -> None:
-        """往当前房间加一位茶客：改 room.toml + 重装 session + 重发 snapshot。"""
+        """往当前房间加一位茶客：改 room.toml + 重装 session + 重发 snapshot。
+
+        ``permission=None`` 表示"用户未显式选"，admin 层 inflate manifest defaults
+        （plan §"承重不变量"第 6 条）。manifest 坏 → ``PersonaManifestError`` 走 NOTICE
+        通路、不被 catch-all 吞成 anonymous log（plan §"承重不变量"第 7 条）。
+        """
         room_dir = self.server._session.room_config.room_dir
         try:
             admin.add_guest(
@@ -69,6 +74,11 @@ class AdminHandlers:
                 name=name,
                 permission=permission,
             )
+        except PersonaManifestError as e:
+            _log.warning("add_guest: persona=%r manifest 坏：%s", persona, e)
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
+            self.server._emit_room_snapshot(sink)
+            return
         except Exception:
             _log.exception("add_guest: persona=%r name=%r 失败", persona, name)
             # 写 toml 失败 / 校验失败：room.toml 已被回滚到 snapshot，session 还是旧的。
@@ -309,6 +319,13 @@ class AdminHandlers:
                 rules=rules,
                 guests=guests,
             )
+        except PersonaManifestError as e:
+            # 任意 guest 的 manifest 坏 → 整个 create_room 拒；事务性：mkdir 之前
+            # 解析所有 manifest，所以这里被抛说明 room_dir 还没被建（plan §"承重不变量"第 7 条）。
+            _log.warning("create_room: room_id=%r manifest 坏：%s", room_id, e)
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
+            self.server._emit_room_snapshot(sink)
+            return
         except Exception:
             _log.exception("create_room: room_id=%r 失败", room_id)
             # 创建失败：磁盘已 rmtree 回滚（admin.create_room 内部）；前端没切走，重发当
@@ -363,10 +380,12 @@ class AdminHandlers:
                 INBOUND_ADD_GUEST, type(name),
             )
             return
-        # permission 缺 / falsy → DEFAULT_MODE；显式传就必须是 str。
-        permission = data.get("permission") or DEFAULT_MODE
-        if not isinstance(permission, str):
-            _log.warning("ignoring %s: permission 必须是 str", INBOUND_ADD_GUEST)
+        # permission 入站允许 None（"用户未显式选"）—— admin 层走 manifest defaults
+        # → DEFAULT_MODE 三级 coalesce。不再 eager `or DEFAULT_MODE`（plan §"承重不变量"
+        # 第 6 条：默认值合一仅在 admin 层）。显式传非 None 时必须是 str。
+        permission = data.get("permission")
+        if permission is not None and not isinstance(permission, str):
+            _log.warning("ignoring %s: permission 必须是 str 或 null", INBOUND_ADD_GUEST)
             return
         await self.server._cancel_and_drain_all_foreground()
         self._add_guest(persona=persona, name=name, permission=permission, sink=sink)
@@ -488,14 +507,23 @@ class AdminHandlers:
         if not isinstance(guests, list) or not guests:
             _log.warning("ignoring %s: guests 缺 / 空", INBOUND_CREATE_ROOM)
             return
-        # 防御：guests 每项至少要 persona:str —— admin.create_room 也校验，这里
-        # 早一步报"前端协议不对"而不是被动等到 KeyError。
-        if not all(
-            isinstance(g, dict) and isinstance(g.get("persona"), str) and g["persona"]
-            for g in guests
-        ):
-            _log.warning("ignoring %s: guests 每项必须含 persona:str", INBOUND_CREATE_ROOM)
-            return
+        # 防御：guests 每项至少要 persona:str；name / permission 可选 + 非 None 时必须是 str
+        # （permission 为 None 走 manifest defaults coalesce —— plan §"承重不变量"第 6 条）。
+        for g in guests:
+            if not isinstance(g, dict):
+                _log.warning("ignoring %s: guests 项必须是 dict", INBOUND_CREATE_ROOM)
+                return
+            if not (isinstance(g.get("persona"), str) and g["persona"]):
+                _log.warning("ignoring %s: guests 每项必须含 persona:str", INBOUND_CREATE_ROOM)
+                return
+            perm = g.get("permission")
+            if perm is not None and not isinstance(perm, str):
+                _log.warning("ignoring %s: guests 项 permission 必须是 str 或 null", INBOUND_CREATE_ROOM)
+                return
+            gname = g.get("name")
+            if gname is not None and not isinstance(gname, str):
+                _log.warning("ignoring %s: guests 项 name 必须是 str 或 null", INBOUND_CREATE_ROOM)
+                return
         # topic / rules 是可选 str；缺 / 非 str → 空串。一个表达式收 None / 其它类型。
         topic = data.get("topic") if isinstance(data.get("topic"), str) else ""
         rules = data.get("rules") if isinstance(data.get("rules"), str) else ""
