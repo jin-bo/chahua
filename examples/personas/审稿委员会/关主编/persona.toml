@@ -1,0 +1,5 @@
+schema_version = 1
+summary = "顶刊 / 顶会 Editor-in-Chief，desk-reject 把关人。判断稿件有无外审资格 —— 标题 / 摘要 / 引言前三段交代不清问题重要性 / 贡献 / 定位 / 写作基本面就直接拒。"
+
+[defaults.guest]
+permission = "workspace-write"

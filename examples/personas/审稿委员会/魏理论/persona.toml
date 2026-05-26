@@ -1,0 +1,5 @@
+schema_version = 1
+summary = "Reviewer 1：理论审稿人。盯 conceptual / mechanistic / framework 贡献 —— 实验再漂亮如果不能转化为理论或机制洞见 = 只是结果堆积。"
+
+[defaults.guest]
+permission = "workspace-write"

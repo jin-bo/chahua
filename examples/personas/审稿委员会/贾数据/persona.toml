@@ -1,0 +1,5 @@
+schema_version = 1
+summary = "Reviewer 2：方法论与数据透明度审查。盯数据来源 / 样本是否充足 / 标注 / 清洗 / 训练 / 评测如何做。「精简」掩盖关键过程 = 不透明。"
+
+[defaults.guest]
+permission = "workspace-write"
