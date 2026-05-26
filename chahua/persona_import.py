@@ -30,6 +30,7 @@ from typing import Optional
 from ._paths import Paths
 from ._persist import write_bytes_atomic
 from .admin import PERSONAS_REL_DIR, sanitize_fs_name
+from .persona_manifest import PersonaManifestError, parse_persona_manifest_bytes
 
 _log = logging.getLogger(__name__)
 
@@ -74,6 +75,11 @@ def import_from_folder(paths: Paths, src: Path) -> ImportedPersona:
 
     流程：定位 ``<Name>.md`` → 校验目标未占 → 拷整目录到
     ``user_data_root/chahua/personas/<Name>/``。
+
+    **manifest 校验时机**：发现 ``persona.toml`` 时**在 ``_write_files`` 之前**对字节
+    做 dry-run（:func:`_validate_manifest_pre_write`）。坏 manifest 直接 raise，
+    target_dir 不被创建 —— 否则下次重导会撞 "已存在"（plan §"持久化、事件契约"
+    第 7 条）。
     """
     if not src.is_dir():
         raise PersonaImportError(f"源目录不存在或不是目录：{src}")
@@ -81,6 +87,7 @@ def import_from_folder(paths: Paths, src: Path) -> ImportedPersona:
     target_dir = _validate_target(paths, name)
 
     files = _collect_local_files(src)
+    _validate_manifest_pre_write(files)
     _write_files(target_dir, files)
     return _make_result(name, target_dir, files)
 
@@ -90,6 +97,8 @@ def import_from_github(paths: Paths, url: str) -> ImportedPersona:
 
     - ``https://github.com/<owner>/<repo>`` —— 整个仓库根作为 persona 目录，name 取 repo 名。
     - ``https://github.com/<owner>/<repo>/tree/<branch>/<path>`` —— 子目录作为 persona 目录。
+
+    manifest 校验时机同 :func:`import_from_folder`：写盘前 dry-run。
     """
     owner, repo, branch, path = _parse_github_url(url)
     name = _derive_name_from_github(repo, path)
@@ -100,8 +109,38 @@ def import_from_github(paths: Paths, url: str) -> ImportedPersona:
         raise PersonaImportError(
             f"GitHub 目录里没有可导入的文件：{url}"
         )
+    _validate_manifest_pre_write(files)
     _write_files(target_dir, files)
     return _make_result(name, target_dir, files)
+
+
+def _validate_manifest_pre_write(files: list[tuple[str, bytes]]) -> None:
+    """如果采集到根级 ``persona.toml``，在落盘之前用 :func:`parse_persona_manifest_bytes`
+    做 dry-run；坏 → :class:`PersonaImportError`，让 :func:`_write_files` 永远拿不到
+    机会建半成品 target_dir（plan §"承重不变量"第 7 条）。
+
+    无 ``persona.toml`` 时直接 return —— manifest 是可选的（plan §"承重不变量"
+    第 5 条），老社区包持 ``<Name>.toml`` legacy sidecar 不受影响。
+
+    **大小写严格小写**：source 有 ``Persona.toml`` / ``PERSONA.TOML`` 等错名 → 拒。
+    macOS APFS / Windows NTFS case-insensitive FS 上 ``load_persona_manifest`` 仍能
+    找到错名文件，但 Linux ext4 case-sensitive 上看不见 —— 跨平台行为会漂移，导入
+    阶段严格拒名是最稳办法。**仅匹配根级**：nested ``skills/foo/persona.toml`` 等
+    不被识别为 manifest（runtime 也不读，写盘后是 dead weight）。
+    """
+    for rel_path, data in files:
+        if rel_path == "persona.toml":
+            try:
+                parse_persona_manifest_bytes(data)
+            except PersonaManifestError as e:
+                raise PersonaImportError(
+                    f"persona.toml 不合法：{e}"
+                ) from e
+            continue  # 防御：_collect 写法上唯一 rel_path，万一未来漏出多份，全验一遍
+        if "/" not in rel_path and rel_path.lower() == "persona.toml":
+            raise PersonaImportError(
+                f"persona.toml 文件名大小写不对：{rel_path!r}。请改成全小写 persona.toml。"
+            )
 
 
 # ── 名字 / 目标校验 ────────────────────────────────────────────────────────
