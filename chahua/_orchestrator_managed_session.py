@@ -246,7 +246,7 @@ class ManagedSessionOps:
         # 「budget=N → 最多 N worker turn」严格语义，见
         # test_budget_one_runs_one_worker_then_exhausted）。
         stop = self.stop_reason()
-        if stop:
+        if stop is not None:
             if (
                 stop == MANAGED_SESSION_REASON_BUDGET_EXHAUSTED
                 and self.orch._handoff_ops._queue
@@ -282,7 +282,7 @@ class ManagedSessionOps:
         if ms is None:
             return
         stop = self.stop_reason()
-        if stop:
+        if stop is not None:
             self.end_managed_session(sink, reason=stop)
             return
         just_ran_manager = (
@@ -290,7 +290,8 @@ class ManagedSessionOps:
         )
         if just_ran_manager:
             # 管理者回合：提议已在回合内由 hook 入队；没派活则队列此刻为空，drain
-            # 走到收尾、由 run_pending_handoff 收尾兜底归 manager_finished。
+            # 走到收尾即 ``return``，MTS 保持 dormant 等用户下一句话（P8.4：
+            # ``MANAGER_FINISHED`` reason 已退役）。
             return
         # worker 回合：worker 不会自动入队，队列空即「这一棒没有后续」→ 回调管理者。
         if not self.orch._handoff_ops._queue:

@@ -363,6 +363,15 @@ class Orchestrator:
     def end_managed_session(self, sink: EnvelopeSink, *, reason: str) -> None:
         self._mts_ops.end_managed_session(sink, reason=reason)
 
+    def check_managed_session_after_task_change(
+        self, sink: EnvelopeSink,
+    ) -> None:
+        """slot 拆分：薄转发到 :class:`ManagedSessionOps` —— task inbound handler
+        在 mutation + ``_emit_task_info`` 之后调一次，命中 ``stop_reason()`` 即收尾
+        MTS（P8.4 §4.2）。与 ``start_managed_session`` / ``end_managed_session``
+        同口径在主类暴露，避免 callsite 穿 ``_mts_ops`` 私 slot。"""
+        self._mts_ops.check_after_task_change(sink)
+
     def _managed_session_stop_reason(self) -> Optional[str]:
         return self._mts_ops.stop_reason()
 
@@ -441,9 +450,11 @@ class Orchestrator:
         # 工作量受单一 cap 约束」不变量。
         #
         # 守卫：仅 MTS 活 + 队列非空才跑；非 MTS / 非 dormant / chain 内非管理者发
-        # 言（合法分支）→ ``_handoff_queue`` 恒空，整段跳过，零开销。
+        # 言（合法分支）→ ``_handoff_queue`` 恒空，整段跳过，零开销。读 MTS 状态走
+        # 主类公开 ``managed_session`` property 而非穿 ``_mts_ops`` 私 slot（与本文
+        # 件其它 MTS 访问点同口径，未来 slot 重构 / property 加守卫不动这里）。
         if (
-            self._mts_ops.managed_session is not None
+            self.managed_session is not None
             and self._handoff_queue
         ):
             await self.run_pending_handoff(

@@ -26,7 +26,9 @@ from chahua.session import build_room_session
 def session_and_srv(env_paths, monkeypatch):
     # MTS 校验通过会经 _enqueue_handoff_and_maybe_start 启 drain —— monkeypatch
     # run_pending_handoff 成 noop，避免测试真跑 LLM。
-    async def _noop_drain(self, sink, *, task_id):
+    # P8.4 ``reset_cap`` 形参兼容：``submit_user_message`` 末尾 re-drain 走
+    # ``reset_cap=False``；签名漏字段会 TypeError 把测试炸成误失败。
+    async def _noop_drain(self, sink, *, task_id, reset_cap=True):
         return None
 
     monkeypatch.setattr(Orchestrator, "run_pending_handoff", _noop_drain)
