@@ -128,6 +128,18 @@ export function createManagedSession({
       setStatus("error", "房间里没有茶客 —— 无法指派管理者");
       return;
     }
+    // 管理者候选 = 任务负责人范围 ∩ 在场茶客。owner 非空 → 只允许该人；
+    // owner 为空（全员）→ 退化到所有茶客。owner 已不在场（已删 / 离房）→ 错误提示。
+    const ownerName = typeof active.owner === "string" && active.owner ? active.owner : null;
+    const guestSet = new Set(guests);
+    const candidates = ownerName === null ? guests : (guestSet.has(ownerName) ? [ownerName] : []);
+    if (candidates.length === 0) {
+      setStatus(
+        "error",
+        `任务负责人「${ownerName}」不在场 —— 先把 ta 加回房间，或把负责人改成「全员」`,
+      );
+      return;
+    }
 
     const pop = document.createElement("div");
     pop.className = "popover managed-popover";
@@ -148,14 +160,22 @@ export function createManagedSession({
     mgrLabel.textContent = "管理者";
     const mgrSelect = document.createElement("select");
     mgrSelect.className = "managed-popover-manager";
-    for (const name of guests) {
+    for (const name of candidates) {
       const opt = document.createElement("option");
       opt.value = name;
       opt.textContent = name;
       mgrSelect.appendChild(opt);
     }
+    if (candidates.length === 1) mgrSelect.disabled = true;
     mgrLabel.appendChild(mgrSelect);
     pop.appendChild(mgrLabel);
+
+    if (ownerName !== null) {
+      const note = document.createElement("div");
+      note.className = "managed-popover-note";
+      note.textContent = `当前任务负责人是「${ownerName}」；想换人请先改任务负责人`;
+      pop.appendChild(note);
+    }
 
     const budgetLabel = document.createElement("label");
     budgetLabel.className = "managed-popover-field";

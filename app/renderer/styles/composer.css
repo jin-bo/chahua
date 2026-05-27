@@ -529,3 +529,9 @@ body:not(.has-active-task) .pending-file-attach { display: none; }
   cursor: pointer;
 }
 .managed-popover-confirm:hover { background: #2e4252; }
+.managed-popover-note {
+  margin: -4px 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #999;
+}
