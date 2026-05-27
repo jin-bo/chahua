@@ -371,6 +371,14 @@ class ManagedSessionOps:
         # 静默 drop —— 用户看不到任何反馈。降级渲采纳卡让用户/管理者可见、bg 跑完后
         # 用户点采纳即走 inbound 正常路径。读 orch 的 ``active_guest_names``。
         busy: set[str] = self.orch.active_guest_names or set()
+        # P8.4.9（Codex round 3 P2）：本 hook 在 manager 自己的 ``speak()`` 内跑，
+        # ``let_speak`` 已把 manager 标为 busy；但被提议的 handoff item 会在 manager
+        # 这一轮 ``speak()`` finally 把 busy 标解除**之后**才被 drain 消费。最常见的
+        # 「workers 讨论、我（manager）汇总」panel 模式（summarizer=manager）原 P11 C12
+        # 用全集 busy 会把它当采纳卡降级，等用户手动点—— P8.4 MTS 自治流被打破。把
+        # manager 从 summarizer 检查的 busy 集合里剔除；delegate target=manager 与
+        # panel panelist=manager 保留原拒绝（语义闭环 / 圆桌应是 worker 间讨论）。
+        busy_excl_manager = busy - {manager}
         note = f"托管 · {manager} 指派"
         if kind == TASK_PROPOSAL_KIND_HANDOFF_DELEGATE:
             target = payload.get("target")
@@ -409,7 +417,7 @@ class ManagedSessionOps:
                     return None
                 if summarizer not in self.orch._guests or summarizer in targets:
                     return None
-                if summarizer in busy:
+                if summarizer in busy_excl_manager:
                     return None
             cap = min(
                 MAX_PANEL_TARGETS,

@@ -283,6 +283,59 @@ def test_intercept_manager_panel_enqueues() -> None:
     assert orch._handoff_queue[0].targets == ("Wei", "Lin")
 
 
+def test_intercept_panel_summarizer_is_manager_enqueues() -> None:
+    """P8.4.9（Codex round 3 P2）：manager 在自己 turn 内提议 panel + summarizer=自己
+    → 仍要 auto-enqueue。
+
+    本 hook 跑在 manager 的 ``speak()`` 内，``_let_speak`` 已把 manager 标 busy；
+    但 panel 的 summarizer 槽位是 manager 这一轮结束**之后**才跑，那时 busy 已清。
+    原 P11 C12 用全集 busy 把这种「workers 讨论、我汇总」MTS 模式当采纳卡降级，
+    fix：从 summarizer busy 检查里剔除 manager。
+    """
+    orch, _ = _build("Maya", "Wei", "Lin")
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=3,
+    )
+    # manager 自己 speak 期间被 _let_speak 标 busy。
+    orch.active_guest_names = {"Maya"}
+    env = ChahuaEnvelope(
+        room_id="t", turn_id="x", guest_name="Maya", message_id=None,
+        type=ChahuaEventType.TASK_PROPOSAL,
+        data={"proposer": "Maya", "kind": TASK_PROPOSAL_KIND_HANDOFF_PANEL,
+              "payload": {
+                  "targets": ["Wei", "Lin"],
+                  "summarizer": "Maya",
+              }},
+    )
+    assert orch._intercept_task_proposal(env, lambda _e: None) is True
+    assert len(orch._handoff_queue) == 1
+    item = orch._handoff_queue[0]
+    assert item.kind is HandoffKind.PANEL
+    assert item.targets == ("Wei", "Lin")
+    assert item.summarizer == "Maya"
+
+
+def test_intercept_panel_panelist_is_manager_still_rejected() -> None:
+    """对照：manager 作为 panelist（不是 summarizer）仍按 P11 C12 拒绝（语义闭环）。
+
+    panel 是 worker 间讨论；manager 把自己列进 panelists 在 P8.4.9 narrow 中**不**放行，
+    避免「manager 在自己回合里再让自己讲一遍」的怪异语义。
+    """
+    orch, _ = _build("Maya", "Wei", "Lin")
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=3,
+    )
+    orch.active_guest_names = {"Maya"}
+    env = ChahuaEnvelope(
+        room_id="t", turn_id="x", guest_name="Maya", message_id=None,
+        type=ChahuaEventType.TASK_PROPOSAL,
+        data={"proposer": "Maya", "kind": TASK_PROPOSAL_KIND_HANDOFF_PANEL,
+              "payload": {"targets": ["Wei", "Maya"]}},
+    )
+    assert orch._intercept_task_proposal(env, lambda _e: None) is False
+    assert len(orch._handoff_queue) == 0
+
+
 def _panel_proposal(payload: dict) -> ChahuaEnvelope:
     return ChahuaEnvelope(
         room_id="t", turn_id="x", guest_name="Maya", message_id=None,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from chahua import admin
+from chahua.agent_run import create as create_agent_run
 from chahua.events import ChahuaEventType
 from chahua.handoff import HandoffItem, HandoffKind, ManagedSession
 from chahua.orchestrator import Orchestrator
@@ -103,23 +104,28 @@ async def test_start_manager_not_present(session_and_srv) -> None:
 
 
 async def test_start_manager_busy_rejected(session_and_srv) -> None:
-    """P8.4.7（Codex round 1 P2）：manager 正忙 → 拒绝开启 MTS。
+    """P8.4.7（Codex round 1 P2）/ P8.4.9 narrow（round 3 P2）：manager 在跑 bg run
+    → 拒绝开启 MTS。
 
     否则 kickoff DELEGATE 会被 drain 的 busy-winner 守卫静默 drop（P11 C12），
     UI 已收到 ``managed_session_started`` 却永远没人接 kickoff，MTS 卡死无反馈。
+    P8.4.9：只查 bg run（不可抢占），前台 / handoff 占用允许 ``_enqueue_handoff_and_maybe_start``
+    抢占清场。
     """
     session, srv = session_and_srv
     tid = _open_task(session)
     orch = srv._session.orchestrator
-    # 模拟 bg run 占用 manager。
-    orch.active_guest_names = {"宝总"}
+    # 真实地装一份 bg run（与 _start_agent_run 入口同口径）。
+    run = create_agent_run(room_id="t1", guest_name="宝总", instruction="x")
+    srv._foreground_runtime.agent_runs[run.run_id] = run
+    srv._foreground_runtime.active_guest_names.add("宝总")
     cap = await _send(srv, {
         "type": INBOUND_MANAGED_SESSION_START, "task_id": tid,
         "manager_guest": "宝总", "budget": 6,
     })
     notices = _by_type(cap, ChahuaEventType.NOTICE.value)
     assert notices and notices[0]["data"]["level"] == "error"
-    assert "正忙" in notices[0]["data"]["text"]
+    assert "后台任务" in notices[0]["data"]["text"]
     assert orch.managed_session is None
     # 也不应残留 kickoff item 在队列。
     assert not orch.has_pending_handoff

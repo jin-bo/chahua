@@ -234,14 +234,30 @@ class RoomRuntime:
         )
 
     def guest_busy(self, name: str) -> bool:
-        """名为 ``name`` 的茶客是否「已占用 / 即将 speak」。
+        """名为 ``name`` 的茶客是否「已占用 / 即将 speak」（任一来源）。
 
         :attr:`active_guest_names` 是 :meth:`guest_busy` 的唯一数据源 ——
         前台 / handoff drain 的 ``_let_speak`` 在 ``speak()`` 前同步 add、finally
         discard；bg run 在 inbound / 工具校验通过、登记 ``agent_runs`` 那一瞬同步
         add（先于 ``create_task``），wrapper 外层 finally discard。
+
+        **不能直接用本方法做 handoff inbound 准入校验**：用户 / handoff 在跑可被
+        ``_enqueue_handoff_and_maybe_start`` 的 cancel-and-drain 抢占，busy 反映的
+        是「此刻占用」、不是「不可抢占」。准入校验走 :meth:`guest_in_bg_run`（仅
+        bg run 不可抢占），让前台 turn 的合法抢占语义不被误拒（Codex P8.4 round 3 P2）。
         """
         return name in self.active_guest_names
+
+    def guest_in_bg_run(self, name: str) -> bool:
+        """名为 ``name`` 的茶客是否正在跑一个 bg run（``agent_runs`` 中）。
+
+        与 :meth:`guest_busy` 区别：``guest_busy`` 含所有来源（前台 / handoff drain /
+        bg run）；本方法**只**计 bg run —— 前台 turn / handoff drain 可被新到来的
+        handoff 请求经 ``_cancel_and_drain_inflight`` 抢占，bg run 不可（独立运行）。
+        handoff / MTS 准入校验必须用本方法，否则会把「正在前台讲话但可被抢占」误判为
+        「不可派活」（Codex P8.4 round 3 P2，对应 P11 C12 的 over-shoot 修）。
+        """
+        return any(run.guest_name == name for run in self.agent_runs.values())
 
     def set_inflight(
         self,

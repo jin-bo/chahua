@@ -1,15 +1,23 @@
-"""P11 C12：handoff 全家拒 busy 茶客（防 ``let_speak`` 与 bg ``arun`` 并发跑在
-同一 ``agentao.Agentao`` 实例）。
+"""P11 C12（+ P8.4.9 Codex round 3 narrow）：handoff 全家拒 **bg-run busy** 茶客
+（防 ``let_speak`` 与 bg ``arun`` 并发跑在同一 ``agentao.Agentao`` 实例）。
+
+**P8.4.9 narrow（Codex round 3 P2）**：inbound 准入校验只看 ``guest_in_bg_run``，
+不看 ``active_guest_names`` 全集。前台 turn / handoff drain 占用让
+``_enqueue_handoff_and_maybe_start`` 抢占；只有 bg run 是不可抢占的真忙。drain
+自身的 busy-winner 守卫（``_advance_to_runnable_handoff``）仍用 ``active_guest_names``
+全集兜底（覆盖 inbound→drain race / MTS auto-enqueue 间瞬态）。
 
 覆盖五处 fix：
 
-1. ``_inbound_handoff_delegate``：target busy → NOTICE error + 不入队。
-2. ``_inbound_handoff_review``：target busy → NOTICE error + 不入队。
-3. ``_inbound_handoff_panel``：任一 panelist / summarizer busy → NOTICE error + 不入队。
-4. ``_advance_to_runnable_handoff``（drain 兜底）：队首项 winner busy → drop + emit
-   ``HANDOFF_ENQUEUED`` 快照。覆盖 inbound→drain race + MTS auto-enqueue 路径。
+1. ``_inbound_handoff_delegate``：target 在跑 bg run → NOTICE error + 不入队。
+2. ``_inbound_handoff_review``：target 在跑 bg run → NOTICE error + 不入队。
+3. ``_inbound_handoff_panel``：任一 panelist / summarizer 在跑 bg run → NOTICE
+   error + 不入队。
+4. ``_advance_to_runnable_handoff``（drain 兜底）：队首项 winner 在 active_guest_names
+   全集中 → drop + emit ``HANDOFF_ENQUEUED`` 快照。覆盖 inbound→drain race +
+   MTS auto-enqueue 路径。
 5. ``ManagedSessionOps._handoff_item_from_proposal``（MTS intercept 路径）：target /
-   panelist / summarizer busy → 返 ``None`` 让 hook 降级渲采纳卡（与 inbound 同口径）。
+   panelist / summarizer 在 active 全集中 → 返 ``None`` 让 hook 降级渲采纳卡。
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ import contextlib
 import pytest
 
 from chahua import admin
+from chahua.agent_run import create as create_agent_run
 from chahua.cursor import GuestCursor
 from chahua.events import ChahuaEnvelope, ChahuaEventType
 from chahua.handoff import HandoffItem, HandoffKind
@@ -77,10 +86,19 @@ def _assert_rejected_with(captured, queue, *, contains: str) -> None:
 # ── 1) handoff_delegate inbound：busy target → NOTICE error + 不入队 ──────────
 
 
+def _add_bg_run(srv, name: str) -> None:
+    """模拟 bg run 占用：往 ``agent_runs`` + ``active_guest_names`` 同步落一份。
+    与 P11 真实 inbound 入口同口径（``_start_agent_run``：先 add(target) 再
+    ``create_task``）。"""
+    run = create_agent_run(room_id="t1", guest_name=name, instruction="x")
+    srv._foreground_runtime.agent_runs[run.run_id] = run
+    srv._foreground_runtime.active_guest_names.add(name)
+
+
 async def test_delegate_busy_target_notice_error(session_and_srv) -> None:
+    """target 在跑 bg run → 拒（``guest_in_bg_run`` 命中）。"""
     session, srv = session_and_srv
-    # 模拟 bg run 占用：直接往 runtime.active_guest_names add
-    srv._foreground_runtime.active_guest_names.add("宝总")
+    _add_bg_run(srv, "宝总")
 
     captured: list[dict] = []
     await srv._handle_inbound(
@@ -88,7 +106,7 @@ async def test_delegate_busy_target_notice_error(session_and_srv) -> None:
         lambda e: captured.append(e.to_dict()),
     )
     _assert_rejected_with(
-        captured, session.orchestrator._handoff_queue, contains="正忙",
+        captured, session.orchestrator._handoff_queue, contains="后台任务",
     )
     assert srv._inflight_turn_task is None
 
@@ -97,10 +115,10 @@ async def test_delegate_busy_target_notice_error(session_and_srv) -> None:
 
 
 async def test_review_busy_target_notice_error(session_and_srv) -> None:
+    """target 在跑 bg run → 拒。"""
     session, srv = session_and_srv
-    # 制造一条合法 message_id（先让宝总"发"一条占位消息进 transcript）
     msg = session.room.append("宝总", "占位")
-    srv._foreground_runtime.active_guest_names.add("宝总")
+    _add_bg_run(srv, "宝总")
 
     captured: list[dict] = []
     await srv._handle_inbound(
@@ -112,7 +130,7 @@ async def test_review_busy_target_notice_error(session_and_srv) -> None:
         lambda e: captured.append(e.to_dict()),
     )
     _assert_rejected_with(
-        captured, session.orchestrator._handoff_queue, contains="正忙",
+        captured, session.orchestrator._handoff_queue, contains="后台任务",
     )
     assert srv._inflight_turn_task is None
 
@@ -121,8 +139,9 @@ async def test_review_busy_target_notice_error(session_and_srv) -> None:
 
 
 async def test_panel_busy_panelist_notice_error(session_and_srv) -> None:
+    """panelist 在跑 bg run → 拒。"""
     session, srv = session_and_srv
-    srv._foreground_runtime.active_guest_names.add("范总")
+    _add_bg_run(srv, "范总")
 
     captured: list[dict] = []
     await srv._handle_inbound(
@@ -130,14 +149,15 @@ async def test_panel_busy_panelist_notice_error(session_and_srv) -> None:
         lambda e: captured.append(e.to_dict()),
     )
     _assert_rejected_with(
-        captured, session.orchestrator._handoff_queue, contains="正忙",
+        captured, session.orchestrator._handoff_queue, contains="后台任务",
     )
     assert srv._inflight_turn_task is None
 
 
 async def test_panel_busy_summarizer_notice_error(session_and_srv) -> None:
+    """summarizer 在跑 bg run → 拒。"""
     session, srv = session_and_srv
-    srv._foreground_runtime.active_guest_names.add("玲子")
+    _add_bg_run(srv, "玲子")
 
     captured: list[dict] = []
     await srv._handle_inbound(
@@ -149,9 +169,38 @@ async def test_panel_busy_summarizer_notice_error(session_and_srv) -> None:
         lambda e: captured.append(e.to_dict()),
     )
     _assert_rejected_with(
-        captured, session.orchestrator._handoff_queue, contains="正忙",
+        captured, session.orchestrator._handoff_queue, contains="后台任务",
     )
     assert srv._inflight_turn_task is None
+
+
+# ── 3b) P8.4.9 narrow：前台 / handoff 占用不被 inbound 误拒（Codex round 3 P2）──
+
+
+async def test_delegate_active_but_not_bg_passes(session_and_srv) -> None:
+    """target 在 active_guest_names 但**不**在 bg run → 不拒。
+
+    用户 turn 中的 ``_let_speak`` 也会 add；handoff 抢占设计要求这种「正在前台讲话」
+    的 target 允许被 cancel + drain 抢占。
+    """
+    session, srv = session_and_srv
+    # 只 add active 标记，不挂 bg run。
+    srv._foreground_runtime.active_guest_names.add("宝总")
+
+    captured: list[dict] = []
+    await srv._handle_inbound(
+        {"type": INBOUND_HANDOFF_DELEGATE, "target": "宝总"},
+        lambda e: captured.append(e.to_dict()),
+    )
+    notices = _by_type(captured, ChahuaEventType.NOTICE.value)
+    error_notices = [n for n in notices if n["data"]["level"] == "error"]
+    assert error_notices == []
+    assert _by_type(captured, ChahuaEventType.HANDOFF_ENQUEUED.value)
+    # 收尾：把启动起来的 drain wrapper 关掉
+    if srv._inflight_turn_task is not None:
+        srv._inflight_turn_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await srv._inflight_turn_task
 
 
 async def test_panel_all_free_still_passes(session_and_srv) -> None:

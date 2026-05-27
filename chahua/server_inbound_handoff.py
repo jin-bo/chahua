@@ -129,16 +129,18 @@ class HandoffHandlers:
                 text=f"{INBOUND_HANDOFF_DELEGATE}: target={target!r} 不在场",
             )
             return
-        # P11 C12：target 正在 bg run / 前台 / handoff 占用 → 拒入队。否则 drain
-        # 弹出后 ``let_speak(target)`` 会与既有 ``agent.arun`` 并发跑在同一
-        # ``agentao.Agentao`` 实例（session 状态 / message_id / tool_call 顺序撞车）。
-        # 与 ``agent_run_start`` 第 3 道校验同口径。
-        if self.server._foreground_runtime.guest_busy(target):
+        # P11 C12 / P8.4.9 narrow（Codex round 3 P2）：target 正在 bg run → 拒入队。
+        # 否则 drain 弹出后 ``let_speak(target)`` 会与既有 ``agent.arun`` 并发跑在
+        # 同一 ``agentao.Agentao`` 实例（session 状态 / message_id / tool_call 顺序
+        # 撞车）。**只查 bg run、不查 active_guest_names**：原 P11 C12 用 ``guest_busy``
+        # 会把「正在前台讲话但 ``_enqueue_handoff_and_maybe_start`` 即将 cancel」的
+        # 抢占目标误拒，破坏 handoff 抢占用户 turn 的契约。
+        if self.server._foreground_runtime.guest_in_bg_run(target):
             self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR,
                 text=(
-                    f"{INBOUND_HANDOFF_DELEGATE}: target={target!r} 正忙"
-                    "（前台 / handoff / 已有 bg run），稍后再试"
+                    f"{INBOUND_HANDOFF_DELEGATE}: target={target!r} 正跑后台任务，"
+                    "稍后再试"
                 ),
             )
             return
@@ -223,13 +225,15 @@ class HandoffHandlers:
                 text=f"{INBOUND_HANDOFF_REVIEW}: target={target!r} 不在场",
             )
             return
-        # P11 C12：busy → 拒（与 delegate 同口径，防 ``let_speak`` 与 bg ``arun`` 并发）。
-        if self.server._foreground_runtime.guest_busy(target):
+        # P11 C12 / P8.4.9 narrow（Codex round 3 P2）：target 正在 bg run → 拒。
+        # 与 delegate 同口径 —— 仅查 bg run，前台 / handoff drain 占用让
+        # ``_enqueue_handoff_and_maybe_start`` 抢占。
+        if self.server._foreground_runtime.guest_in_bg_run(target):
             self.server._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR,
                 text=(
-                    f"{INBOUND_HANDOFF_REVIEW}: target={target!r} 正忙"
-                    "（前台 / handoff / 已有 bg run），稍后再试"
+                    f"{INBOUND_HANDOFF_REVIEW}: target={target!r} 正跑后台任务，"
+                    "稍后再试"
                 ),
             )
             return
@@ -310,21 +314,20 @@ class HandoffHandlers:
             if summarizer in targets:
                 _err("summarizer 不能同时是 panelist")
                 return
-        # ④.5 P11 C12：任一 panelist / summarizer 正忙 → 拒。panel 一个 turn 内串
-        #     行 N(+1) 次 speak，缺一不可；与 delegate / review 同口径，防 ``let_speak``
-        #     与 bg ``arun`` 并发跑在同一 ``agentao.Agentao`` 实例。
+        # ④.5 P11 C12 / P8.4.9 narrow（Codex round 3 P2）：任一 panelist / summarizer
+        #     正跑 bg run → 拒。panel 一个 turn 内串行 N(+1) 次 speak，缺一不可；与
+        #     delegate / review 同口径 —— 仅查 bg run，前台 / handoff drain 占用让
+        #     ``_enqueue_handoff_and_maybe_start`` 抢占。
         runtime = self.server._foreground_runtime
-        busy_targets = [t for t in targets if runtime.guest_busy(t)]
-        if busy_targets:
+        bg_busy_targets = [t for t in targets if runtime.guest_in_bg_run(t)]
+        if bg_busy_targets:
             _err(
-                f"targets 含正忙茶客：{busy_targets}"
-                "（前台 / handoff / 已有 bg run），稍后再试"
+                f"targets 含跑后台任务的茶客：{bg_busy_targets}，稍后再试"
             )
             return
-        if summarizer is not None and runtime.guest_busy(summarizer):
+        if summarizer is not None and runtime.guest_in_bg_run(summarizer):
             _err(
-                f"summarizer={summarizer!r} 正忙"
-                "（前台 / handoff / 已有 bg run），稍后再试"
+                f"summarizer={summarizer!r} 正跑后台任务，稍后再试"
             )
             return
         # ⑤ cap 数学：panel turn 的 cost=N(+1) 必须 ≤ max_consecutive_ai_turns，
@@ -442,15 +445,20 @@ class HandoffHandlers:
         if manager_guest not in orch.guest_names:
             _err(f"manager_guest={manager_guest!r} 不在场")
             return
-        # ②b manager 不能正忙（bg run / inflight speak）。否则 kickoff DELEGATE 会被
-        #     drain `_advance_to_runnable_handoff` 的 busy-winner 守卫静默 drop（P11 C12），
+        # ②b manager 不能正跑 bg run。否则 kickoff DELEGATE 会被 drain
+        #     ``_advance_to_runnable_handoff`` 的 busy-winner 守卫静默 drop（P11 C12），
         #     而 P8.4 把「drain 收尾队列空」从 manager_finished 改成 dormant —— UI 已
         #     收到 ``managed_session_started`` 却永远没人接 kickoff，MTS 永远卡在待机
-        #     无反馈（Codex review P8.4 round 1 P2）。busy 名单读 ``active_guest_names``
-        #     视图，与 drain busy 守卫同源。
-        if orch.active_guest_names and manager_guest in orch.active_guest_names:
+        #     无反馈（Codex review P8.4 round 1 P2）。
+        #
+        #     **只查 bg run，不查 active_guest_names**（Codex round 3 P2）：MTS start
+        #     末尾走 ``_enqueue_handoff_and_maybe_start`` 会抢占用户 turn，前台 / handoff
+        #     drain 占用 manager 不阻止启动（cancel + drain 后 manager 自由）；bg run
+        #     不可抢占，是唯一真正的「无法 kickoff」原因。
+        runtime = self.server._foreground_runtime
+        if runtime.guest_in_bg_run(manager_guest):
             _err(
-                f"manager_guest={manager_guest!r} 正忙（有 bg 任务 / 正在发言）；"
+                f"manager_guest={manager_guest!r} 正跑后台任务；"
                 "请稍后再开启托管"
             )
             return
