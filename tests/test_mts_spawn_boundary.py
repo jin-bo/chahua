@@ -330,7 +330,7 @@ async def test_spawn_still_counts_against_max_agent_runs_per_room() -> None:
 
 
 def test_managed_session_block_mentions_spawn_agent_runs() -> None:
-    """C12 改动：``<managed_session>`` 块第 ④ 条告知管理者 spawn_agent_runs
+    """C12 改动：``<managed_session>`` 块第 ③ 条告知管理者 spawn_agent_runs
     用法 + 「别用 propose_panel 并发」纠偏。"""
     block = render_managed_session_block("Carol", 5)
     assert "spawn_agent_runs" in block
@@ -343,3 +343,17 @@ def test_managed_session_block_mentions_spawn_agent_runs() -> None:
     assert 'manager="Carol"' in block
     # remaining_budget 仍显式打出（与既有断言口径一致，让前端 / LLM 都能直读）。
     assert 'remaining_budget="5"' in block
+
+
+def test_managed_session_block_allows_dormant_no_force_propose() -> None:
+    """P8.4 §5：``<managed_session>`` 块明确告知管理者「没下一步就讲完就行」，
+    不再为维持会话硬派活；且 MTS 不因这一轮没派活而结束（进入待机）。"""
+    block = render_managed_session_block("Maya", 3)
+    # 「没下一步直接讲完」软触发文案 —— 抓两个特征词钉锁，避免过度依赖具体措辞。
+    assert "没有可派的下一步" in block or "没下一步" in block
+    assert "硬派活" in block or "硬 propose" in block
+    # 明确告知 MTS 进入待机、不因此结束。
+    assert "待机" in block
+    # 反向钉锁：不能出现「不再派活时托管会话自动结束」一类 P8.3 旧文案。
+    assert "不再派活时托管会话自动结束" not in block
+    assert "你这一轮不再派活时" not in block

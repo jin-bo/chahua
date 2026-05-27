@@ -77,18 +77,21 @@ def render_agent_run_block(
 
 
 def render_managed_session_block(manager: str, budget: int) -> str:
-    """P8.3：管理者 MTS 回合的 ``<managed_session>`` 临时块（docs §7）。
+    """P8.3 / P8.4：管理者 MTS 回合的 ``<managed_session>`` 临时块（docs §7 / P8.4 §5）。
 
     纯函数 —— 措辞固定、不读 store、不背状态。经 ``extra_blocks`` 注入到
     ``<speak_instruction>`` 之前；只管理者回合注入，worker 回合不注入。
 
-    告诉管理者四件事（与渲染顺序一致）：① 你在托管会话中，复查后直接
-    ``propose_delegate`` 指派下一步，托管期自动生效、不要交回用户；② 工具 ack
-    若说「等用户采纳」在托管会话中请忽略（第 ② 条专门作废 P7.4 ``propose_*``
-    工具 ack 的等待语义 —— 为保 ``handoff_tools.py`` 零改动不改工具，改由本块纠偏）；
+    告诉管理者（与渲染顺序一致）：① 复查后**直接** ``propose_delegate`` /
+    ``propose_panel`` 指派下一步，托管期自动生效、不要交回用户；② 工具 ack 若说
+    「等用户采纳」在托管会话中请忽略（第 ② 条专门作废 P7.4 ``propose_*`` 工具 ack
+    的等待语义 —— 为保 ``handoff_tools.py`` 零改动不改工具，改由本块纠偏）；
     ③ P11.2：多人并发用 ``spawn_agent_runs`` —— 绕开 budget 做并发分发
     （budget 控制管理者**串行**复查深度；``spawn_*`` 是并行后台调度，两者正交）；
-    ④ Goal 达成用 ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）。
+    ④ **P8.4**：**没有可派的下一步**时（需要再读资料 / 等用户输入 / 卡壳等），
+    **直接讲完当前发言并结束本轮，不要为了维持会话而硬派活**。MTS 会自动等用户
+    下一句话再续 —— 它不会因为你这一轮没派活而结束；⑤ Goal 真正达成时用
+    ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）。
 
     **CLAUDE.md MTS 不变量「块第 ② 条作废 propose_* 等待语义」** —— 渲染顺序中
     第 ② 条仍是「忽略 propose_* 工具 ack 的等待语义」；后续若调整顺序需同步
@@ -107,9 +110,13 @@ def render_managed_session_block(manager: str, budget: int) -> str:
         "- 需要**并发**派工（多人同步审稿 / 多线索分头排查）时用 spawn_agent_runs —— "
         "绕开托管 budget 做并行后台分发，不扣预算、不计连发上限。**别**用 propose_panel "
         "并发（panel 仍是串行 drain）。\n"
+        "- 没有可派的下一步时（如需要再读资料、需要用户输入、暂时想不清下一步），"
+        "**直接讲完当前发言、结束本轮即可**，不要为了维持托管会话而硬派活。"
+        "托管会话不会因为你这一轮没派活而结束 —— 它会进入待机，等用户下一句话再续上。\n"
         "- 当任务目标已达成、不需要再派活时，用 task_propose_status(\"done\") 收尾"
         "（这个提议会交给用户确认、不自动生效），并停止派活。\n"
-        f"- 当前剩余托管预算：{rounds} 轮复查。预算用尽、或你这一轮不再派活时，托管会话自动结束。\n"
+        f"- 当前剩余托管预算：{rounds} 轮复查。预算用尽（budget=0）/ 任务被关 / 用户停止托管 "
+        "时托管会话自然结束；其它情况你这一轮没派活只会进入待机，不会结束。\n"
         "</managed_session>"
     )
 
