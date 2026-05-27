@@ -129,6 +129,19 @@ class HandoffHandlers:
                 text=f"{INBOUND_HANDOFF_DELEGATE}: target={target!r} 不在场",
             )
             return
+        # P11 C12：target 正在 bg run / 前台 / handoff 占用 → 拒入队。否则 drain
+        # 弹出后 ``let_speak(target)`` 会与既有 ``agent.arun`` 并发跑在同一
+        # ``agentao.Agentao`` 实例（session 状态 / message_id / tool_call 顺序撞车）。
+        # 与 ``agent_run_start`` 第 3 道校验同口径。
+        if self.server._foreground_runtime.guest_busy(target):
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=(
+                    f"{INBOUND_HANDOFF_DELEGATE}: target={target!r} 正忙"
+                    "（前台 / handoff / 已有 bg run），稍后再试"
+                ),
+            )
+            return
 
         item = HandoffItem(
             kind=HandoffKind.DELEGATE, target=target, reason=reason,
@@ -210,6 +223,16 @@ class HandoffHandlers:
                 text=f"{INBOUND_HANDOFF_REVIEW}: target={target!r} 不在场",
             )
             return
+        # P11 C12：busy → 拒（与 delegate 同口径，防 ``let_speak`` 与 bg ``arun`` 并发）。
+        if self.server._foreground_runtime.guest_busy(target):
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=(
+                    f"{INBOUND_HANDOFF_REVIEW}: target={target!r} 正忙"
+                    "（前台 / handoff / 已有 bg run），稍后再试"
+                ),
+            )
+            return
         message_id = data.get("message_id")
         if not isinstance(message_id, str) or not message_id:
             self.server._emit_notice(
@@ -287,6 +310,23 @@ class HandoffHandlers:
             if summarizer in targets:
                 _err("summarizer 不能同时是 panelist")
                 return
+        # ④.5 P11 C12：任一 panelist / summarizer 正忙 → 拒。panel 一个 turn 内串
+        #     行 N(+1) 次 speak，缺一不可；与 delegate / review 同口径，防 ``let_speak``
+        #     与 bg ``arun`` 并发跑在同一 ``agentao.Agentao`` 实例。
+        runtime = self.server._foreground_runtime
+        busy_targets = [t for t in targets if runtime.guest_busy(t)]
+        if busy_targets:
+            _err(
+                f"targets 含正忙茶客：{busy_targets}"
+                "（前台 / handoff / 已有 bg run），稍后再试"
+            )
+            return
+        if summarizer is not None and runtime.guest_busy(summarizer):
+            _err(
+                f"summarizer={summarizer!r} 正忙"
+                "（前台 / handoff / 已有 bg run），稍后再试"
+            )
+            return
         # ⑤ cap 数学：panel turn 的 cost=N(+1) 必须 ≤ max_consecutive_ai_turns，
         #    叠加 MAX_PANEL_TARGETS token 上限，取小。这是"能不能跑"的静态判断；
         #    "此刻跑不跑得动"由 drain while-entry cap 检查负责（docs §3.3）。

@@ -130,6 +130,10 @@ def test_mts_intercept_task_proposal_ignores_agent_run_envelopes() -> None:
                                        "enqueue_handoff": lambda *a, **k: None,
                                        "emit_handoff_queue_snapshot": lambda *a: None})()
 
+        # P11 C12：intercept_task_proposal busy 校验读 ``active_guest_names``；
+        # 真 Orchestrator 装 None 兜底（裸构默认），stub 同口径补一行。
+        active_guest_names = None
+
         class config:
             max_consecutive_ai_turns = 100
 
@@ -184,6 +188,10 @@ def test_mts_intercept_task_proposal_still_works_for_real_proposals() -> None:
     class _OrchStub:
         _guests = {"Carol": object(), "Bob": object()}
         _handoff_ops = _HandoffOps()
+
+        # P11 C12：intercept_task_proposal busy 校验读 ``active_guest_names``；
+        # 真 Orchestrator 装 None 兜底（裸构默认），stub 同口径补一行。
+        active_guest_names = None
 
         class config:
             max_consecutive_ai_turns = 100

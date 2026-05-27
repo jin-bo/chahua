@@ -335,6 +335,11 @@ class ManagedSessionOps:
         """
         if not isinstance(payload, dict):
             return None
+        # P11 C12：busy（前台 / handoff / bg run 占用）的茶客与 ``_inbound_handoff_*``
+        # 同口径拒绝；不在这里拦下来则 hook 直接 enqueue，drain 走第 4 档 busy filter
+        # 静默 drop —— 用户看不到任何反馈。降级渲采纳卡让用户/管理者可见、bg 跑完后
+        # 用户点采纳即走 inbound 正常路径。读 orch 的 ``active_guest_names``。
+        busy: set[str] = self.orch.active_guest_names or set()
         note = f"托管 · {manager} 指派"
         if kind == TASK_PROPOSAL_KIND_HANDOFF_DELEGATE:
             target = payload.get("target")
@@ -344,6 +349,8 @@ class ManagedSessionOps:
             # 用户采纳时由 inbound 报「target 不在场」。否则 MTS 静默吞掉坏指派、
             # drain drop 后无可操作报错地结束会话（Codex review P2）。
             if target not in self.orch._guests:
+                return None
+            if target in busy:
                 return None
             extra = payload.get("reason")
             if isinstance(extra, str) and extra:
@@ -363,11 +370,15 @@ class ManagedSessionOps:
                 return None
             if any(t not in self.orch._guests for t in targets):
                 return None
+            if any(t in busy for t in targets):
+                return None
             summarizer = payload.get("summarizer")
             if summarizer is not None:
                 if not isinstance(summarizer, str) or not summarizer:
                     return None
                 if summarizer not in self.orch._guests or summarizer in targets:
+                    return None
+                if summarizer in busy:
                     return None
             cap = min(
                 MAX_PANEL_TARGETS,

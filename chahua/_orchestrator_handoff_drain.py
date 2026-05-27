@@ -250,10 +250,15 @@ class HandoffDrainOps:
         """从 ``_handoff_queue`` 队首弹掉所有**跑不起来**的项，返回第一个真能产出
         turn 的项 ``(item, 过滤后 winners, scoring_path)``；队列耗尽 → ``None``。
 
-        "跑不起来"= runtime 重校验后必被 drop 的三类（docs §4.1.1 / §4.4），
+        "跑不起来"= runtime 重校验后必被 drop 的四类（docs §4.1.1 / §4.4），
         pop + WARN：① 死项（``cost > max_consecutive_ai_turns``，无论计数都跑不动，
         典型成因：入队后用户调低 max）；② panel 欠员（存活 panelist < 2）；
-        ③ winner 全失效（delegate / review target 被 ``remove_guest`` 删掉）。
+        ③ winner 全失效（delegate / review target 被 ``remove_guest`` 删掉）；
+        ④ **P11 C12：任一 winner 正 busy**（前台 / handoff / bg run 占用）——
+        ``let_speak`` 会和既有 ``agent.arun`` 并发跑在同一 ``agentao.Agentao`` 实例，
+        撞 session 状态 / message_id / tool_call 顺序，故 drop。覆盖 inbound→drain
+        间 race + MTS auto-enqueue 路径（hook 绕过 inbound 直接 enqueue，bg-busy
+        target 只能在这里兜底；与 ③ "target 被 remove_guest 删光" 同语义类目）。
         丢弃任意项后重发一次 ``HANDOFF_ENQUEUED`` 权威快照，让前端队列预览不残留
         死项（codex review P2）。
 
@@ -265,6 +270,7 @@ class HandoffDrainOps:
         ``turn_end(next='ai')`` → 客户端等一个永不到来的 turn（codex review P2）。
         """
         orch = self.orch
+        busy: set[str] = orch.active_guest_names or set()
         dropped = False
         try:
             while orch._handoff_queue:
@@ -295,6 +301,19 @@ class HandoffDrainOps:
                 if not winners:
                     _log.warning(
                         "handoff item target unavailable; dropping: %r", item,
+                    )
+                    orch._handoff_queue.popleft()
+                    dropped = True
+                    continue
+                # P11 C12：任一 winner 正忙 → drop 整项。panel 串行 N(+1) 次 speak
+                # 缺一不可，不做「跳过 busy 单人」的 partial 路径（语义模糊 + 与
+                # ``_build_winner_blocks`` 等长契约冲突）。busy 名单读 orch 的
+                # ``active_guest_names`` 视图（与 ``ScoringOps`` 同源）。
+                busy_winners = [w for w in winners if w in busy]
+                if busy_winners:
+                    _log.warning(
+                        "handoff item has busy winner(s) %r; dropping: %r",
+                        busy_winners, item,
                     )
                     orch._handoff_queue.popleft()
                     dropped = True
