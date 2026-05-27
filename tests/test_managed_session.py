@@ -266,6 +266,32 @@ def test_intercept_manager_self_delegate_swallowed() -> None:
     assert captured == []
 
 
+def test_intercept_manager_self_delegate_swallowed_while_speaking() -> None:
+    """P8.4.11（Codex round 5 P2）：管理者在自己 ``speak()`` 内提议 delegate(自己)
+    —— ``let_speak`` 已把 manager 标 busy；自指派必须仍被早 swallow，**不**落渲采纳卡。
+
+    没本 fix 时：``_handoff_item_from_proposal`` 走全集 busy 校验 → target=manager
+    in busy → 返 None → ``intercept_task_proposal`` 退到「item is None: return False」
+    → 渲采纳卡 → 用户点采纳真的 enqueue 一轮 manager（破坏 §5.1「自指派不入队」）。
+    """
+    orch, _ = _build("Maya", "Wei")
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=3,
+    )
+    # 模拟 _let_speak 加的 busy 标 —— manager 正在自己 speak()。
+    orch.active_guest_names = {"Maya"}
+    captured: list[ChahuaEnvelope] = []
+    env = ChahuaEnvelope(
+        room_id="t", turn_id="x", guest_name="Maya", message_id=None,
+        type=ChahuaEventType.TASK_PROPOSAL,
+        data={"proposer": "Maya", "kind": TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
+              "payload": {"target": "Maya"}},
+    )
+    assert orch._intercept_task_proposal(env, captured.append) is True
+    assert len(orch._handoff_queue) == 0
+    assert captured == []
+
+
 def test_intercept_manager_panel_enqueues() -> None:
     orch, _ = _build("Maya", "Wei", "Lin")
     orch._managed_session = ManagedSession(

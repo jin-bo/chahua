@@ -328,12 +328,27 @@ class ManagedSessionOps:
             TASK_PROPOSAL_KIND_HANDOFF_PANEL,
         ):
             return False
+        # P8.4.11（Codex round 5 P2）：自指派提早拦下 —— ``_handoff_item_from_proposal``
+        # 的 delegate 路径用全集 busy 校验，``let_speak`` 已把 manager 标 busy →
+        # ``target == manager`` 落 busy 集走 ``return None`` → 本入口 ``item is None``
+        # 退化渲卡 → 用户点采纳又会真的 enqueue 一轮 manager。把自指派早早识别 + swallow，
+        # 与既有「不入队不渲卡」语义保持一致（docs §5.1）。
+        payload = data.get("payload")
+        if (
+            kind == TASK_PROPOSAL_KIND_HANDOFF_DELEGATE
+            and isinstance(payload, dict)
+            and payload.get("target") == ms.manager_guest
+        ):
+            _log.warning("MTS 管理者 %r 自指派，跳过（不入队不渲卡）", ms.manager_guest)
+            return True
         item = self._handoff_item_from_proposal(
-            kind, data.get("payload"), manager=ms.manager_guest,
+            kind, payload, manager=ms.manager_guest,
         )
         if item is None:
             # 形状坏（工具已保证形状、理论不达）→ 不拦，照常渲卡兜底。
             return False
+        # 余留 belt-and-suspenders：上面已早返，但 ``_handoff_item_from_proposal``
+        # 若未来改回返非 None 也走这条路 —— 保留兜底防自指派漏进队列。
         if (
             item.kind is HandoffKind.DELEGATE
             and item.target == ms.manager_guest
