@@ -50,10 +50,7 @@ from .events import (
     ChahuaEventType,
     new_turn_id,
 )
-from .handoff import (
-    MANAGED_SESSION_REASON_MANAGER_FINISHED,
-    MANAGED_SESSION_REASON_USER_CANCEL,
-)
+from .handoff import MANAGED_SESSION_REASON_USER_CANCEL
 from .room_runtime import RoomRuntime
 from .server_inbound_agent_run import MAX_AGENT_RUNS_PER_ROOM
 from .server_inbound_handoff import INFLIGHT_KIND_HANDOFF
@@ -441,10 +438,10 @@ class AgentRunOps:
                             runtime, run, run_id=run_id, guest_name=guest_name,
                         )
                     else:
-                        # Codex round 8 P2：CANCELLED / ERROR 终态 —— 无 review 可加
-                        # 但若本 bg 是最后一个 pending mts bg，drain 的 has_pending
-                        # guard 之前为它守住了 MTS，现在没人会触发收尾 → MTS 永久卡。
-                        # 检查并主动 end_managed_session(MANAGER_FINISHED) 兜底。
+                        # Codex round 8 P2 / P8.4 §3.2：CANCELLED / ERROR 终态 ——
+                        # 无 review 可加。本 bg 若是最后一个 pending mts bg + 队列空
+                        # → MTS 保持 dormant（P8.4 退役 ``MANAGER_FINISHED`` 后不再
+                        # 兜底终结）；队列有项 → 起 drain 让既有 5 reason 收尾。
                         self.server._handle_mts_bg_terminal_non_finished(
                             runtime, run_id=run_id,
                         )
@@ -474,9 +471,12 @@ class AgentRunOps:
           → 等它们完成回调时统一评估，不动。
         - 队列还有项 → 起一个 drain 让 ``run_pending_handoff`` 跑完（队列项跑完自然
           触发 advance_after_turn → stop_reason → end_managed_session）。
-        - 队列空 + 无 inflight + 无其他 mts bg + MTS 仍活 → 直接调
-          ``end_managed_session(MANAGER_FINISHED)``。这是「最后一个 bg 失败 / 取消，
-          管理者没有任何后续可做」语义。
+        - **P8.4 §3.2**：队列空 + 无 inflight + 无其他 mts bg + MTS 仍活 → **保持
+          dormant，不终结 MTS**。原 P8.3 行为是 ``end_managed_session(MANAGER_FINISHED)``
+          ——「最后一个 bg 失败 / 取消，管理者没有任何后续可做」终结语义。P8.4 退役
+          ``MANAGER_FINISHED`` 后改为待机：管理者「这一棒断了」≠「事情完事」，由用户
+          下一句话 / 重派 bg / 显式 stop 决定下一步。用户看到 bg 失败气泡 + 状态条
+          仍「待机中」，自然反应即可。
         """
         if runtime.inflight_alive():
             # Codex round 9 P2: 不能 return 走人，必须 defer 重 evaluate。
@@ -499,16 +499,11 @@ class AgentRunOps:
                     run_id, exc_info=True,
                 )
             return
-        # 真无后续 → 直接结束 MTS。
-        try:
-            runtime.session.orchestrator._mts_ops.end_managed_session(
-                runtime.router, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
-            )
-        except Exception:
-            _log.warning(
-                "bg run %s: MANAGER_FINISHED end after non-FINISHED failed",
-                run_id, exc_info=True,
-            )
+        # P8.4：保持 dormant —— 不再 end_managed_session(MANAGER_FINISHED)。
+        _log.info(
+            "bg run %s: non-FINISHED terminal, no follow-up — MTS stays dormant",
+            run_id,
+        )
 
     def defer_mts_non_finished_cleanup_to_inflight(
         self, runtime: RoomRuntime, *, run_id: str,
@@ -574,8 +569,9 @@ class AgentRunOps:
           起 drain）。这是「单 bg / drain 已 idle」的快速路径。
         - **有 inflight（handoff drain or user turn）** → 延迟到 inflight done 后再
           跑 advance + 起 drain；同时 ``runtime.pending_mts_continuations += 1`` 让
-          drain 的 ``MANAGER_FINISHED`` 兜底守卫 ``has_pending_mts_bg()`` 仍返 True
-          不收尾。
+          P11.2.X ``has_pending_mts_bg()`` 谓词仍返 True（dispatch / non-FINISHED
+          兜底据此判断「还有 bg 在跑、再等等」；P8.4 drain 收尾已不依赖该谓词，
+          dormant 是默认行为）。
 
         **为何 handoff drain 也要 defer**（Codex P2 finding）：原版让 handoff drain
         在 peek 阶段自然消费 enqueue 的 review；但若 bg 在 drain 跑 manager turn 时

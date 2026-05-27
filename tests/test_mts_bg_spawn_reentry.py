@@ -28,7 +28,6 @@ from chahua.agent_run import (
 from chahua.cursor import GuestCursor
 from chahua.events import NOOP_SINK, ChahuaEnvelope, ChahuaEventType
 from chahua.handoff import (
-    MANAGED_SESSION_REASON_MANAGER_FINISHED,
     HandoffItem,
     HandoffKind,
     ManagedSession,
@@ -768,6 +767,46 @@ async def test_codex_p2_deferral_keeps_review_alive() -> None:
     assert len(orch._handoff_queue) == 1
     assert orch._handoff_queue[0].target == "Alice"
     assert "bg Bob" in orch._handoff_queue[0].reason
+
+
+def test_handle_mts_bg_terminal_non_finished_stays_dormant() -> None:
+    """P8.4 §3.2 回归：bg 以 CANCELLED / ERROR 终态结束 + 队列空 + 无 inflight +
+    无其他 mts bg + MTS 仍活 → **MTS 保持 dormant**（P8.4 退役 ``MANAGER_FINISHED``
+    后不再兜底终结）。
+
+    构造：纯单元，直接调 ``AgentRunHandlers.handle_mts_bg_terminal_non_finished``。
+    前置 stub：inflight 空、has_pending=0、queue 空、MTS 活。期望：
+    - 不 emit ``managed_session_ended``。
+    - MTS 仍活。
+    """
+    orch, _ = _build_orch("Alice", "Bob", store=_make_store_with_task())
+    sink: list[ChahuaEnvelope] = []
+    orch.start_managed_session(
+        sink.append, task_id="t1", manager_guest="Alice", budget=3,
+    )
+    # 构造 runtime：inflight 空、agent_runs 空、counter=0 → 三条守卫全 False。
+    rt = RoomRuntime(
+        room_id="r",
+        session=type("_S", (), {"orchestrator": orch})(),  # type: ignore[arg-type]
+        router=RoomEventRouter(sink.append),
+    )
+    assert rt.inflight_alive() is False
+    assert rt.has_pending_mts_bg() is False
+    sink.clear()
+
+    srv = object.__new__(ChahuaServer)
+    srv._runtimes = {"r": rt}
+    srv._foreground_id = "r"
+    _install_handler_slots(srv)
+
+    srv._handle_mts_bg_terminal_non_finished(rt, run_id="run_x")
+
+    # P8.4：MTS 仍活，不发 ENDED。
+    assert orch.managed_session is not None
+    ended = [
+        e for e in sink if e.type is ChahuaEventType.MANAGED_SESSION_ENDED
+    ]
+    assert ended == []
 
 
 async def test_set_inflight_allows_overwrite_when_old_done() -> None:
