@@ -430,6 +430,25 @@ class Orchestrator:
         # 空队列时 ``run_pending_handoff`` 早 return，零开销。
         await self.run_pending_handoff(sink, task_id=active_task_id)
         await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
+        # P8.4：MTS dormant 复活闭环 —— chain 内管理者经 ``intercept_task_proposal``
+        # hook 自动入队了 delegate / panel，chain 不知道要切回 drain（chain ↔ drain
+        # 严格分流）；统一在 ``submit_user_message`` 收尾补一次 re-drain，让 worker
+        # 立即跑（docs/P8.4 §4.1）。
+        #
+        # ``reset_cap=False``：chain 段已累计的 ``_consecutive_ai_turns`` 不被清零，
+        # chain + re-drain 段共享同一 ``max_consecutive_ai_turns`` 预算。否则会有
+        # 「chain 跑 N 轮 + re-drain 又跑满 max 轮」的 cap 双扣，违反 P7.1「总 AI
+        # 工作量受单一 cap 约束」不变量。
+        #
+        # 守卫：仅 MTS 活 + 队列非空才跑；非 MTS / 非 dormant / chain 内非管理者发
+        # 言（合法分支）→ ``_handoff_queue`` 恒空，整段跳过，零开销。
+        if (
+            self._mts_ops.managed_session is not None
+            and self._handoff_queue
+        ):
+            await self.run_pending_handoff(
+                sink, task_id=active_task_id, reset_cap=False,
+            )
 
     # ── AI 链 ─────────────────────────────────────────────────────────
     # slot 拆分：``_run_ai_chain`` 实现搬到 :class:`AIChainOps`。**主类必须保留
@@ -449,9 +468,17 @@ class Orchestrator:
 
     async def run_pending_handoff(
         self, sink: EnvelopeSink, *, task_id: Optional[str],
+        reset_cap: bool = True,
     ) -> None:
-        """slot 拆分：薄转发到 :class:`HandoffDrainOps`。"""
-        await self._drain_ops.run_pending_handoff(sink, task_id=task_id)
+        """slot 拆分：薄转发到 :class:`HandoffDrainOps`。
+
+        ``reset_cap``（P8.4）透传：默认 ``True`` 保 P7.1 既有调用语义；
+        ``submit_user_message`` 末尾 re-drain 传 ``False``，让 chain + drain 段
+        共享同一 cap 预算避免双扣（docs/P8.4 §4.1）。
+        """
+        await self._drain_ops.run_pending_handoff(
+            sink, task_id=task_id, reset_cap=reset_cap,
+        )
 
     # slot 拆分：scoring / @ 路由 / speak 搬到 :class:`ScoringOps`；下列为薄转发，
     # 保 ``_run_ai_chain`` / drain / test_orchestrator_at_mention / test_scoring_subject_hint

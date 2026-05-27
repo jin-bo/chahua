@@ -382,17 +382,22 @@ async def test_worker_turn_callbacks_manager_and_decrements_budget() -> None:
     assert advanced[0].data["remaining_budget"] == 2
 
 
-async def test_manager_no_delegate_ends_manager_finished() -> None:
-    """管理者 kickoff 不派活 → 队列空 → drain 收尾兜底归 manager_finished。"""
+async def test_manager_no_delegate_stays_dormant() -> None:
+    """P8.4：管理者 kickoff 不派活 → 队列空 → MTS **保持 dormant**（不再终结）。
+
+    P8.3 把这条归 ``manager_finished`` —— P8.4 改为待机：管理者「没派活」≠「事情
+    完事」，由用户下一句话经 ``submit_user_message`` re-drain 续上。
+    """
     orch, _ = _build("Maya", "Wei")
     cap = await _run_mts(orch, manager="Maya", budget=3, proposals=[None])
 
     consumed = [e for e in cap if e.type is ChahuaEventType.HANDOFF_CONSUMED]
     assert [e.data["item"]["target"] for e in consumed] == ["Maya"]
     ended = [e for e in cap if e.type is ChahuaEventType.MANAGED_SESSION_ENDED]
-    assert len(ended) == 1
-    assert ended[0].data["reason"] == "manager_finished"
-    assert orch.managed_session is None
+    assert ended == []
+    # MTS 仍活，队列已空 —— dormant 标识。
+    assert orch.managed_session is not None
+    assert len(orch._handoff_queue) == 0
 
 
 async def test_budget_one_runs_one_worker_then_exhausted() -> None:
@@ -488,9 +493,13 @@ def test_reset_room_clears_managed_session() -> None:
     assert orch.managed_session is None
 
 
-async def test_drain_break_path_ends_managed_session() -> None:
-    """drain 经 break 退出（队首死项被 drop 光）时，MTS 必须经 while 后兜底收尾 ——
-    否则 _managed_session 卡住、UI 永远「托管中」（Codex review P2）。"""
+async def test_drain_break_path_stays_dormant() -> None:
+    """P8.4：drain 经 break 退出（队首死项被 drop 光）时 MTS **保持 dormant**。
+
+    P8.3 把 break 路径归 ``manager_finished`` 收尾兜底 —— P8.4 同样退役。死项被
+    ``_advance_to_runnable_handoff`` drop 后队列空，drain 安静 ``return``；MTS
+    待机等用户下一句话。
+    """
     orch, _ = _build("Maya", "A", "B", max_ai=1)
     orch._managed_session = ManagedSession(
         task_id="t1", manager_guest="Maya", budget=3,
@@ -503,11 +512,11 @@ async def test_drain_break_path_ends_managed_session() -> None:
     captured: list[ChahuaEnvelope] = []
     await orch.run_pending_handoff(captured.append, task_id="t1")
 
-    assert orch.managed_session is None
+    # MTS 仍活、队列空 —— dormant。
+    assert orch.managed_session is not None
     assert len(orch._handoff_queue) == 0
     ended = [e for e in captured if e.type is ChahuaEventType.MANAGED_SESSION_ENDED]
-    assert len(ended) == 1
-    assert ended[0].data["reason"] == "manager_finished"
+    assert ended == []
 
 
 class _MtsPanelManagerGuest(SpeakingStubGuest):

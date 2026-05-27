@@ -118,6 +118,12 @@ class ManagedSessionOps:
         """按 docs §2.2 顺序返首个命中的停止 reason，或 ``None``（继续推进）。
 
         budget → task_closed → cap，谁先命中报谁（docs §4.3「预算 vs cap」）。
+
+        **P8.4 §4.2 扩展**：MTS 必须绑定**当前** active task —— 用户开新任务 / 切走
+        active 让 MTS 任务不再是 active 也归 ``TASK_CLOSED``。折叠进既有 reason 沿用
+        「5 reason 收敛」原则；前端文案扩展成「任务关闭或切换」覆盖三种来源
+        （关 MTS 任务 / 采纳 propose_status("done") / 切走 active）。
+        ``tasks_store is None`` 的房间（非任务房）整段 task 判定跳过。
         """
         ms = self._managed_session
         if ms is None:
@@ -128,9 +134,33 @@ class ManagedSessionOps:
             task = self.orch.tasks_store.get_task(ms.task_id)
             if task is None or task.status in CLOSED_STATUSES:
                 return MANAGED_SESSION_REASON_TASK_CLOSED
+            # P8.4：MTS 任务不再 active（用户开新任务自动 set_active / 显式切走）→ 归
+            # TASK_CLOSED。advance_after_turn / advance_after_bg_completion 都经
+            # stop_reason 收尾，故只需在这里加一条即可覆盖「dormant + 用户切 active」
+            # / 「正常推进中用户切 active」两条路径。
+            if self.orch.tasks_store.active_task_id != ms.task_id:
+                return MANAGED_SESSION_REASON_TASK_CLOSED
         if self.orch._consecutive_ai_turns >= self.orch.config.max_consecutive_ai_turns:
             return MANAGED_SESSION_REASON_CAP_REACHED
         return None
+
+    def check_after_task_change(self, sink: EnvelopeSink) -> None:
+        """P8.4 §4.2：task 状态变更后主动跑一次 ``stop_reason()`` 检查 + 收尾。
+
+        dormant 期间 ``advance_after_turn`` / ``advance_after_bg_completion`` 都不
+        触发，必须在 task 状态变更（``open_task`` 自动 set_active / ``update_task``
+        改 status / ``set_active_task`` / ``close_task``）路径主动调一次，命中即
+        ``end_managed_session(reason)``。
+
+        替代 P8.3 在 ``server_inbound_task.py`` 各 handler 早期的 eager end 块（已删）
+        —— 交给 ``stop_reason()`` 统一判定，未来加新停止条件只改一处。``_managed_session
+        is None``（非托管房间 / 已结束）整段 no-op，零行为变化。
+        """
+        if self._managed_session is None:
+            return
+        stop = self.stop_reason()
+        if stop is not None:
+            self.end_managed_session(sink, reason=stop)
 
     def advance_after_bg_completion(
         self,

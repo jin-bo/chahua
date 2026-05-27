@@ -21,10 +21,6 @@ from .events import (
     EnvelopeSink,
     NOTICE_LEVEL_ERROR,
 )
-from .handoff import (
-    MANAGED_SESSION_REASON_TASK_CLOSED,
-    MANAGED_SESSION_REASON_USER_CANCEL,
-)
 from .session import ensure_room_share_dir, relink_task_dirs
 from .task import MARKED_BY_USER
 from .tasks_store import (
@@ -145,15 +141,6 @@ class TaskHandlers:
         # 且 turn 末尾 detector 扫的还是旧任务（P5.8 移除 _kick_synthesized_user_message
         # 时连带丢了这个 cancel，本是它的副作用）。
         await self.server._cancel_and_drain_all_foreground()
-        # P8.3：open_task 自动 set_active 到新任务 —— 与 set_active_task 同口径，
-        # 取消了 in-flight 的 MTS handoff drain，drain 死了 MTS 不会自己收尾。显式
-        # 结束，否则 _managed_session 卡住、UI 永远「托管中」（Codex review P2）。
-        # 新任务 id 必与 MTS 任务不同 → 一律 user_cancel（非 task_closed）。
-        orch = self.server._session.orchestrator
-        if orch.managed_session is not None:
-            orch.end_managed_session(
-                sink, reason=MANAGED_SESSION_REASON_USER_CANCEL,
-            )
         try:
             task = self.server._session.tasks_store.open_task(
                 title=title, goal=goal, owner=owner_raw,
@@ -167,6 +154,11 @@ class TaskHandlers:
             sink, type=ChahuaEventType.TASK_OPEN, data=task.to_jsonl_dict(),
         )
         self._emit_task_info(sink)
+        # P8.4 §4.2：open_task 自动 set_active 到新任务 —— MTS 任务不再 active 时
+        # 由 stop_reason() 归 TASK_CLOSED，helper 统一收尾。替代 P8.3 mutation 前的
+        # eager USER_CANCEL（已删）。dormant + 推进中均适用，未来加 task 状态变更
+        # 入口只调 helper 即可（docs/P8.4 §4.2）。
+        self.server._session.orchestrator._mts_ops.check_after_task_change(sink)
 
     async def _inbound_update_task(self, data: dict, sink: EnvelopeSink) -> None:
         if not self.server._reject_unknown_keys(
@@ -280,6 +272,10 @@ class TaskHandlers:
             data={"task_id": task.id, "patch": applied_patch},
         )
         self._emit_task_info(sink)
+        # P8.4 §4.2：update_task 非终结 status 通常无命中（任务仍 active / open）——
+        # 占位调用，未来 update 加新字段时受益。helper 内部 ``_managed_session is None``
+        # / ``stop_reason() is None`` 都是 no-op。
+        self.server._session.orchestrator._mts_ops.check_after_task_change(sink)
 
     async def _inbound_set_active_task(
         self, data: dict, sink: EnvelopeSink
@@ -313,14 +309,6 @@ class TaskHandlers:
         if self.server._session.tasks_store.active_task_id == task_id_raw:
             return
         await self.server._cancel_and_drain_all_foreground()
-        # P8.3：切 active 取消了 in-flight 的 MTS handoff drain —— drain 死了
-        # `_advance_managed_session_after_turn` 不会再跑、MTS 不会自己收尾。显式结束，
-        # 否则 _managed_session 卡住、UI 永远「托管中」（Codex review P2）。
-        orch = self.server._session.orchestrator
-        if orch.managed_session is not None:
-            orch.end_managed_session(
-                sink, reason=MANAGED_SESSION_REASON_USER_CANCEL,
-            )
         try:
             self.server._session.tasks_store.set_active(task_id_raw)
         except TaskNotFoundError as e:
@@ -335,6 +323,10 @@ class TaskHandlers:
         relink_task_dirs(self.server._session)
         _log.info("set_active_task: %r", task_id_raw)
         self._emit_task_info(sink)
+        # P8.4 §4.2：切到非 MTS 任务 → MTS 任务不再 active → stop_reason() 归
+        # TASK_CLOSED；切到 MTS 任务（idempotent，已被入口提前 return 兜住）→ 无命中。
+        # 替代 P8.3 mutation 前的 eager USER_CANCEL（已删）。
+        self.server._session.orchestrator._mts_ops.check_after_task_change(sink)
 
     async def _inbound_close_task(
         self, data: dict, sink: EnvelopeSink
@@ -368,20 +360,6 @@ class TaskHandlers:
             )
             return
         await self.server._cancel_and_drain_all_foreground()
-        # P8.3：close 取消了 in-flight 的 MTS handoff drain —— 同 set_active_task，
-        # 显式收尾 MTS（drain 死了不会自己跑到 task_closed 停止判定，Codex review P2）。
-        # 被关的就是 MTS 驱动的任务 → task_closed；关的是别的任务 → user_cancel。
-        orch = self.server._session.orchestrator
-        ms = orch.managed_session
-        if ms is not None:
-            orch.end_managed_session(
-                sink,
-                reason=(
-                    MANAGED_SESSION_REASON_TASK_CLOSED
-                    if ms.task_id == task_id
-                    else MANAGED_SESSION_REASON_USER_CANCEL
-                ),
-            )
         try:
             task = self.server._session.tasks_store.close_task(
                 task_id, status=status,  # type: ignore[arg-type]
@@ -408,6 +386,11 @@ class TaskHandlers:
             },
         )
         self._emit_task_info(sink)
+        # P8.4 §4.2：关 MTS 任务 → stop_reason() 归 TASK_CLOSED（task.status 落到
+        # CLOSED_STATUSES）；关别的任务 → MTS 在自己任务上继续 dormant，无命中。
+        # 替代 P8.3 mutation 前的 eager TASK_CLOSED / USER_CANCEL（已删，关别的任务
+        # 不再被强行终结 MTS —— P8.4 行为改进）。
+        self.server._session.orchestrator._mts_ops.check_after_task_change(sink)
 
     async def _inbound_attach_artifact(
         self, data: dict, sink: EnvelopeSink

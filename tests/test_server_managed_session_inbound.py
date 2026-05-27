@@ -191,7 +191,10 @@ async def test_close_task_ends_managed_session(session_and_srv) -> None:
 
 
 async def test_set_active_task_ends_managed_session(session_and_srv) -> None:
-    """切 active 取消了 MTS drain → 显式结束 MTS（user_cancel）。"""
+    """P8.4 §4.2：切 active 到非 MTS 任务 → MTS 任务不再 active → ``stop_reason``
+    归 ``task_closed``。``check_after_task_change`` helper 在 ``_emit_task_info``
+    之后统一收尾，替代 P8.3 mutation 前的 eager ``user_cancel``。
+    """
     session, srv = session_and_srv
     tid = _open_task(session)
     orch = srv._session.orchestrator
@@ -202,11 +205,13 @@ async def test_set_active_task_ends_managed_session(session_and_srv) -> None:
     assert orch.managed_session is None
     ended = _by_type(cap, ChahuaEventType.MANAGED_SESSION_ENDED.value)
     assert len(ended) == 1
-    assert ended[0]["data"]["reason"] == "user_cancel"
+    assert ended[0]["data"]["reason"] == "task_closed"
 
 
 async def test_open_task_ends_managed_session(session_and_srv) -> None:
-    """开新任务也自动 set_active + 取消 MTS drain → 显式结束 MTS（user_cancel）。"""
+    """P8.4 §4.2：开新任务自动 ``set_active`` → MTS 任务不再 active → ``stop_reason``
+    归 ``task_closed``（替代 P8.3 mutation 前的 eager ``user_cancel``，5 reason 收敛）。
+    """
     session, srv = session_and_srv
     tid = _open_task(session)
     orch = srv._session.orchestrator
@@ -219,7 +224,7 @@ async def test_open_task_ends_managed_session(session_and_srv) -> None:
     assert orch.managed_session is None
     ended = _by_type(cap, ChahuaEventType.MANAGED_SESSION_ENDED.value)
     assert len(ended) == 1
-    assert ended[0]["data"]["reason"] == "user_cancel"
+    assert ended[0]["data"]["reason"] == "task_closed"
 
 
 async def test_replace_session_ends_managed_session(session_and_srv) -> None:

@@ -52,6 +52,9 @@ class _FakeStore:
 
     def __init__(self) -> None:
         self.tasks: dict[str, Task] = {}
+        # P8.4 §4.2：stop_reason 新增「MTS 任务不再 active」判定，store 必有
+        # ``active_task_id`` 字段。MTS 测试默认与 MTS 任务一致 → 不触发新检查。
+        self.active_task_id: str | None = None
 
     def get_task(self, task_id):
         return self.tasks.get(task_id)
@@ -70,12 +73,17 @@ class _FakeStore:
 
 def _make_store_with_task(task_id: str = "t1") -> _FakeStore:
     """``stop_reason`` 在 ``tasks_store is not None`` 时必经 ``get_task``，缺则
-    返 ``TASK_CLOSED`` 提前收 MTS —— 凡 MTS 测试都给 store 装一条 doing 任务。"""
+    返 ``TASK_CLOSED`` 提前收 MTS —— 凡 MTS 测试都给 store 装一条 doing 任务。
+
+    P8.4：同步把 ``active_task_id`` 设成本 task —— 否则 ``stop_reason`` 走新增的
+    「MTS 任务不再 active」分支提前归 ``TASK_CLOSED``。
+    """
     store = _FakeStore()
     store.tasks[task_id] = Task(
         id=task_id, title="t", goal="g", status="doing", owner=None,
         created_at_ms=0, updated_at_ms=0, closed_at_ms=None,
     )
+    store.active_task_id = task_id
     return store
 
 
@@ -251,10 +259,13 @@ async def test_drain_skips_manager_finished_when_bg_pending() -> None:
     assert orch._managed_session is not None
 
 
-async def test_drain_ends_mts_when_no_bg_pending_regression() -> None:
-    """守卫 False（既有行为）—— drain 仍按 MANAGER_FINISHED 收尾，回归保护。
+async def test_drain_stays_dormant_when_no_bg_pending() -> None:
+    """P8.4：守卫 False（无 bg pending）+ 管理者没派活 → MTS **保持 dormant**。
 
-    这是 P11.2.X 改动前的既有行为：管理者没派活 + 队列空 + MTS 活 → MANAGER_FINISHED。
+    P8.3 旧行为是「队列空 + MTS 活 → ``MANAGER_FINISHED`` 收尾」（``_has_pending_mts_bg
+    == False`` 时既有兜底）；P8.4 起 ``MANAGER_FINISHED`` 退役 —— 管理者没派活 ≠
+    事情结束，MTS 待机等用户下一句话。这条用例（曾名 ``test_drain_ends_mts_when_no_bg_pending_regression``）
+    断言反向，钉住「dormant 是 drain 收尾队列空的默认终点」。
     """
     orch, _ = _build_orch("Alice", "Bob", store=_make_store_with_task())
     sink: list[ChahuaEnvelope] = []
@@ -264,20 +275,21 @@ async def test_drain_ends_mts_when_no_bg_pending_regression() -> None:
     orch.enqueue_handoff(
         HandoffItem(kind=HandoffKind.DELEGATE, target="Alice", reason="kickoff")
     )
-    # 守卫默认 False（无 runtime 注入），P11.2.X 之前的行为应保留。
+    # 守卫默认 False（无 runtime 注入）—— P8.4 之后两支（bg pending / 无 pending）
+    # 都走 dormant，守卫等价于 dead code，保留断言只钉住默认值不被无意改动。
     assert orch._has_pending_mts_bg() is False
     sink.clear()
 
     await orch.run_pending_handoff(sink.append, task_id="t1")
 
-    # MTS 应按 MANAGER_FINISHED 收尾。
+    # P8.4：MTS 仍活、队列空 —— dormant；不发 MANAGED_SESSION_ENDED。
+    assert orch._managed_session is not None
+    assert len(orch._handoff_queue) == 0
     ended = [
         env for env in sink
         if env.type is ChahuaEventType.MANAGED_SESSION_ENDED
     ]
-    assert len(ended) == 1
-    assert ended[0].data.get("reason") == MANAGED_SESSION_REASON_MANAGER_FINISHED
-    assert orch._managed_session is None
+    assert ended == []
 
 
 # ── 4. _start_agent_run 的 mts_managed 快照 ─────────────────────────────────

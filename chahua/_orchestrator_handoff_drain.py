@@ -30,9 +30,10 @@ slot 拆分 Step 5：搬 8 个方法 / 算法 ——
   存活 panelist 渲染）。
 - handoff envelope emit 职责拆分：``HANDOFF_CONSUMED`` 在 ``TURN_START`` 之后
   emit（经 ``self.orch._handoff_ops.emit_handoff_consumed``）。
-- MTS：``advance_after_turn`` 在 5 步 ``turn_end`` 之前调一次；``has_next=False`` +
-  MTS 还活着 + 队列空 → ``manager_finished``（drain body 内 + while-break 退出处
-  各一处兜底）。
+- MTS（P8.4）：``advance_after_turn`` 在 5 步 ``turn_end`` 之前调一次；``has_next=False``
+  + MTS 还活着 + 队列空 → **保持 dormant，drain ``return`` 不终结**（管理者没派活
+  ≠ 事情结束；待机由用户下一句话经 ``submit_user_message`` re-drain 续上）。
+  ``MANAGER_FINISHED`` reason 已退役。
 
 cancel fixup / ``_emit_turn`` 仍在主类（Step 6 chain slot 才搬）。
 """
@@ -51,11 +52,7 @@ from .debug_recorder import (
     SCORING_PATH_HANDOFF_REVIEW,
 )
 from .events import ChahuaEventType, EnvelopeSink, new_turn_id
-from .handoff import (
-    MANAGED_SESSION_REASON_MANAGER_FINISHED,
-    HandoffItem,
-    HandoffKind,
-)
+from .handoff import HandoffItem, HandoffKind
 from .room import format_messages
 from .scoring import ScoreKind, ScoreResult
 from .task_rendering import score_to_dict as _score_to_dict
@@ -79,6 +76,7 @@ class HandoffDrainOps:
 
     async def run_pending_handoff(
         self, sink: EnvelopeSink, *, task_id: Optional[str],
+        reset_cap: bool = True,
     ) -> None:
         """专职消费 handoff 队列；与 :meth:`_run_ai_chain` **严格分流，不互相回落**。
 
@@ -86,15 +84,22 @@ class HandoffDrainOps:
         **不回落到 scoring**——这是"delegate 仅本轮独占，下次用户触发才恢复打分"
         的工程基础（docs §4.3 / §8 不变量）。
 
-        **入口清零计数一次**：handoff 是用户显式触发但不走 ``submit_user_message``，
-        上一轮 AI 到上限时不清零 while 会立刻挡掉 → handoff 永不执行。只清一次，
-        drain loop 内不再清。
+        **入口清零计数一次**（``reset_cap=True``，默认）：handoff 是用户显式触发
+        但不走 ``submit_user_message``，上一轮 AI 到上限时不清零 while 会立刻挡掉
+        → handoff 永不执行。只清一次，drain loop 内不再清。
+
+        **P8.4 dormant 复活路径**：``submit_user_message`` 收尾 re-drain 调本方法时
+        传 ``reset_cap=False`` —— chain 段已累计的 ``_consecutive_ai_turns`` 不被清零，
+        chain + re-drain 段共享同一 ``max_consecutive_ai_turns`` 预算，避免 cap 双扣
+        （docs/P8.4 §4.1）。其它调用点（首次 drain / handoff wrapper / bg 续命）
+        恒走默认 ``reset_cap=True``，P7.1 / P8.3 / P11 行为零变化。
         """
         orch = self.orch
         if not orch._handoff_queue:
             return
-        orch._consecutive_ai_turns = 0
-        orch._rounds_without_user_or_mention = 0
+        if reset_cap:
+            orch._consecutive_ai_turns = 0
+            orch._rounds_without_user_or_mention = 0
 
         while orch._handoff_queue:
             # 把跑不起来的队首项（死项 / panel 欠员 / winner 全失效）就地清掉，
@@ -195,42 +200,19 @@ class HandoffDrainOps:
             orch._tick_cooldown()
             orch._kick_detect_new_artifacts(sink, task_id)
             if not has_next:
-                # P8.3 收尾兜底：队列空了、MTS 还活着 → manager_finished（唯一产生
-                # 该 reason 的地方，docs §4.2）。覆盖「管理者没派活 / 调用链续不下去
-                # （target 不在场被 drop、发言抛错）」。_advance 已显式结束的
-                # （budget / task / cap）此时 _managed_session 已 None，end_managed_session
-                # 的守卫使这里不重复触发。
-                # `not has_next` 还可能是「队首项 cost 撞顶」—— 此时 _handoff_queue 非空，
-                # 该项是管理者真派下的活，应留队等 cap reset 后续 drain，不能当
-                # manager_finished 结束并清队（Codex review P2）。
-                # P11.2.X 续命守卫：管理者 spawn 的 bg run 仍在跑 → MTS 等 bg 完成
-                # 由 wrapper finally 续 enqueue 管理者复查（``advance_after_bg_completion``）；
-                # 此时如果 MANAGER_FINISHED 收尾，bg 完成后 MTS 已死、续命 no-op、
-                # manager 复查永不发生。安静退出 drain 让 bg 来 wake。
-                if (
-                    orch._mts_ops._managed_session is not None
-                    and not orch._handoff_queue
-                    and not orch._has_pending_mts_bg()
-                ):
-                    orch._mts_ops.end_managed_session(
-                        sink, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
-                    )
+                # P8.4：drain 收尾「队列空 + MTS 活」**不再终结 MTS**，保持 dormant ——
+                # 管理者没派活 ≠ 事情结束（思考 / 暂停 / 等用户输入 / 卡壳都会这样）。
+                # 待机由用户下一句话经 ``submit_user_message`` 末尾 re-drain 续上：
+                # chain 中管理者再派活时经 hook 自动入队，re-drain 立即跑（docs/P8.4
+                # §3.1 / §4.1）。``MANAGER_FINISHED`` reason 已退役。
+                # 终结只能来自 ``stop_reason()`` 5 条（budget / task / cap / user_stopped /
+                # user_cancel）或 task 状态变更后的 ``check_after_task_change()``。
                 return
 
-        # P8.3：while 经 break 退出时（队首死项被 _advance_to_runnable_handoff drop
-        # 光 / cost 撞顶）上面 body 内的收尾兜底跑不到。补一处：MTS 还活着且队列已空
-        # → manager_finished（Codex review P2）。cost-break 留了能跑的队首项 → 队列
-        # 非空 → 不结束（那是「下次用户触发再续」的暂停，不是终止）。
-        # P11.2.X 续命守卫：与 body 内同理 —— manager-attributed bg 未完成时不
-        # 收尾，让 wrapper finally 经 ``advance_after_bg_completion`` 续 enqueue。
-        if (
-            orch._mts_ops._managed_session is not None
-            and not orch._handoff_queue
-            and not orch._has_pending_mts_bg()
-        ):
-            orch._mts_ops.end_managed_session(
-                sink, reason=MANAGED_SESSION_REASON_MANAGER_FINISHED,
-            )
+        # P8.4：while 经 break 退出（队首死项 drop 光 / cost 撞顶）同理保持 dormant。
+        # cost-break 留了能跑的队首项 → 队列非空，下次用户触发 + drain reset_cap 后能续；
+        # 死项 drop 后队列空 → MTS 待机等用户下一句话。终结统一交给 ``stop_reason()`` /
+        # ``check_after_task_change()`` 收敛到 5 条 reason 之内（docs/P8.4 §3.1）。
 
     # ── 算法 / 渲染 ────────────────────────────────────────────────────
 
