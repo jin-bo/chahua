@@ -141,9 +141,9 @@ class ChahuaEventType(str, Enum):
     #   - MANAGED_SESSION_STARTED  ``{task_id, manager_guest, budget}`` MTS 建立后；
     #   - MANAGED_SESSION_ADVANCED ``{manager_guest, remaining_budget}`` 每次
     #     「worker→管理者」回调入队后（UI 倒计时）；
-    #   - MANAGED_SESSION_ENDED    ``{reason}`` MTS 结束时恰好一次（reason 见
-    #     docs §2.2：manager_finished / budget_exhausted / task_closed /
-    #     cap_reached / user_stopped / user_cancel）。
+    #   - MANAGED_SESSION_ENDED    ``{reason}`` MTS 结束时恰好一次（**P8.4 起 5 reason**：
+    #     budget_exhausted / task_closed / cap_reached / user_stopped / user_cancel；
+    #     P8.3 的 ``manager_finished`` 已退役，管理者没派活 → MTS 进入 dormant）。
     # 新增的是事件类型——旧前端遇未知 type WARN 后忽略（向前兼容），不 bump schema_version。
     MANAGED_SESSION_STARTED = "managed_session_started"
     MANAGED_SESSION_ADVANCED = "managed_session_advanced"

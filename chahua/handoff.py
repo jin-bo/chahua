@@ -55,9 +55,11 @@ MANAGED_SESSION_DEFAULT_BUDGET = 6
 
 
 # MTS 结束 reason —— ``managed_session_ended`` envelope 的 ``data.reason``（docs §2.2）。
-# 封闭 6 值集合，散在 orchestrator / server inbound 多处 emit；立常量同 ``INFLIGHT_KIND_*``
-# 的理由——避免字面值散漏改名漂移。前端 ``events.js`` 按字面值镜像。
-MANAGED_SESSION_REASON_MANAGER_FINISHED = "manager_finished"
+# P8.4：封闭 **5** 值集合（``MANAGER_FINISHED`` 已退役 —— 管理者「没派活」≠「事情完事」，
+# MTS 改为 dormant 等用户下一句话）。散在 orchestrator / server inbound 多处 emit；立
+# 常量同 ``INFLIGHT_KIND_*`` 的理由 —— 避免字面值散漏改名漂移。前端 ``events.js`` 按
+# 字面值镜像。终结只能因 ① 有界资源（budget / task / cap）或 ② 用户显式行为
+# （stopped / cancel）；管理者「我已完事」走 ``task_propose_status("done")`` 路径。
 MANAGED_SESSION_REASON_BUDGET_EXHAUSTED = "budget_exhausted"
 MANAGED_SESSION_REASON_TASK_CLOSED = "task_closed"
 MANAGED_SESSION_REASON_CAP_REACHED = "cap_reached"

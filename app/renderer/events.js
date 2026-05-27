@@ -328,13 +328,16 @@ export function formatTaskEventNotice(type, data) {
   }
 }
 
-// P8.3：managed_session_ended 的 reason → 居中系统气泡文案。文案唯一来源
-// （同 formatTaskEventNotice 口径）。manager_finished 取中性措辞「托管会话结束」
-// —— 它兜底覆盖「管理者没派活 / 调用链续不下去」，不写「管理者已完成」（docs §2.2）。
+// P8.3 / P8.4：managed_session_ended 的 reason → 居中系统气泡文案。文案唯一来源
+// （同 formatTaskEventNotice 口径）。P8.4 起 5 reason —— ``manager_finished`` 已
+// 退役（管理者没派活 → MTS dormant 等用户下一句话，不发 ENDED）。``task_closed``
+// 文案扩展成「任务关闭或切换」覆盖三种来源：① 关 MTS 任务；② 用户采纳
+// ``propose_status("done")`` 走 close_task；③ 用户开新任务 / 切走 active 让 MTS
+// 任务不再 active（P8.4 §2 / §6）。默认 fallback「托管会话结束」兜未知 reason
+// （含从老后端误送的 ``manager_finished``）。
 const _MANAGED_SESSION_END_REASONS = Object.freeze({
-  manager_finished: "托管会话结束",
   budget_exhausted: "托管预算已用尽",
-  task_closed: "任务已关闭，托管会话结束",
+  task_closed: "任务关闭或切换，托管会话结束",
   cap_reached: "已达连续发言上限，托管会话结束",
   user_stopped: "你停止了托管会话",
   user_cancel: "托管会话已结束",
