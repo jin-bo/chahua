@@ -128,15 +128,22 @@ export function createManagedSession({
       setStatus("error", "房间里没有茶客 —— 无法指派管理者");
       return;
     }
-    // 管理者候选 = 任务负责人范围 ∩ 在场茶客。owner 非空 → 只允许该人；
-    // owner 为空（全员）→ 退化到所有茶客。owner 已不在场（已删 / 离房）→ 错误提示。
-    const ownerName = typeof active.owner === "string" && active.owner ? active.owner : null;
+    // 管理者候选 = 任务负责人范围 ∩ 在场茶客。owner 取值：
+    // - null / 空串 = 全员 → 候选 = 全部在场茶客；
+    // - "user"（与 chahua/user_md.py::USER_SPEAKER_ID 同源 + Task.owner docstring
+    //   明确允许）= 用户自己负责 → 不强制限定 AI manager，退化到全员（Codex round 4 P2）；
+    // - 茶客名 → 候选 = [该茶客]（若在场）或 空（错误提示引导用户改负责人）。
+    const rawOwner = typeof active.owner === "string" && active.owner ? active.owner : null;
+    const ownerIsUser = rawOwner === "user";
+    const effectiveOwner = ownerIsUser ? null : rawOwner;
     const guestSet = new Set(guests);
-    const candidates = ownerName === null ? guests : (guestSet.has(ownerName) ? [ownerName] : []);
+    const candidates = effectiveOwner === null
+      ? guests
+      : (guestSet.has(effectiveOwner) ? [effectiveOwner] : []);
     if (candidates.length === 0) {
       setStatus(
         "error",
-        `任务负责人「${ownerName}」不在场 —— 先把 ta 加回房间，或把负责人改成「全员」`,
+        `任务负责人「${effectiveOwner}」不在场 —— 先把 ta 加回房间，或把负责人改成「全员」`,
       );
       return;
     }
@@ -170,10 +177,15 @@ export function createManagedSession({
     mgrLabel.appendChild(mgrSelect);
     pop.appendChild(mgrLabel);
 
-    if (ownerName !== null) {
+    if (ownerIsUser) {
       const note = document.createElement("div");
       note.className = "managed-popover-note";
-      note.textContent = `当前任务负责人是「${ownerName}」；想换人请先改任务负责人`;
+      note.textContent = "当前任务负责人是「用户」；选一位茶客代为推进";
+      pop.appendChild(note);
+    } else if (effectiveOwner !== null) {
+      const note = document.createElement("div");
+      note.className = "managed-popover-note";
+      note.textContent = `当前任务负责人是「${effectiveOwner}」；想换人请先改任务负责人`;
       pop.appendChild(note);
     }
 
