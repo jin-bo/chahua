@@ -546,15 +546,23 @@ const bgRunBar = createBgRunBar({
   sidebar,
 });
 
-// P8.3 托管会话：任务卡里的「托管」按钮（入口 + 状态 + 停止三合一）。状态来自
-// managed_session_* envelope；与 handoff 队列同瞬态——切房 / 断线即 reset。
+// P8.3 / P8.4 托管会话：任务卡里的「托管」按钮（入口 + 状态 + 停止三合一）。状态
+// 来自 managed_session_* envelope；与 handoff 队列同瞬态——切房 / 断线即 reset。
+// P8.4 §6 dormant 子态由三源派生：MTS 状态 + handoff 队列长度 + 前台 in-flight
+// 状态。两个 getter 经 ``getHandoffQueueLength`` / ``isTurnActive`` 注入。
 managedSession = createManagedSession({
   send,
   isConnected: connection.isConnected,
   setStatus,
   getGuests: () => guests.map((g) => g.name),
   getActiveTask: () => taskState.getActiveTask(),
+  getHandoffQueueLength: () => handoffState.getQueue().length,
+  isTurnActive: turnState.isActive,
 });
+
+// P8.4 §6：handoff 队列变化（enqueue/consume/clear）即重渲托管按钮 —— 队列空 + MTS
+// 活 + 无 in-flight 时进入 dormant 文案。不引入新 envelope，纯派生态。
+handoffState.subscribe(() => managedSession?.refresh());
 
 // ── 上传文件到房间共享目录 ──────────────────────────────────────────
 // pending pills 仅在前端内存里；切房 / submit 时清空。

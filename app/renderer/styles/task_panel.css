@@ -224,6 +224,17 @@
   background: #f3ddda;
   border-color: #d99089;
 }
+/* P8.4 §6 dormant 子态：MTS 活但本回合无 in-flight + 队列空 → 灰调标出「待机等
+   用户消息」，与 is-running 红调区分。仍可点（停止），所以保留可点视觉。 */
+.task-card-manage-btn.is-running.is-dormant {
+  background: #f0ede4;
+  border-color: #cbc2a8;
+  color: #6a5f4a;
+}
+.task-card-manage-btn.is-running.is-dormant:hover:not(:disabled) {
+  background: #e7e2d4;
+  border-color: #b8ac8a;
+}
 
 /* 产物 / 决策两块：head + ul，空状态用淡色 hint */
 .task-section { margin-bottom: 12px; }

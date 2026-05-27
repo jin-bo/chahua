@@ -1,12 +1,18 @@
 "use strict";
 
-// 托管任务会话（MTS，P8.3，docs/P8.3-原生自动推进.md §8）的前端模块。
+// 托管任务会话（MTS，P8.3 / P8.4，docs/P8.3-原生自动推进.md §8 + P8.4 §6）的前端模块。
 //
 // 自包含：持本地 MTS 状态（瞬态，刷新 / 切房即清，与 handoff_state 同口径）+ 渲染
 // active 任务卡里的「托管」按钮（经 mountManageButton 挂进 task_panel）+ 启动 popover。
 // 同一个按钮既是入口又是状态：空闲时「🤖 托管运行」、跑动时「🤖 托管中 · 剩余 N 轮」
 // 且点击即停止。三个 managed_session_* envelope 由 renderer.js 转译进
 // onStarted / onAdvanced / onEnded；managed_session_ended 的系统气泡由 renderer.js 追。
+//
+// **P8.4 §6 dormant 派生态**：按钮文案由三源合成 —— MTS 状态（本模块自维）+ handoff
+// 队列镜像（``getHandoffQueueLength``）+ 前台 in-flight 状态（``isTurnActive``）。
+// dormant = MTS 活 + 队列空 + 无 in-flight → 显式渲「托管中（待机）· {manager} 管理
+// · 剩余 N 轮 · 等待用户消息」。不发新 envelope —— 三源都是既有信号（``handoff_*`` /
+// ``managed_session_*`` / ``turn_*``），重发等价 envelope 是冗余。
 
 import { Inbound } from "./events.js";
 import {
@@ -24,6 +30,10 @@ export function createManagedSession({
   setStatus,
   getGuests,
   getActiveTask,
+  // P8.4 §6：dormant 推导用的两个 getter。缺省时（旧调用方）退化为 false / 0，
+  // 行为与 P8.4 之前一致 —— 按钮仍渲「托管中 · 剩余 N 轮」单态文案。
+  getHandoffQueueLength = () => 0,
+  isTurnActive = () => false,
 }) {
   // { manager, budget } | null。budget 是「剩余复查轮数」，advanced 事件倒计时刷新。
   let mts = null;
@@ -53,8 +63,10 @@ export function createManagedSession({
     renderManageSlot();
   }
 
-  // 渲染「托管」按钮。空闲 → 「🤖 托管运行」点击弹启动 popover；跑动 → 「🤖 托管中 ·
-  // 剩余 N 轮」点击即停止托管。槽位已 detached（任务卡被顶掉）则跳过。
+  // 渲染「托管」按钮。空闲 → 「🤖 托管运行」点击弹启动 popover；跑动 → 「🤖 托管中
+  // · 剩余 N 轮」点击即停止托管。**P8.4 dormant 子态**：MTS 活 + 队列空 + 无 in-flight
+  // → 「🤖 托管中（待机）· {manager} · 剩余 N 轮 · 等待用户消息」，仍可点停止；点击
+  // 行为与 active 一致（发 managed_session_stop）。槽位已 detached（任务卡被顶掉）则跳过。
   function renderManageSlot() {
     if (manageSlot === null || !manageSlot.isConnected) return;
     manageSlot.replaceChildren();
@@ -64,9 +76,22 @@ export function createManagedSession({
     btn.disabled = !isConnected();
     if (mts !== null) {
       btn.classList.add("is-running");
-      btn.textContent = `🤖 托管中 · 剩余 ${Math.max(0, mts.budget)} 轮 · 点击停止`;
-      btn.title =
-        "停止托管会话 —— 当前发言自然跑完即止；要立即掐断走「全部取消」";
+      // P8.4 §6 dormant 三源推导：本模块持 mts → 队列镜像 → in-flight。
+      const queueLen = Math.max(0, getHandoffQueueLength() | 0);
+      const turnActive = !!isTurnActive();
+      const isDormant = queueLen === 0 && !turnActive;
+      const rounds = Math.max(0, mts.budget);
+      const manager = mts.manager || "?";
+      if (isDormant) {
+        btn.classList.add("is-dormant");
+        btn.textContent = `🤖 托管中（待机）· ${manager} 管理 · 剩余 ${rounds} 轮 · 等待用户消息 · 点击停止`;
+        btn.title =
+          "托管会话进入待机：管理者这一轮没派下一步，正等你下一句话续推。点击停止托管 —— 当前发言自然跑完即止；要立即掐断走「全部取消」";
+      } else {
+        btn.textContent = `🤖 托管中 · 剩余 ${rounds} 轮 · 点击停止`;
+        btn.title =
+          "停止托管会话 —— 当前发言自然跑完即止；要立即掐断走「全部取消」";
+      }
       btn.addEventListener("click", () => {
         if (!isConnected()) return;
         send({ type: Inbound.MANAGED_SESSION_STOP });

@@ -193,16 +193,19 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **`propose_review` propose 时把 `reviewee` 名解析成 `message_id` 并冻结**。用 `room.latest_message_by_speaker_id`，MVP 只支持「reviewee 最近一条」。reviewee 没发过言 → `Error:` 不 emit。
 - **采纳后的 `HandoffItem` 与用户直接触发不可区分**。`issued_by` 恒 `HANDOFF_ISSUED_BY_USER`；茶客不能 propose `handoff_clear`（destructive）。propose 永远等用户点，无自动 / 超时采纳。
 
-### 托管任务会话（MTS，P8.3）
+### 托管任务会话（MTS，P8.3 / P8.4）
 
 - **MTS 是瞬态运行态，每房间最多 1 个，不落盘**（P9 起全局可有多个后台 MTS）。crash / `reset_room` / ws 断开即清；切房旧前台 busy 时转后台续跑，MTS 在后台自驱直到自然收尾。只经 `managed_session_start` inbound 开启，无自动 / 超时 / 茶客 propose 开启。
 - **断线即结束 MTS（切房不结束）**。`_serve_one` finally 先 `_maybe_end_managed_session(user_cancel)` 再 cancel drain，否则 drain cancel 后 MTS 既不推进也无人停、重连快照让前端按钮对死调度复活。**`emit_room_snapshot` 重投 MTS**：前台房 `_managed_session` 非空时末尾补一帧 `managed_session_started`（`budget` 是剩余值）。
-- **MTS 跑在 handoff drain loop 上，不新开调度路径**。`run_pending_handoff` 每轮 turn 跑完调 `_advance_managed_session_after_turn`，再走既有 5 步；`_managed_session is None` 时该调用立即返回。`_advance` 按「刚跑完是不是管理者回合」分流：管理者回合不做事；worker 回合且队列空 → `budget-=1` + 回调 `delegate(manager)` + emit `managed_session_advanced`。
-- **`manager_finished` 只由 drain 收尾兜底产生**。覆盖「管理者没派活 / 调用链续不下去」；6 个 reason：`manager_finished` / `budget_exhausted` / `task_closed` / `cap_reached` / `user_stopped` / `user_cancel`。
+- **MTS 跑在 handoff drain loop 上，不新开调度路径**。`run_pending_handoff` 每轮 turn 跑完调 `_advance_managed_session_after_turn`，再走既有 5 步；`_managed_session is None` 时该调用立即返回。`_advance` 按「刚跑完是不是管理者回合」分流：管理者回合不做事（**没派活 = dormant，不是 finished**）；worker 回合且队列空 → `budget-=1` + 回调 `delegate(manager)` + emit `managed_session_advanced`。
+- **停止条件 —— P8.4 起 5 个 reason**（`MANAGER_FINISHED` 已退役）：`budget_exhausted` / `task_closed` / `cap_reached` / `user_stopped` / `user_cancel`。终结只能因 ① 有界资源（budget / task / cap）或 ② 用户显式行为（stopped / cancel）。`task_closed` 触发三种来源：① 关 MTS 任务；② 用户采纳 `task_propose_status("done")` 走 close_task；③ 用户开新任务 / 切走 active 让 MTS 任务不再 active（`stop_reason()` 含 `active_task_id != ms.task_id` 检查）。管理者「我已完事」走 `task_propose_status("done")` 路径，不另设 reason。
+- **drain 收尾队列空 + MTS 活 → 保持 dormant，不终结**（P8.4 §3.1）。`run_pending_handoff` body 内 `has_next=False` 与 while-break 两处都 `return` 不调 `end_managed_session` —— 管理者没派活 ≠ 事情结束（思考 / 暂停 / 等用户输入 / 卡壳）。`submit_user_message` 末尾的 MTS 感知 re-drain（`reset_cap=False`）负责 dormant 复活：chain 内管理者经 hook 自动入队后立即跑（docs/P8.4 §4.1）。
+- **dormant 期间 task 状态变更经 `check_after_task_change(sink)` 主动收尾**（P8.4 §4.2）。4 个 task inbound（`open_task` / `update_task` / `set_active_task` / `close_task`）末尾在 `_emit_task_info` 之后调一次 helper —— dormant 没有 turn 触发 `stop_reason()`，必须在这些路径主动检查。统一经 `Orchestrator.check_managed_session_after_task_change(sink)` 薄转发，未来加新 task 状态入口只需调 helper、不会遗漏。
 - **结束 MTS 必清 `_handoff_queue`**。`end_managed_session(sink, reason)` 任意路径都清待跑项 + 重发空队列快照。`managed_session_stop` 不取消当前 turn（自然跑完）；`handoff_clear` / `cancel` 中途介入时一并结束 MTS（`user_cancel`）。
 - **MTS 内只自动入队管理者的 `handoff_delegate` / `handoff_panel` 提议**。`Orchestrator._intercept_task_proposal`（经 `set_task_proposal_hook` 注入）拦下 envelope 不下发前端。非 MTS / 非管理者 / review / decision / status 照常渲卡。
-- **管理者 MTS 回合注入 `<managed_session>` 临时块**。`render_managed_session_block(manager, budget)` 经 `extra_blocks` 注入；worker 回合 / 非 MTS delegate 无块。块第 ② 条显式作废 `propose_*` 工具 ack 的「等用户采纳」等待语义。
+- **管理者 MTS 回合注入 `<managed_session>` 临时块**。`render_managed_session_block(manager, budget)` 经 `extra_blocks` 注入；worker 回合 / 非 MTS delegate 无块。块第 ② 条显式作废 `propose_*` 工具 ack 的「等用户采纳」等待语义；**P8.4 第 ④ 条明确「没下一步就讲完、不强行 propose」是合法收尾**（MTS 不因此结束、进入待机等用户下一句话）。
 - **`managed_session_*` 是 hint 型事件**，不进 transcript、不触发 AI；不 bump `schema_version`。`budget` 计管理者复查回合数（kickoff 不耗）；`max_consecutive_ai_turns` 是硬护栏 MTS 不能越过。
+- **前端 dormant 子态由三源派生，不发新 envelope**（P8.4 §6）。`managed_session.js` 按 MTS 状态（自维）+ handoff 队列长度（`handoff_state.getQueue()`）+ 前台 in-flight（`turn_state.isActive()`）合成按钮文案：MTS 活 + 队列空 + 无 in-flight → `托管中（待机）· {manager} 管理 · 剩余 N 轮 · 等待用户消息`；其余两个子态保留 P8.3 文案。点击行为不变（发 `managed_session_stop`）。`handoffState.subscribe` + envelope_router 在 `turn_start`/`turn_end` 翻转时调 `managedSession.refresh()`。
 
 ### 后台 Agent（P11，bg run / 并行执行）
 

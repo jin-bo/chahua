@@ -128,6 +128,9 @@ export function createEnvelopeRouter({
         console.debug("[turn_start]", scores);
         applyScores(scores);
         turnState.set(env.turn_id);
+        // P8.4 §6：托管按钮的 dormant 文案派生于「无 in-flight」—— in-flight 翻
+        // 转时刷一次。MTS 不活则 refresh 内部 early-return，零开销。
+        managedSession.refresh();
         return;
       }
       case EventType.MESSAGE_START:
@@ -149,6 +152,8 @@ export function createEnvelopeRouter({
           // AI 链收尾、无 in-flight turn —— 放开被 gate 的 handoff 采纳按钮（此刻采纳
           // 不会抢占截断任何 turn）。next==='ai' 时链未结束，不放。
           proposalCard.onTurnIdle();
+          // P8.4 §6：in-flight 由 true 翻 false → 托管按钮可能进入 dormant 文案。
+          managedSession.refresh();
         }
         return;
       }
