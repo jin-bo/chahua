@@ -57,6 +57,7 @@ from .guest import TeaGuest
 from .message_artifacts import MessageArtifactRegistry
 from .handoff import (
     HandoffItem,
+    HandoffKind,
     ManagedSession,
 )
 from .orchestrator_config import OrchestratorConfig
@@ -431,6 +432,43 @@ class Orchestrator:
         self._rounds_without_user_or_mention = 0
         self._tick_cooldown()
         self._kick_summarize()
+        # P8.4.7（Codex review P8.4 round 1 P2）：MTS dormant 复活必走 drain 路径。
+        #
+        # 原 P8.4.1 设计 —— chain 内管理者经 hook 自动入队 → re-drain 兜底 —— 在 dormant
+        # 时不成立：① 队列空 + MTS 活，drain 早 return；② chain scoring 是统计行为，
+        # **不保证 manager 胜出**；③ 即便 manager 胜出，``<managed_session>`` 块是
+        # ``_build_winner_blocks`` 专属（drain 独占注入点），chain 路径拿不到 → manager
+        # 不知道自己处于托管中。结果：dormant 永远卡在待机，用户发什么都不复活。
+        #
+        # 修：用户消息进来时若 MTS 活 + 队列空 + manager 在场 + manager 不忙 → 同步
+        # 补一个 manager DELEGATE kickoff 到队列 + emit ``HANDOFF_ENQUEUED`` 快照，
+        # 然后既有 ``run_pending_handoff`` drain 会像 ``managed_session_start`` 路径一样
+        # 消费它（manager 速跑、``<managed_session>`` 块注入、hook 自动入队 worker、
+        # drain loop 自然续转）。dormant kickoff 触发后跳过 ``_run_ai_chain``：与
+        # ``_inbound_managed_session_start`` 走 ``_run_handoff_turn`` wrapper 不跑 chain
+        # 同口径——MTS 内对话走 manager 一线，不让 bystander 经 scoring 横插。
+        #
+        # manager 不在场 / 正忙 → 不补 kickoff、走常规 chain（MTS 仍 dormant，下条用户
+        # 消息再试；中途 ``check_after_task_change`` / 用户停止仍能正常收尾）。
+        dormant_mts_kickoff = False
+        ms = self.managed_session
+        if (
+            ms is not None
+            and not self._handoff_queue
+            and ms.manager_guest in self.guest_names
+            and not (
+                self.active_guest_names
+                and ms.manager_guest in self.active_guest_names
+            )
+        ):
+            self._handoff_queue.append(HandoffItem(
+                kind=HandoffKind.DELEGATE,
+                target=ms.manager_guest,
+                reason="用户消息续推",
+            ))
+            self._handoff_ops.emit_handoff_queue_snapshot(sink)
+            dormant_mts_kickoff = True
+
         # P7.1: 先 drain 残留 handoff 队列（FIFO）。若上次 drain 因 ``max_consecutive_ai_turns``
         # cap 撞顶留下队首，"下次用户触发"应当恢复消费——发普通消息也是用户触发，
         # 不能让 leftover delegate 被无限跳过（docs §3.4 "下次用户触发"）。``run_pending_handoff``
@@ -438,21 +476,18 @@ class Orchestrator:
         # 由 ``_consecutive_ai_turns`` 透传给 ``_run_ai_chain``，总 AI 工作量仍受单一 cap 约束。
         # 空队列时 ``run_pending_handoff`` 早 return，零开销。
         await self.run_pending_handoff(sink, task_id=active_task_id)
-        await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
-        # P8.4：MTS dormant 复活闭环 —— chain 内管理者经 ``intercept_task_proposal``
-        # hook 自动入队了 delegate / panel，chain 不知道要切回 drain（chain ↔ drain
-        # 严格分流）；统一在 ``submit_user_message`` 收尾补一次 re-drain，让 worker
-        # 立即跑（docs/P8.4 §4.1）。
+        if not dormant_mts_kickoff:
+            await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
+        # P8.4：MTS 收尾 re-drain —— chain 内管理者（被 ``@`` 强制 / scoring 胜出）经
+        # ``intercept_task_proposal`` hook 自动入队 delegate / panel，chain ↔ drain
+        # 严格分流不知道要切回 drain；本段在 chain 后补一次 re-drain。dormant kickoff
+        # 路径上 chain 跳了 → 队列恒空 → 整段跳过零开销（docs/P8.4 §4.1）。
         #
         # ``reset_cap=False``：chain 段已累计的 ``_consecutive_ai_turns`` 不被清零，
         # chain + re-drain 段共享同一 ``max_consecutive_ai_turns`` 预算。否则会有
         # 「chain 跑 N 轮 + re-drain 又跑满 max 轮」的 cap 双扣，违反 P7.1「总 AI
-        # 工作量受单一 cap 约束」不变量。
-        #
-        # 守卫：仅 MTS 活 + 队列非空才跑；非 MTS / 非 dormant / chain 内非管理者发
-        # 言（合法分支）→ ``_handoff_queue`` 恒空，整段跳过，零开销。读 MTS 状态走
-        # 主类公开 ``managed_session`` property 而非穿 ``_mts_ops`` 私 slot（与本文
-        # 件其它 MTS 访问点同口径，未来 slot 重构 / property 加守卫不动这里）。
+        # 工作量受单一 cap 约束」不变量。读 MTS 状态走主类公开 ``managed_session``
+        # property 而非穿 ``_mts_ops`` 私 slot（与本文件其它 MTS 访问点同口径）。
         if (
             self.managed_session is not None
             and self._handoff_queue

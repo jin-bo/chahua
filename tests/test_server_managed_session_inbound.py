@@ -102,6 +102,29 @@ async def test_start_manager_not_present(session_and_srv) -> None:
     assert srv._session.orchestrator.managed_session is None
 
 
+async def test_start_manager_busy_rejected(session_and_srv) -> None:
+    """P8.4.7（Codex round 1 P2）：manager 正忙 → 拒绝开启 MTS。
+
+    否则 kickoff DELEGATE 会被 drain 的 busy-winner 守卫静默 drop（P11 C12），
+    UI 已收到 ``managed_session_started`` 却永远没人接 kickoff，MTS 卡死无反馈。
+    """
+    session, srv = session_and_srv
+    tid = _open_task(session)
+    orch = srv._session.orchestrator
+    # 模拟 bg run 占用 manager。
+    orch.active_guest_names = {"宝总"}
+    cap = await _send(srv, {
+        "type": INBOUND_MANAGED_SESSION_START, "task_id": tid,
+        "manager_guest": "宝总", "budget": 6,
+    })
+    notices = _by_type(cap, ChahuaEventType.NOTICE.value)
+    assert notices and notices[0]["data"]["level"] == "error"
+    assert "正忙" in notices[0]["data"]["text"]
+    assert orch.managed_session is None
+    # 也不应残留 kickoff item 在队列。
+    assert not orch.has_pending_handoff
+
+
 @pytest.mark.parametrize("budget", [0, 21, "6", 1.5, True])
 async def test_start_budget_out_of_range(session_and_srv, budget) -> None:
     session, srv = session_and_srv

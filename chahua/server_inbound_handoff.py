@@ -382,10 +382,12 @@ class HandoffHandlers:
     ) -> None:
         """``{"type":"managed_session_start","task_id","manager_guest","budget"}``。
 
-        开启托管任务会话（MTS，docs/P8.3 §3.2）。四道校验（任一失败 → NOTICE error
+        开启托管任务会话（MTS，docs/P8.3 §3.2）。校验（任一失败 → NOTICE error
         + 不开启）：① ``task_id`` 非空 str 且 == 当前 active task 且任务非终结态；
-        ② ``manager_guest`` 非空 str 且在场（茶客）；③ ``budget`` 是
-        ``1..MAX_MANAGED_BUDGET`` 整数；④ 当前无 MTS 在跑。
+        ② ``manager_guest`` 非空 str 且在场（茶客）；②b ``manager_guest`` 不在
+        ``active_guest_names`` 中（不忙于 bg / inflight，P8.4.7 加）；③ ``budget``
+        是 ``1..MAX_MANAGED_BUDGET`` 整数；④ 当前无 MTS 在跑；⑤ 调度起点干净
+        （无 pending handoff / inflight handoff）。
 
         校验通过：建 ``ManagedSession`` → ``enqueue_handoff(delegate(manager))`` →
         走既有 ``_enqueue_handoff_and_maybe_start`` 启动 drain。
@@ -439,6 +441,18 @@ class HandoffHandlers:
             return
         if manager_guest not in orch.guest_names:
             _err(f"manager_guest={manager_guest!r} 不在场")
+            return
+        # ②b manager 不能正忙（bg run / inflight speak）。否则 kickoff DELEGATE 会被
+        #     drain `_advance_to_runnable_handoff` 的 busy-winner 守卫静默 drop（P11 C12），
+        #     而 P8.4 把「drain 收尾队列空」从 manager_finished 改成 dormant —— UI 已
+        #     收到 ``managed_session_started`` 却永远没人接 kickoff，MTS 永远卡在待机
+        #     无反馈（Codex review P8.4 round 1 P2）。busy 名单读 ``active_guest_names``
+        #     视图，与 drain busy 守卫同源。
+        if orch.active_guest_names and manager_guest in orch.active_guest_names:
+            _err(
+                f"manager_guest={manager_guest!r} 正忙（有 bg 任务 / 正在发言）；"
+                "请稍后再开启托管"
+            )
             return
         # ③ budget 是 1..MAX_MANAGED_BUDGET 整数（bool 是 int 子类，显式排除）。
         budget = data.get("budget")

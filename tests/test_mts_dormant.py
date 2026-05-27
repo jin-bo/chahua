@@ -362,6 +362,141 @@ async def test_close_other_task_keeps_mts_dormant(session_and_srv) -> None:
     assert ended == []
 
 
+# ── 5) P8.4.7 dormant 复活 kickoff（Codex round 1 P2）──────────────────────
+
+
+async def test_dormant_resume_enqueues_manager_kickoff_and_skips_chain(
+    monkeypatch,
+) -> None:
+    """dormant MTS + user message → 同步入队 manager DELEGATE + drain 消费、跳过 chain。
+
+    P8.4 原设计「chain 内 manager 自动入队 → re-drain」在 dormant 时不可靠（chain
+    scoring 不保证 manager 胜出；即便胜出也拿不到 ``<managed_session>`` 块）。
+    P8.4.7 改为「pre-enqueue + skip chain」让 dormant 复活走 drain 独占路径。
+    """
+    orch, _ = _build("Maya", "Wei", store=_make_store("t1"))
+    chain_called: list[int] = []
+
+    async def _record_chain(self, *, sink, active_task_id=None):
+        chain_called.append(1)
+
+    monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
+    captured: list[ChahuaEnvelope] = []
+
+    orch.start_managed_session(
+        captured.append, task_id="t1", manager_guest="Maya", budget=3,
+    )
+    # drain kickoff 跑完后 MTS 进入 dormant。
+    await orch.run_pending_handoff(captured.append, task_id="t1")
+    assert orch.managed_session is not None
+    assert len(orch._handoff_queue) == 0
+    captured.clear()
+    chain_called.clear()
+
+    # 用户消息进来 —— pre-enqueue manager kickoff + drain + skip chain。
+    await orch.submit_user_message("hi", sink=captured.append)
+
+    assert chain_called == [], "dormant kickoff 路径不应跑 chain"
+    # 队列空（drain 消费完 kickoff）+ HANDOFF_ENQUEUED + HANDOFF_CONSUMED 都发了。
+    enqueued = [
+        e for e in captured if e.type is ChahuaEventType.HANDOFF_ENQUEUED
+    ]
+    consumed = [
+        e for e in captured if e.type is ChahuaEventType.HANDOFF_CONSUMED
+    ]
+    assert any(
+        any(i.get("target") == "Maya" for i in e.data["queue"])
+        for e in enqueued
+    )
+    assert [e.data["item"]["target"] for e in consumed] == ["Maya"]
+    # MTS 仍活、未 ended。
+    ended = [
+        e for e in captured if e.type is ChahuaEventType.MANAGED_SESSION_ENDED
+    ]
+    assert ended == []
+    assert orch.managed_session is not None
+
+
+async def test_dormant_resume_falls_back_to_chain_when_manager_offline(
+    monkeypatch,
+) -> None:
+    """manager 已离场 → 不补 kickoff、走常规 chain；MTS 仍 dormant（用户可再开）。"""
+    orch, _ = _build("Wei", store=_make_store("t1"))  # 注意：没 Maya
+    chain_called: list[int] = []
+
+    async def _record_chain(self, *, sink, active_task_id=None):
+        chain_called.append(1)
+
+    monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
+    captured: list[ChahuaEnvelope] = []
+    # 不经 start_managed_session（它走 kickoff 路径），直接构造 dormant MTS。
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=3,
+    )
+
+    await orch.submit_user_message("hi", sink=captured.append)
+
+    # manager 不在场 → 不补 kickoff → 走 chain。
+    assert chain_called == [1]
+    enqueued = [
+        e for e in captured if e.type is ChahuaEventType.HANDOFF_ENQUEUED
+    ]
+    assert enqueued == []
+    # MTS 没主动收尾（dormant 行为），仍活。
+    assert orch.managed_session is not None
+
+
+async def test_dormant_resume_falls_back_to_chain_when_manager_busy(
+    monkeypatch,
+) -> None:
+    """manager 正忙（bg run / inflight）→ 不补 kickoff、走常规 chain。
+
+    避免 kickoff 项被 drain busy-winner 守卫静默 drop 后 MTS 永远卡在 dormant。
+    busy 名单走 ``orch.active_guest_names`` 视图（P11 同源）。
+    """
+    orch, _ = _build("Maya", "Wei", store=_make_store("t1"))
+    orch.active_guest_names = {"Maya"}  # 模拟 bg run 占用 Maya
+    chain_called: list[int] = []
+
+    async def _record_chain(self, *, sink, active_task_id=None):
+        chain_called.append(1)
+
+    monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
+    captured: list[ChahuaEnvelope] = []
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=3,
+    )
+
+    await orch.submit_user_message("hi", sink=captured.append)
+
+    assert chain_called == [1]
+    enqueued = [
+        e for e in captured if e.type is ChahuaEventType.HANDOFF_ENQUEUED
+    ]
+    assert enqueued == []
+    assert orch.managed_session is not None
+
+
+async def test_non_dormant_user_message_keeps_chain_path(monkeypatch) -> None:
+    """非 dormant 路径不受影响：MTS 不活时仍跑 chain，无任何 dormant kickoff 入队。"""
+    orch, _ = _build("Maya", "Wei", store=_make_store("t1"))
+    chain_called: list[int] = []
+
+    async def _record_chain(self, *, sink, active_task_id=None):
+        chain_called.append(1)
+
+    monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
+    captured: list[ChahuaEnvelope] = []
+
+    await orch.submit_user_message("hi", sink=captured.append)
+
+    assert chain_called == [1]
+    enqueued = [
+        e for e in captured if e.type is ChahuaEventType.HANDOFF_ENQUEUED
+    ]
+    assert enqueued == []
+
+
 async def test_update_task_non_terminal_status_keeps_mts(session_and_srv) -> None:
     """P8.4 §4.2 占位调用钉锁：``update_task`` 改非终结 status（如 ``doing`` →
     ``review``，但当前 NON_TERMINAL_STATUSES 只一个 doing；用 update title 兼容）
