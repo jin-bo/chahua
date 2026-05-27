@@ -181,8 +181,28 @@ class RoomRuntime:
             or self.pending_mts_continuations > 0
         )
 
+    def has_managed_session(self) -> bool:
+        """该房间是否还挂着活的 MTS（dormant 或 active 都算）。
+
+        P8.4 引入 dormant MTS 后，drain 收尾不再终结 MTS —— ``_managed_session``
+        非空、但 ``inflight_alive`` / ``has_active_runs`` / ``pending_mts_continuations``
+        都可能为 False。后台房自毁判断必须把它算入 busy，否则 dormant MTS 会随
+        runtime 一并销毁、连 ``managed_session_ended`` 都不发（Codex P8.4 round 2
+        P2）。
+
+        显式停止 / 任务终结 / 切走 active task / 用户取消 / ``_aclose_one_runtime``
+        等所有正经收尾路径都先 ``end_managed_session()`` 清 ``_managed_session=None``
+        再进 runtime 销毁，故本方法不会把已结束的 MTS 误判为活。
+
+        ``getattr`` 防御：runtime 构造期 ``session`` 罕见瞬态 None（``_replace_session``
+        切换中）以及裸构测试桩（``session=None``）都退化为 ``False`` —— 没 orchestrator
+        即没 MTS，与「没 MTS = 不忙」语义一致。
+        """
+        orch = getattr(self.session, "orchestrator", None)
+        return getattr(orch, "managed_session", None) is not None
+
     def busy_alive(self) -> bool:
-        """该房间是否有「任意」活跃运行（前台 turn or bg run or 待跑 MTS 续命）。
+        """该房间是否有「任意」活跃运行或 dormant MTS。
 
         **P11 设计 §「运行态」窄替换**：本方法只在「runtime 生命周期 / 房间 busy
         展示」分支替代 ``inflight_alive``：
@@ -200,11 +220,17 @@ class RoomRuntime:
         background runtime 会被销毁、callback 跑时 runtime 已 close、续命 no-op、
         review 丢失。把待跑计数计入 busy 让 self_destruct 等住、callback 起 drain
         后 drain finally 再触发真正的 self_destruct。
+
+        **Codex P8.4 round 2 P2**：``has_managed_session()`` 也算 busy —— P8.4 起
+        drain 收尾不再终结 MTS，dormant MTS 不在 inflight / bg / pending 任一计数里。
+        若本方法漏算它，后台房 drain 自然跑完时 ``_maybe_self_destruct_background_runtime``
+        会把整个 runtime 拆毁、dormant MTS 静默消失，用户切回也看不到 MTS 状态。
         """
         return (
             self.inflight_alive()
             or self.has_active_runs()
             or self.pending_mts_continuations > 0
+            or self.has_managed_session()
         )
 
     def guest_busy(self, name: str) -> bool:

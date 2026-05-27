@@ -35,6 +35,8 @@ class _FakeRoom:
 class _FakeOrchestrator:
     active_guest_names: Optional[set[str]] = None
     _managed_session: Optional[object] = None
+    # P8.4.8：``RoomRuntime.has_managed_session`` 读公开 ``managed_session`` 属性。
+    managed_session: Optional[object] = None
 
 
 class _FakeSession:

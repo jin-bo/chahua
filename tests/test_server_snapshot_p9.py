@@ -103,6 +103,10 @@ class _FakeSession:
         self.room_config = type(
             "_RC", (), {"room_dir": type("_D", (), {"name": name})()},
         )()
+        # P8.4.8：``RoomRuntime.has_managed_session`` 读 ``session.orchestrator.managed_session``。
+        self.orchestrator = type(
+            "_O", (), {"managed_session": None},
+        )()
 
 
 def _runtime(room_id: str, *, busy: bool) -> RoomRuntime:
@@ -168,6 +172,8 @@ def test_rooms_available_busy_flag_empty_registry(env_paths):
 class _FakeOrch:
     def __init__(self, snap):
         self._snap = snap
+        # P8.4.8：``RoomRuntime.has_managed_session`` 读公开 ``managed_session``。
+        self.managed_session = None
 
     def snapshot_inflight_message(self):
         return self._snap

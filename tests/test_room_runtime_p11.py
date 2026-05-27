@@ -24,9 +24,14 @@ from chahua.room_runtime import RoomEventRouter, RoomRuntime
 
 
 def _make_runtime() -> RoomRuntime:
+    """P8.4.8 起 ``busy_alive`` 走 ``session.orchestrator.managed_session`` —— 用
+    SimpleNamespace 桩满足该读取点；其余字段保持空 / 默认。"""
+    from types import SimpleNamespace
     return RoomRuntime(
         room_id="r",
-        session=object(),  # type: ignore[arg-type]
+        session=SimpleNamespace(  # type: ignore[arg-type]
+            orchestrator=SimpleNamespace(managed_session=None),
+        ),
         router=RoomEventRouter(NOOP_SINK),
     )
 
@@ -70,6 +75,35 @@ def test_guest_busy_reads_active_guest_names() -> None:
     assert rt.guest_busy("Alice") is False
     rt.active_guest_names.discard("Bob")
     assert rt.guest_busy("Bob") is False
+
+
+def test_busy_alive_counts_dormant_managed_session() -> None:
+    """P8.4.8（Codex round 2 P2）：dormant MTS 计入 ``busy_alive`` —— 否则后台房
+    drain 自然跑完时 ``_maybe_self_destruct_background_runtime`` 会拆毁整个 runtime，
+    dormant MTS 随之静默消失（连 ``managed_session_ended`` 都不发）。
+
+    用 SimpleNamespace 桩 session.orchestrator —— RoomRuntime 只读
+    ``session.orchestrator.managed_session`` 一处。
+    """
+    from types import SimpleNamespace
+
+    rt = RoomRuntime(
+        room_id="r",
+        session=SimpleNamespace(  # type: ignore[arg-type]
+            orchestrator=SimpleNamespace(managed_session=None),
+        ),
+        router=RoomEventRouter(NOOP_SINK),
+    )
+    # 空 runtime：busy_alive False。
+    assert rt.has_managed_session() is False
+    assert rt.busy_alive() is False
+    # dormant MTS 挂上 —— inflight / bg / pending 都空，但 has_managed_session True
+    # → busy_alive True，self_destruct 不应进。
+    rt.session.orchestrator.managed_session = object()  # 任何非 None 值
+    assert rt.has_managed_session() is True
+    assert rt.busy_alive() is True
+    assert rt.inflight_alive() is False  # 前台 turn 控制语义不被污染
+    assert rt.has_active_runs() is False  # bg 也是干净的
 
 
 async def test_cancel_and_drain_agent_runs_empty_returns() -> None:

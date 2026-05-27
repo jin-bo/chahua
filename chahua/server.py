@@ -864,12 +864,18 @@ class ChahuaServer:
         极简：runtime 处于 ``background`` 且 **in-flight 槽空** → emit
         ``room_background_finished`` 里程碑、close、移出 ``_runtimes``。
 
-        **为什么不再额外查 handoff 队列空 / 无 MTS**（与 P9 §5.1 草案的差异）：后台
+        **为什么不再额外查 handoff 队列空**（与 P9 §5.1 草案的差异）：后台
         房间**没有 inbound 驱动** —— in-flight task 一旦结束就不会再有任何执行。即便
         ``_handoff_queue`` 还残留 cap 撞顶没跑的项，也无人 drain（re-drive 会让
-        ``max_consecutive_ai_turns`` cap 失效）；MTS 正常路径在 drain 结束时 ``_advance``
-        已把它收尾成 None。若仍按「队列非空就不回收」会留下一个**永远不会再动**的
-        runtime 泄漏到 ws 断开。残留项是瞬态（与 P9 前切房即弃队列同口径），丢弃可接受。
+        ``max_consecutive_ai_turns`` cap 失效）。若仍按「队列非空就不回收」会留下一个
+        **永远不会再动**的 runtime 泄漏到 ws 断开。残留项是瞬态（与 P9 前切房即弃队列
+        同口径），丢弃可接受。
+
+        **MTS 收尾**：P8.4 起 drain 结束**不再**终结 MTS（dormant 路径），所以
+        ``runtime.busy_alive`` 显式把 ``has_managed_session()`` 也计入 busy ——
+        dormant MTS 在的话本方法的 ``busy_alive()`` 早返 True，runtime 不被回收。
+        正经收尾经 ``managed_session_stop`` / task 终结 / ``_aclose_one_runtime`` /
+        MAX_BACKGROUND_ROOMS 淘汰，都先 ``end_managed_session()`` 再走 close 路径。
 
         前台 runtime（``mode == foreground``）一律不动。**切回竞态（§5.2）**：用户在
         后台 turn 收尾瞬间切回该房 —— ``_switch_room`` 先把 ``mode`` 翻 ``foreground``，
