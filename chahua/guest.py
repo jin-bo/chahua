@@ -18,13 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from agentao import Agentao
 from agentao.cancellation import CancellationToken
 from agentao.llm import LLMClient
 from agentao.mcp import load_mcp_config
+from agentao.mcp.config import expand_env_vars
 from agentao.paths import user_root
 from agentao.permissions import PermissionEngine
 
@@ -51,6 +54,63 @@ from .transport_bridge import ChahuaTransport
 _log = logging.getLogger(__name__)
 
 
+# P12.5：仅用于「引用了变量但宿主未设置」的 WARN 扫描；真正的 substitution 仍走
+# agentao.expand_env_vars（与 .agentao/mcp.json 文件加载同一套语义，不漂移）。这里复刻
+# agentao mcp/config.py 的 ``$VAR`` / ``${VAR}`` 形态，故意不 import 私有 _ENV_VAR_RE ——
+# 私有符号无稳定承诺，几行正则比耦合划算。
+_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+# 展开作用于这两类 str→str 映射字段；``args`` 是 list[str]，单独走。
+_MCP_EXPAND_DICT_FIELDS = ("env", "headers")
+
+
+def _expand_one(server_name: str, where: str, value: Any) -> Any:
+    """对单个值做 ``$VAR`` / ``${VAR}`` 展开；非 str 原样返回。
+
+    引用了变量名的值才走 agentao expand_env_vars；引用的变量在宿主 env 里**未设置或为
+    空串**时 WARN 一次（两者都展开成空串 —— 空 API key 会让 MCP server 运行时静默失败，
+    WARN 是必要诊断）。同名变量在一个值里多次出现只 WARN 一次。缺变量本身不报错、不阻断
+    （与房间级容错档一致）。
+    """
+    if not isinstance(value, str):
+        return value
+    # findall 与 agentao expand_env_vars 同正则；每项 (braced, bare) 仅一组非空。
+    refs = _ENV_REF_RE.findall(value)
+    if not refs:
+        return value
+    warned: set[str] = set()
+    for braced, bare in refs:
+        var = braced or bare
+        if var not in warned and not os.environ.get(var):
+            warned.add(var)
+            _log.warning(
+                "MCP server %r 的 %s 引用的环境变量 ${%s} 未设置或为空，将展开为空串",
+                server_name, where, var,
+            )
+    return expand_env_vars(value)
+
+
+def _expand_mcp_server(server_name: str, cfg: dict) -> dict:
+    """对单个 MCP server cfg 的 ``env`` / ``headers`` / ``args`` 做变量插值（P12.5）。
+
+    返回**新 dict**，不原地改 ``cfg`` —— 调用方传进来的 persona / 房间级配置是
+    :func:`chahua.persona_assets.discover_assets` 的 raw 快照，room snapshot 投影还要
+    用它的字面 ``${VAR}``（绝不下发展开后真值）。
+    """
+    out = dict(cfg)
+    for field in _MCP_EXPAND_DICT_FIELDS:
+        val = out.get(field)
+        if isinstance(val, dict):
+            out[field] = {
+                k: _expand_one(server_name, f"{field}.{k}", v) for k, v in val.items()
+            }
+    args = out.get("args")
+    if isinstance(args, list):
+        out["args"] = [
+            _expand_one(server_name, f"args[{i}]", a) for i, a in enumerate(args)
+        ]
+    return out
+
+
 def _merged_mcp_configs(
     working_directory: Path,
     persona_servers: Optional[dict],
@@ -66,6 +126,11 @@ def _merged_mcp_configs(
 
     设计 §2.4：trust 门控不对称（persona 来路可能任意可执行；房间级是用户当下意图）；
     覆盖顺序由"哪一层更接近用户当下意图"决定。
+
+    **P12.5 env 插值**：persona / 房间两层的 ``env`` / ``headers`` / ``args`` 走
+    :func:`_expand_mcp_server`，让密钥从可分发的 persona 包 / 用户 toml 里只留变量名引用。
+    文件加载层（``configs``）**不**在此重复展开 —— ``load_mcp_config`` 已展开过，每层恰好
+    展开一次。
     """
     try:
         configs = load_mcp_config(
@@ -78,11 +143,13 @@ def _merged_mcp_configs(
     merged = dict(configs)
     if persona_servers:
         for name, cfg in persona_servers.items():
+            cfg = _expand_mcp_server(name, cfg)
             if name in merged:
                 _log.info("persona MCP server %r overrides file-loaded config", name)
             merged[name] = {**cfg, "trust": cfg.get("trust", True)}
     if room_level_servers:
         for name, cfg in room_level_servers.items():
+            cfg = _expand_mcp_server(name, cfg)
             if name in merged:
                 _log.info(
                     "room-level MCP server %r overrides persona / file-loaded config", name
