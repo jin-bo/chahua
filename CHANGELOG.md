@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-28
+
+详见 [`docs/releases/v0.1.5.md`](docs/releases/v0.1.5.md)。
+
+### Added
+- **P12 persona 包 manifest**（2026-05-25 ~ 2026-05-26，详见 [`docs/P12-persona 包 manifest.md`](docs/P12-persona%20包%20manifest.md)）：persona 从「目录里散件约定」升级为带 `persona.toml` manifest 的安装单元。本步只立载体 + 最小字段集（`schema_version` / `display_name` / `summary` / `[defaults.guest]`），解决两个真痛点：`<Name>.toml.permission` 写了不生效、花名册能力摘要要手动喂。严格白名单（未知键 → `PersonaManifestError`）、`schema_version` 当前唯一合法值 = 1、消费路径 fail-fast（`discover_personas` 是唯一 `WARN+None` 例外）、`[defaults.guest]` + 顶层 `summary` 仅「加入房间」时一次性 inflate 之后与 manifest 解绑。
+  - **P12.1 内置 5 个 persona 迁 dir-form + manifest**：宝总 / 爷叔 / 汪小姐 / 玲子 / 范总 从 flat-form `<Name>.md` 迁到 dir-form `<Name>/<Name>.md` + `persona.toml`，用第一手案例验证 schema；`config.py::_try_p12_1_dir_form_rewrite` 加 backward-compat shim 让 pre-P12.1 老 room.toml 的 flat-form 内置路径仍可加载（+ WARN 一次）。
+  - **examples/personas 迁 legacy `<Name>.toml` → `persona.toml`**；`persona_import._validate_manifest_pre_write` 写盘前对采集字节做 manifest dry-run（坏 manifest → 不创建 target_dir）+ `load_persona_manifest` 跨平台 case-strict 守卫（`Persona.toml` 等错名同样拒）。
+- **P12.5 MCP env 变量插值**（2026-05-27，详见 [`docs/P12.5-MCP env 变量插值.md`](docs/P12.5-MCP%20env%20变量插值.md)）：persona sidecar `mcp.json` 与房间级 `[[guest.extra_mcp_servers]]` 的 `env` / `headers` / `args` 支持 `$VAR` / `${VAR}` 插值 —— 真密钥留 `.env`、包里只声明变量名。把 LLM 侧「API key 永不进 toml / envelope」不变量延伸到 MCP 侧「永不进 persona 包 / mcp.json」。
+- **P12.6 Personas 更新**（2026-05-28，详见 [`docs/P12.6-Personas 更新.md`](docs/P12.6-Personas%20更新.md)）：给「导入 persona」补一条生命周期 —— 导入时记 `.chahua-source.json` provenance（本地路径 / GitHub commit sha + 安装时间），导入 modal 加「已安装」页，检查更新 → 单个更新 / 全部更新 + 删除。manifest 加纯展示 `version` 字段（**绝不参与 status 判定** —— 内容信号 commit SHA / content_hash 唯一定「变没变」，降级也照样提示）。更新 = 全量替换 + 原子 swap（中断可崩溃恢复）；本地已改默认拒、须 `force` 才覆盖。4 个新 inbound + 1 个 `PERSONAS_INSTALLED` envelope，**不 bump `schema_version`**。含 Codex 7 轮 review 收敛（fail-closed 本地改动检测 / sha 刷新失败保旧基线 / 操作键精确匹配防误删 / symlink 拒绝 / `<name>.md` 存在性校验 / 绝对路径 provenance / bulk-update 口径对齐）。
+- **拍一拍 —— 双击茶客头像 → `handoff_delegate`**（2026-05-24，提交 `f94e175`）：双击 sidebar 茶客头像直接发起 delegate handoff，省去手敲。
+
+### Changed
+- **三大模块按子域拆分 helper**（2026-05-25，提交 `4f4b6cf`）：行为保持的纯重构 —— 把 server agent_run / tasks_store artifacts / transport artifact attribution 各抽出独立 helper 模块（`_server_agent_run.py` / `_tasks_store_artifacts.py` / `_transport_artifact_attribution.py`），公开 import 路径与运行行为不动。
+
+### Fixed
+- **P8.4 MTS 待机闭环 —— `MANAGER_FINISHED` 退役**（2026-05-27，详见 [`docs/P8.4-MTS 待机闭环.md`](docs/P8.4-MTS%20待机闭环.md)）：修 P8.3 语义缺陷「管理者一回合没派活就被当成任务完成、强制终结 MTS」。把「没派活」从**终结信号**改成**待机信号** —— MTS 保持活 + 清队列 + 状态条改「待机中」，等用户下一句话经既有 `submit_user_message` 自然续上（dormant 复活走 pre-enqueue manager kickoff + drain + skip chain）。终结 reason 从 6 收敛到 5（删 `manager_finished`）；管理者「我已完事」走 `task_propose_status("done")` → 用户采纳 → `task_closed`。前端「托管中（待机）」状态条由三源派生、不发新 envelope；托管运行 popover 管理者从任务负责人范围选取；含 Codex 5 轮 P2 收敛（dormant 复活 / busy manager 拒收 / dormant MTS 阻 bg runtime 销毁 / owner=user 退化全员 / 自指派 early swallow）。
+- **P11 C12 handoff 全家拒 busy 茶客**（2026-05-26，提交 `f1a43d1`）：delegate / review / panel inbound 准入校验拒绝正被后台 run 占用的茶客，防 `let_speak` × bg agent run 并发同一茶客（P8.4.9 后窄化为只查 `guest_in_bg_run` —— 前台 / handoff 占用仍可被 cancel+drain 抢占）。
+
 ## [0.1.4] - 2026-05-25
 
 详见 [`docs/releases/v0.1.4.md`](docs/releases/v0.1.4.md)。
