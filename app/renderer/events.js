@@ -95,6 +95,12 @@ export const EventType = Object.freeze({
   AGENT_RUN_FINISHED: "agent_run_finished",
   AGENT_RUN_CANCELLED: "agent_run_cancelled",
   AGENT_RUN_ERROR: "agent_run_error",
+  // P12.6 已安装 persona 列表 + 检查 / 更新 / 删除的权威全量快照。data 形状
+  // {personas: [{name, display_name, persona, avatar_data_uri, summary, source_type,
+  // source_url, status, local_modified, installed_version, latest_version, detail}, ...]}。
+  // list / check / update / delete 后均回这一帧，前端整批覆盖渲染。镜像
+  // chahua/events.py::ChahuaEventType.PERSONAS_INSTALLED。
+  PERSONAS_INSTALLED: "personas_installed",
 });
 
 // P9 §4：后台房间事件白名单 —— 后台 router 只放行这些里程碑。前端用同一集合判定
@@ -230,6 +236,16 @@ export const Inbound = Object.freeze({
   //   - AGENT_RUN_CANCEL {run_id}：只 cancel 指定 run，不动其它 bg run / 前台 turn。
   AGENT_RUN_START: "agent_run_start",
   AGENT_RUN_CANCEL: "agent_run_cancel",
+  // P12.6 已安装 persona 管理。服务端处理后回 PERSONAS_INSTALLED 全量快照；
+  // update / delete 另回 NOTICE + room_info。镜像 chahua/server_inbound_io.py::INBOUND_*。
+  //   - LIST_INSTALLED_PERSONAS 无 payload。
+  //   - CHECK_PERSONA_UPDATES {name?}：name 缺省 = 检查全部可更新来源。
+  //   - UPDATE_PERSONA {name, force?}：force 缺省 false，本地已改时须 true（前端 confirm 后置）。
+  //   - DELETE_PERSONA {name}：destructive，前端已 confirm。
+  LIST_INSTALLED_PERSONAS: "list_installed_personas",
+  CHECK_PERSONA_UPDATES: "check_persona_updates",
+  UPDATE_PERSONA: "update_persona",
+  DELETE_PERSONA: "delete_persona",
 });
 
 // 镜像 chahua/handoff.py::HandoffKind —— handoff 队列项的 ``kind`` wire 值。

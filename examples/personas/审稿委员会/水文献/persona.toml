@@ -1,4 +1,5 @@
 schema_version = 1
+version = "0.1.0"
 summary = "Reviewer 3：文献对话与缺口验证专家。引用堆 ≠ 综述合格。识别伪创新：把前人简化成弱版再宣布填空白 = 打稻草人。"
 
 [defaults.guest]

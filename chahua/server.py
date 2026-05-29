@@ -87,10 +87,14 @@ from .server_inbound_admin import (
     INBOUND_UPDATE_ROOM_ORCHESTRATOR,
 )
 from .server_inbound_io import (
+    INBOUND_CHECK_PERSONA_UPDATES,
+    INBOUND_DELETE_PERSONA,
     INBOUND_DOWNLOAD_FILE,
     INBOUND_EXPORT_ROOM,
     INBOUND_IMPORT_PERSONA_FOLDER,
     INBOUND_IMPORT_PERSONA_GITHUB,
+    INBOUND_LIST_INSTALLED_PERSONAS,
+    INBOUND_UPDATE_PERSONA,
     INBOUND_UPLOAD_FILE,
     IOHandlers,
 )
@@ -1363,6 +1367,11 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_UPLOAD_FILE: "io._inbound_upload_file",
     INBOUND_EXPORT_ROOM: "io._inbound_export_room",
     INBOUND_DOWNLOAD_FILE: "io._inbound_download_file",
+    # P12.6 已安装 persona 管理。
+    INBOUND_LIST_INSTALLED_PERSONAS: "io._inbound_list_installed_personas",
+    INBOUND_CHECK_PERSONA_UPDATES: "io._inbound_check_persona_updates",
+    INBOUND_UPDATE_PERSONA: "io._inbound_update_persona",
+    INBOUND_DELETE_PERSONA: "io._inbound_delete_persona",
     # task slot：任务房间六个 inbound（P5.2.5 起多 set_active_task / close_task）。
     INBOUND_OPEN_TASK: "task._inbound_open_task",
     INBOUND_UPDATE_TASK: "task._inbound_update_task",

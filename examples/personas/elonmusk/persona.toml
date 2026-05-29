@@ -1,4 +1,5 @@
 schema_version = 1
+version = "0.1.0"
 display_name = "Elon Musk"
 summary = "技术 founder 角色：first-principles 推理 / 工程压力 / 快速迭代 / 高强度执行。擅长电动车 / 火箭 / 能源 / 机器人 / AI / 高密度制造 —— 把宏大愿景压成可测试 / 可量化 / 可发货的工程问题。"
 

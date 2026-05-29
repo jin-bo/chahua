@@ -47,6 +47,7 @@ isolation = "global"
         schema_version=1,
         display_name="伊冯",
         summary="市场调研顾问",
+        version=None,
         defaults_guest_permission="workspace-write",
         defaults_guest_isolation="global",
     )
@@ -59,8 +60,49 @@ def test_load_happy_minimal(tmp_path: Path) -> None:
     assert m.schema_version == 1
     assert m.display_name is None
     assert m.summary is None
+    assert m.version is None
     assert m.defaults_guest_permission is None
     assert m.defaults_guest_isolation is None
+
+
+# ── version 字段（P12.6 —— 纯展示，不参与判定）─────────────────────────────
+
+
+def test_version_parsed(tmp_path: Path) -> None:
+    persona_dir = _write(
+        tmp_path, 'schema_version = 1\nversion = "1.2.0"\n'
+    )
+    m = load_persona_manifest(persona_dir)
+    assert m is not None
+    assert m.version == "1.2.0"
+    # 加 version 字段**不** bump schema_version（P12「加字段不 bump」）。
+    assert m.schema_version == SCHEMA_VERSION == 1
+
+
+def test_version_missing_is_none(tmp_path: Path) -> None:
+    persona_dir = _write(tmp_path, "schema_version = 1\n")
+    m = load_persona_manifest(persona_dir)
+    assert m is not None and m.version is None
+
+
+def test_version_empty_string_is_none(tmp_path: Path) -> None:
+    # 空 / 全空白 → None（与其它 _opt_str 字段同口径）。
+    persona_dir = _write(tmp_path, 'schema_version = 1\nversion = "   "\n')
+    m = load_persona_manifest(persona_dir)
+    assert m is not None and m.version is None
+
+
+def test_version_non_str_rejected(tmp_path: Path) -> None:
+    persona_dir = _write(tmp_path, "schema_version = 1\nversion = 120\n")
+    with pytest.raises(PersonaManifestError, match="version"):
+        load_persona_manifest(persona_dir)
+
+
+def test_no_cmp_version_symbol() -> None:
+    # 防回归：version 是纯展示字段，persona_manifest 不该出现版本比较器。
+    import chahua.persona_manifest as pm
+
+    assert not hasattr(pm, "_cmp_version")
 
 
 def test_load_file_missing(tmp_path: Path) -> None:
@@ -110,10 +152,10 @@ def test_unknown_top_key(tmp_path: Path) -> None:
         tmp_path,
         """\
 schema_version = 1
-version = "0.1.0"
+author = "someone"
 """,
     )
-    with pytest.raises(PersonaManifestError, match="version"):
+    with pytest.raises(PersonaManifestError, match="author"):
         load_persona_manifest(persona_dir)
 
 
@@ -401,9 +443,9 @@ def test_bytes_bad_toml_raises_manifest_error() -> None:
 def test_bytes_unknown_top_key_raises() -> None:
     blob = b"""\
 schema_version = 1
-version = "0.1.0"
+author = "someone"
 """
-    with pytest.raises(PersonaManifestError, match="version"):
+    with pytest.raises(PersonaManifestError, match="author"):
         parse_persona_manifest_bytes(blob)
 
 

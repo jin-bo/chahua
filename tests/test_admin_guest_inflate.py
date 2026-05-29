@@ -154,10 +154,11 @@ def test_bad_manifest_schema_version_raises(paths):
 def test_bad_manifest_unknown_key_raises(paths):
     persona_rel = _make_yvonne(
         paths,
-        manifest_body='schema_version = 1\nversion = "0.1.0"\n',
+        # 任意未在白名单内的顶层键 —— P12.6 起 version 已是合法键，改用 author。
+        manifest_body='schema_version = 1\nauthor = "someone"\n',
     )
     rc = _seed_room_with_one_guest(paths)
-    with pytest.raises(PersonaManifestError, match="version"):
+    with pytest.raises(PersonaManifestError, match="author"):
         admin.add_guest(
             paths=paths, room_dir=rc.room_dir, persona=persona_rel, name="Yvonne",
         )

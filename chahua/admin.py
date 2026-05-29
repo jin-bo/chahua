@@ -31,6 +31,7 @@ from .admin_persona import (  # noqa: F401
     _read_persona_toml_name,
     _search_roots,
     discover_personas,
+    list_installed_personas,
     normalize_room_id,
     sanitize_fs_name,
 )

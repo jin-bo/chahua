@@ -128,6 +128,11 @@ def discover_personas(paths: Paths) -> list[dict]:
     :func:`chahua.persona_import.import_from_folder` / :func:`import_from_github` 写出来；
     flat 是 ship-with-app 的内置 persona 形态。同名时 user_data 胜（dedup by display name）。
     """
+    # 懒导入避免循环（同 list_installed_personas）。discovery 前先做崩溃恢复 —— 否则被
+    # 中断的更新（只剩 .<name>.bak-…）会让该 persona 在 picker 里缺席。
+    from . import persona_import
+    persona_import.recover_interrupted_persona_updates(paths)
+
     seen_by_name: dict[str, dict] = {}
     # 后写后覆盖等价 user_data 胜 —— 反序遍历保证 user_data 在 dict 里最后落定。
     for root in reversed(_search_roots(paths)):
@@ -165,6 +170,85 @@ def discover_personas(paths: Paths) -> list[dict]:
                 "summary": summary,
             }
     return [seen_by_name[n] for n in sorted(seen_by_name)]
+
+
+def list_installed_personas(paths: Paths) -> list[dict]:
+    """「已安装」页数据源（P12.6）：列 ``user_data_root`` 下**所有** dir-form persona
+    （含无 provenance 的），内置 flat-form（app_root 只读、无上游）**不**进列表。
+
+    每行字段
+    ``{name, display_name, persona, avatar_data_uri, summary, source_type,
+    source_url, status, local_modified, installed_version, latest_version, detail}``：
+
+    - ``name`` = **目录名**（update / delete / check 的操作键，经 ``_user_persona_dir``
+      解析回该目录）。``display_name`` 是友好名（manifest / legacy toml），渲染用。
+    - 有 provenance：``source_type ∈ {github, folder}``、带 ``source_url`` /
+      ``installed_version``（provenance 里的 version，可 null）、``status="unknown"``
+      （待 check）、``detail=""``。
+    - 缺/坏 provenance：``source_type="unknown"``、``installed_version=null``、
+      ``status="source_unavailable"``、``detail`` 提示来源未知。
+
+    **list 阶段不做本地改动检测 / 不取上游 version**（都留给 ``check``，省 IO / 网络）：
+    ``local_modified`` 初值 False、``latest_version`` 初值 None。provenance / status 是
+    **按需的**，绝不进高频 ``room_info``（承重不变量）。
+    """
+    # 懒导入避免循环：persona_import 顶层 ``from .admin import ...`` → admin →
+    # admin_persona，模块级反向 import 会在 admin_persona 装载未完成时撞名。
+    from . import persona_import
+
+    rows: list[dict] = []
+    personas_dir = paths.user_data_root / PERSONAS_REL_DIR
+    if not personas_dir.is_dir():
+        return rows
+    # 进列表前先做崩溃恢复：把被中断的原子更新留下的孤儿 .<name>.bak- 还原回 <name>/，
+    # 否则该 persona 会一直「消失」在列表外（dot-dir 被跳过）。
+    persona_import.recover_interrupted_persona_updates(paths)
+    for sub in sorted(personas_dir.iterdir()):
+        # symlink 目录跳过：is_dir() 会跟进链接，把别名暴露成 persona —— 后续 delete/update
+        # 经 _user_persona_dir 也拒 symlink，列表层一并不展示，口径一致。
+        if sub.is_symlink():
+            continue
+        if not sub.is_dir():
+            continue
+        # 跳过 dotfile 目录（原子替换的瞬态 .update-/.bak- 残骸 + 任何隐藏目录）。
+        if sub.name.startswith("."):
+            continue
+        md = sub / f"{sub.name}.md"
+        if not md.is_file():
+            mds = [p for p in sub.iterdir() if p.is_file() and p.suffix.lower() == ".md"]
+            if len(mds) != 1:
+                continue
+            md = mds[0]
+        display_name, summary = _resolve_display_and_summary(md, is_dir_form=True)
+        source = persona_import.read_source(sub)
+        if source is not None:
+            source_type = source.source_type
+            source_url = source.source_url
+            installed_version = source.version
+            status = persona_import.STATUS_UNKNOWN
+            detail = ""
+        else:
+            source_type = "unknown"
+            source_url = ""
+            installed_version = None
+            status = persona_import.STATUS_SOURCE_UNAVAILABLE
+            detail = "来源未知（手动放置或旧版导入），不可更新"
+        rows.append({
+            "name": sub.name,
+            "display_name": display_name or sub.name,
+            "persona": str(PERSONAS_REL_DIR / sub.name / md.name),
+            "avatar_data_uri": read_avatar_data_uri(md.with_suffix(".png")),
+            "summary": summary,
+            "source_type": source_type,
+            "source_url": source_url,
+            "status": status,
+            "local_modified": False,
+            "installed_version": installed_version,
+            "latest_version": None,
+            "detail": detail,
+        })
+    rows.sort(key=lambda r: r["name"])
+    return rows
 
 
 # ── room_id 规范化 ────────────────────────────────────────────────────────

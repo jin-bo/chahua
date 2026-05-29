@@ -108,9 +108,10 @@ def test_bad_manifest_then_fix_can_reimport(paths, tmp_path):
 def test_unknown_top_key_rejected(paths, tmp_path):
     src = _make_source(
         tmp_path, "WithFuture",
-        manifest_body='schema_version = 1\nversion = "0.1.0"\n',  # version 是 P12.4
+        # 任意未在白名单内的顶层键 —— P12.6 起 version 已是合法键，改用 author。
+        manifest_body='schema_version = 1\nauthor = "someone"\n',
     )
-    with pytest.raises(PersonaImportError, match="version"):
+    with pytest.raises(PersonaImportError, match="author"):
         import_from_folder(paths, src)
     assert not (paths.user_data_root / TARGET_REL / "WithFuture").exists()
 

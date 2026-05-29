@@ -98,8 +98,8 @@ export function wireModals({
     closeModal(addRoomModal);
   });
 
-  // ── 导入 persona ──────────────────────────────────────────────────
-  createPersonaImport({
+  // ── 导入 persona + 已安装管理（P12.6）──────────────────────────────
+  const personaImport = createPersonaImport({
     modal: $("import-persona-modal"),
     folderPathEl: $("import-folder-path"),
     folderPickBtn: $("import-folder-pick"),
@@ -168,4 +168,7 @@ export function wireModals({
     if (ev.key !== "Escape") return;
     for (const m of allModals) if (!m.hidden) closeModal(m);
   });
+
+  // personaImport.renderInstalled 给 envelope_router 接 PERSONAS_INSTALLED 用。
+  return { personaImport };
 }

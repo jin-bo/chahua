@@ -87,6 +87,8 @@ export function createEnvelopeRouter({
   //     覆盖经 room_info.data.background_runs）；
   //   - sidebar 暴露的 markGuestBgRun / unmarkGuestBgRun 写茶客行 .guest-bg-run 指示。
   bgRunBar,
+  // P12.6：persona import 控制器，接 PERSONAS_INSTALLED 全量快照重渲「已安装」列表。
+  personaImport,
 }) {
   // P9：当前前台房间在 envelope 里的 room_id（= room.name，见 chahua/events.py）。
   // 从 room_info envelope 顶层 room_id 捕获。
@@ -363,6 +365,11 @@ export function createEnvelopeRouter({
           kind: "system",
           text: `后台运行失败：${d.guest_name || "?"} —— ${d.error || "未知"}`,
         });
+        return;
+      }
+      case EventType.PERSONAS_INSTALLED: {
+        // P12.6：全量快照 —— 整批覆盖渲染「已安装」列表（list / check / update / delete 后均回）。
+        if (personaImport) personaImport.renderInstalled(env.data?.personas ?? []);
         return;
       }
       // guest_thinking / tool_* 暂时静默。

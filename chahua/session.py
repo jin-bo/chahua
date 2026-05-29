@@ -382,6 +382,11 @@ def build_room_session(
     抛 :class:`chahua.config.RoomConfigError` 当 toml 缺/错；抛 SystemExit 当 LLM
     凭据缺失（与 P0~P2.2 行为一致 —— 缺凭据没法跑，早炸早好）。
     """
+    # 装配前先做 persona 崩溃恢复：被中断的原子更新只剩 .<name>.bak-…，引用该 persona 的
+    # 房间会在 load_room_config 解析 persona 路径时失败。app 重启 / 切房 / 重建都过这里。
+    from . import persona_import
+    persona_import.recover_interrupted_persona_updates(paths)
+
     room_config = load_room_config(room_dir, paths=paths)
     user_config = load_user_md(
         user_data_root=paths.user_data_root,

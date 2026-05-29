@@ -33,7 +33,7 @@ SCHEMA_VERSION = 1
 # 严格白名单（mirror :mod:`chahua.config` 的 ``_ALLOWED_*`` 风格）。
 # 不预留「未来口袋」字段 —— P12.2 真要加段，到时白名单加一行。
 _ALLOWED_TOP_KEYS: frozenset[str] = frozenset(
-    {"schema_version", "display_name", "summary", "defaults"}
+    {"schema_version", "display_name", "summary", "version", "defaults"}
 )
 _ALLOWED_DEFAULTS_KEYS: frozenset[str] = frozenset({"guest"})
 _ALLOWED_DEFAULTS_GUEST_KEYS: frozenset[str] = frozenset({"permission", "isolation"})
@@ -48,6 +48,10 @@ class PersonaManifest:
     schema_version: int
     display_name: Optional[str]
     summary: Optional[str]
+    version: Optional[str]
+    """作者声明的发布版本（P12.6）。**纯展示字段** —— provenance 记录 + UI 并列展示，
+    **绝不参与更新判定**（「变没变」只由 commit sha / content_hash 定）。缺 / 空 → None。"""
+
     defaults_guest_permission: Optional[str]
     """已校验在 :data:`chahua.permissions.VALID_MODES` 内（如非 None）。"""
 
@@ -152,6 +156,7 @@ def _parse_dict(data: object, *, source: str) -> PersonaManifest:
 
     display_name = _opt_str(data, "display_name", source=source)
     summary = _opt_str(data, "summary", source=source)
+    version = _opt_str(data, "version", source=source)
 
     perm: Optional[str] = None
     iso: Optional[str] = None
@@ -208,6 +213,7 @@ def _parse_dict(data: object, *, source: str) -> PersonaManifest:
         schema_version=sv,
         display_name=display_name,
         summary=summary,
+        version=version,
         defaults_guest_permission=perm,
         defaults_guest_isolation=iso,
     )

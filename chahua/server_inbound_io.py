@@ -7,6 +7,7 @@ P5.2 重构：mixin 多继承换成组合。:class:`chahua.server.ChahuaServer` 
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -16,7 +17,7 @@ from typing import Callable
 from . import persona_import
 from ._persist import write_bytes_atomic
 from ._server_helpers import require_str
-from .admin import sanitize_fs_name
+from .admin import list_installed_personas, sanitize_fs_name
 from .events import (
     ChahuaEnvelope,
     ChahuaEventType,
@@ -35,6 +36,11 @@ INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
 INBOUND_EXPORT_ROOM = "export_room"
 INBOUND_DOWNLOAD_FILE = "download_file"
+# P12.6 已安装 persona 管理。
+INBOUND_LIST_INSTALLED_PERSONAS = "list_installed_personas"
+INBOUND_CHECK_PERSONA_UPDATES = "check_persona_updates"
+INBOUND_UPDATE_PERSONA = "update_persona"
+INBOUND_DELETE_PERSONA = "delete_persona"
 
 
 # 单文件上限。WS 入站帧 max=300MB（_WS_MAX_INBOUND_BYTES），base64 4/3 膨胀 → 原始
@@ -53,6 +59,18 @@ _DOWNLOAD_MAX_BYTES = _UPLOAD_MAX_BYTES
 # / ``tasks/<id>/task.json`` 等内部元数据。所以 ``_download_file`` 额外强制 ``tasks/``
 # 路径必须是 ``tasks/<id>/artifacts/<name>`` 形 4 段且段[2] == "artifacts"。
 _DOWNLOAD_ALLOWED_PREFIXES = ("share/", "tasks/")
+
+
+def _mark_row_up_to_date(rows: list[dict], name: str, version) -> None:
+    """更新成功后把该行乐观标成最新（刚同步完，状态确定，省一次 check 网络往返）。"""
+    for r in rows:
+        if r["name"] == name:
+            r["status"] = persona_import.STATUS_UP_TO_DATE
+            r["local_modified"] = False
+            r["installed_version"] = version
+            r["latest_version"] = None
+            r["detail"] = ""
+            break
 
 
 def _import_success_text(result: "persona_import.ImportedPersona") -> str:
@@ -406,3 +424,136 @@ class IOHandlers:
         raw_purpose = data.get("purpose", "download")
         purpose = raw_purpose if isinstance(raw_purpose, str) and raw_purpose else "download"
         self._download_file(rel=rel, sink=sink, purpose=purpose)
+
+    # ── P12.6 已安装 persona 管理 ──────────────────────────────────────────
+
+    def _emit_personas_installed(
+        self, sink: EnvelopeSink, personas: list[dict]
+    ) -> None:
+        """权威全量快照。``list`` / ``check`` / ``update`` / ``delete`` 后均回这一帧，
+        前端整批覆盖渲染。"""
+        sink(
+            ChahuaEnvelope(
+                room_id=self.server._session.room.name,
+                turn_id=None, guest_name=None, message_id=None,
+                type=ChahuaEventType.PERSONAS_INSTALLED,
+                data={"personas": personas},
+            )
+        )
+
+    async def _inbound_list_installed_personas(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        # 纯本地读盘、不动 session。provenance 读盘按需 —— 不进高频 room_info。
+        self._emit_personas_installed(
+            sink, list_installed_personas(self.server._paths)
+        )
+
+    async def _inbound_check_persona_updates(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        """检查更新。``name`` 缺省 = 检查全部可更新来源。两种都末尾发一帧全量快照。"""
+        raw_name = data.get("name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else None
+        rows = list_installed_personas(self.server._paths)
+        if name is not None:
+            # 检查单个：只 check 列表内同名行（不在列表则全量原样回，不报错）。
+            to_check = [r for r in rows if r["name"] == name]
+        else:
+            # 全部：过滤可更新来源（github / folder），跳过 unknown —— 它们无 provenance、
+            # 检查也只会 source_unavailable，白费网络。串行调用避免并发打爆匿名 rate-limit。
+            to_check = [r for r in rows if r["source_type"] in ("github", "folder")]
+        for row in to_check:
+            await self._check_one_into_row(row)
+        self._emit_personas_installed(sink, rows)
+
+    async def _check_one_into_row(self, row: dict) -> None:
+        """对单行跑 check_persona_update（网络走 to_thread），结果就地合并进 row dict。
+        check 内部已吞掉预期失败（源已删 / 404 / 403 / 取版本号失败）；真正意外错按该行
+        ``status=error`` 记录，不中断其余行。"""
+        name = row["name"]
+        try:
+            st = await asyncio.to_thread(
+                persona_import.check_persona_update, self.server._paths, name
+            )
+            row.update(st.to_row_patch())
+        except Exception as e:  # noqa: BLE001 —— 单行意外错不该拖垮整批检查
+            _log.exception("check_persona_update 意外错 name=%r", name)
+            row["status"] = persona_import.STATUS_ERROR
+            row["detail"] = f"检查失败：{e}"
+
+    async def _inbound_update_persona(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        """更新单个。``force`` 缺省 False，本地已改时须 True 才覆盖（前端 confirm 后置）。
+        成功 NOTICE(info) + room_info（picker 刷新）+ 全量列表（该行回 up_to_date）；失败
+        NOTICE(error) + 重发列表（与 _run_import 三态口径一致）。"""
+        name = require_str(data, "name", where=INBOUND_UPDATE_PERSONA)
+        if name is None:
+            return
+        raw_force = data.get("force", False)
+        force = raw_force if isinstance(raw_force, bool) else False
+        try:
+            result = await asyncio.to_thread(
+                persona_import.update_persona,
+                self.server._paths, name, force=force,
+            )
+        except persona_import.PersonaImportError as e:
+            _log.info("update_persona 失败 name=%r：%s", name, e)
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
+            self._emit_personas_installed(
+                sink, list_installed_personas(self.server._paths)
+            )
+            return
+        except Exception as e:
+            _log.exception("update_persona 意外错 name=%r", name)
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"更新失败（内部错误）：{e}"
+            )
+            self._emit_personas_installed(
+                sink, list_installed_personas(self.server._paths)
+            )
+            return
+        self.server._emit_notice(
+            sink, level=NOTICE_LEVEL_INFO,
+            text=f"已更新 persona「{result.name}」到最新",
+        )
+        self.server._emit_room_info(sink)
+        # 刚同步完 —— 把该行乐观标 up_to_date（省一次 check 网络往返）。
+        rows = list_installed_personas(self.server._paths)
+        _mark_row_up_to_date(rows, result.name, result.version)
+        self._emit_personas_installed(sink, rows)
+
+    async def _inbound_delete_persona(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        """删除单个（destructive，前端已 confirm）。纯本地、不动 session（删除不影响在跑
+        房间，见承重不变量）。成功 NOTICE(info) + room_info + 全量列表（该行消失）。"""
+        name = require_str(data, "name", where=INBOUND_DELETE_PERSONA)
+        if name is None:
+            return
+        try:
+            persona_import.delete_persona(self.server._paths, name)
+        except persona_import.PersonaImportError as e:
+            _log.info("delete_persona 失败 name=%r：%s", name, e)
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
+            self._emit_personas_installed(
+                sink, list_installed_personas(self.server._paths)
+            )
+            return
+        except Exception as e:
+            _log.exception("delete_persona 意外错 name=%r", name)
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"删除失败（内部错误）：{e}"
+            )
+            self._emit_personas_installed(
+                sink, list_installed_personas(self.server._paths)
+            )
+            return
+        self.server._emit_notice(
+            sink, level=NOTICE_LEVEL_INFO, text=f"已删除 persona「{name}」"
+        )
+        self.server._emit_room_info(sink)
+        self._emit_personas_installed(
+            sink, list_installed_personas(self.server._paths)
+        )

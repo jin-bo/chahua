@@ -463,7 +463,7 @@ function closeModal(modal) {
 
 // 添加茶客 / 新建房间 / 新建任务 / 导入 persona 四个 modal 的装配在 ./modals.js ——
 // 模块自取 DOM 节点，全 modal 的「点 backdrop / × / ESC 关闭」兜底也一并挂。
-wireModals({
+const { personaImport } = wireModals({
   isConnected: connection.isConnected,
   send,
   setStatus,
@@ -696,6 +696,7 @@ const envelopeRouter = createEnvelopeRouter({
   taskPanel,
   managedSession,
   bgRunBar,
+  personaImport,
 });
 
 // task ↔ debug 互斥占槽：``setVisible(bool)`` 让各自模块持有自家 hidden 不变量，

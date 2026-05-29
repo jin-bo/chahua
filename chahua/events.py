@@ -175,6 +175,15 @@ class ChahuaEventType(str, Enum):
     AGENT_RUN_CANCELLED = "agent_run_cancelled"
     AGENT_RUN_ERROR = "agent_run_error"
 
+    # P12.6 「已安装」persona 列表 + 检查 / 更新 / 删除的权威全量快照。data 形状
+    # ``{personas: [{name, display_name, persona, avatar_data_uri, summary, source_type,
+    # source_url, status, local_modified, installed_version, latest_version, detail}, ...]}``。
+    # ``status`` 是上游状态枚举、``local_modified`` 是 bool（两维正交）；版本号并列**纯
+    # 展示**不参与判定。``list`` / ``check`` / ``update`` / ``delete`` 后均回这一帧（前端
+    # 整批覆盖，同 ``room_info.personas_available`` 口径）。按需发，**不**进高频 room_info。
+    # 旧前端遇未知 type WARN 后忽略，不 bump schema_version。
+    PERSONAS_INSTALLED = "personas_installed"
+
     # P10.2 非任务房间产物：茶客通过原生 ``write_file('./share/<x>')`` 落盘到房间公共
     # 桌面 ``<room>/share/``，或用户 UI 上传到 share/ —— 与 ``TASK_ARTIFACT_ADDED`` 平行
     # 的 hint。``data`` 形状 ``{rel, name, size, originated_message_id?}`` —— 无
