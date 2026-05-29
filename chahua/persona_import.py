@@ -1,4 +1,4 @@
-"""从本地文件夹或 GitHub 导入 persona 包。
+"""从本地文件夹或 GitHub 导入 persona 包 + 更新 / 检查 / 删除生命周期（P12.6）。
 
 一个 persona "包"是一个目录，目录名 = persona 名（如 ``Yvonne``），至少含
 ``<Name>.md``（SOUL / system prompt）。可选 sidecar：``<Name>.png`` 头像、
@@ -10,56 +10,88 @@
 **故意拒绝覆盖**：目标 ``<Name>.md``（flat 或 dir form 任一）已存在 → ``PersonaImportError``。
 用户改名重导或先删旧的；静默 overwrite 容易把用户改过的 persona 清掉。
 
-GitHub 走 anonymous Contents API（``api.github.com/repos/{o}/{r}/contents/{p}?ref={b}``），
-60 req/h 限速一份 persona 通常 <10 files 用不掉多少。token 鉴权 / 私有仓暂不支持。
+本模块是「import / update / check / delete」编排层；两块低层原语已抽出：
+- :mod:`chahua.persona_provenance` —— provenance 数据模型 / 读写 / 内容哈希 / 状态词表 /
+  基类异常 :class:`PersonaImportError`。
+- :mod:`chahua.persona_github` —— GitHub Contents API 低层 HTTP（单资源取字节 / JSON）。
+
+为保持公开 import 路径与历史一致（``from chahua.persona_import import X`` /
+``persona_import.X`` 仍可用），这两块的对外符号在本模块顶部 re-export；测试 monkeypatch
+``persona_import._gh_latest_commit_sha`` 等仍生效 —— 它们的内部调用方（``_safe_latest_commit_sha``
+/ ``_check_github`` / ``_fetch_github_recursive`` …）都留在本模块，经本模块命名空间解析。
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 import logging
 import os
 import re
 import secrets
 import shutil
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from ._paths import Paths
-from ._persist import write_bytes_atomic, write_json_atomic
+from ._persist import write_bytes_atomic
 from .admin import PERSONAS_REL_DIR, sanitize_fs_name
+from .persona_github import (
+    _GitHubError,
+    _gh_fetch_one_file,
+    _gh_get_contents,
+    _gh_get_file_bytes,
+    _gh_latest_commit_sha,
+    _parse_github_url,
+)
 from .persona_manifest import PersonaManifestError, parse_persona_manifest_bytes
+from .persona_provenance import (
+    SOURCE_FILENAME,
+    STATUS_ERROR,
+    STATUS_SOURCE_UNAVAILABLE,
+    STATUS_UNKNOWN,
+    STATUS_UP_TO_DATE,
+    STATUS_UPDATE_AVAILABLE,
+    GithubProvenance,
+    PersonaImportError,
+    PersonaSource,
+    _content_hash,
+    _now_iso,
+    _version_from_files,
+    read_source,
+    write_source,
+)
 
 _log = logging.getLogger(__name__)
 
-
-# ── provenance（P12.6 消费侧安装元数据）──────────────────────────────────────
-
-# chahua 私有 per-persona sidecar，记「这个 persona 从哪来的」。与作者的可分发
-# ``persona.toml`` 严格分层（manifest 跟上游走、provenance 跟本地装机走）。属于
-# ``.chahua-seeded`` 同款 chahua 私有 dotfile 家族 —— 永不被当 persona 包内容采集。
-SOURCE_FILENAME = ".chahua-source.json"
-SOURCE_SCHEMA_VERSION = 1
-"""provenance 当前唯一合法 schema_version。缺 / != 1 → read_source WARN+None 降级。"""
-
-# 更新状态枚举（P12.6）。「变没变」只由 commit sha / content_hash 定，version 纯展示。
-# - unknown：仅「有可用 provenance 但还没检查」（list 初拉）；check 永不返此值。
-# - up_to_date：检查过，与上游一致。
-# - update_available：检查到上游更新（含降级——上游版本号更低也照样提示）。
-# - source_unavailable：无法更新的统一终态（缺/坏 provenance、文件夹源已删、GitHub 404）。
-# - error：临时失败（403 rate-limit / 网络错），重试可能恢复。
-STATUS_UNKNOWN = "unknown"
-STATUS_UP_TO_DATE = "up_to_date"
-STATUS_UPDATE_AVAILABLE = "update_available"
-STATUS_SOURCE_UNAVAILABLE = "source_unavailable"
-STATUS_ERROR = "error"
+# 对外（含历史）公开符号 —— 含从 persona_provenance / persona_github re-export 的部分，
+# 让 ``persona_import.X`` / ``from chahua.persona_import import X`` 兼容历史调用方与测试。
+__all__ = [
+    # 异常
+    "PersonaImportError",
+    "_GitHubError",
+    # provenance 数据模型 / 常量
+    "GithubProvenance",
+    "PersonaSource",
+    "SOURCE_FILENAME",
+    "STATUS_UNKNOWN",
+    "STATUS_UP_TO_DATE",
+    "STATUS_UPDATE_AVAILABLE",
+    "STATUS_SOURCE_UNAVAILABLE",
+    "STATUS_ERROR",
+    "read_source",
+    "write_source",
+    # 结果类型
+    "ImportedPersona",
+    "UpdateStatus",
+    "UpdatedPersona",
+    # 公开入口
+    "import_from_folder",
+    "import_from_github",
+    "update_persona",
+    "check_persona_update",
+    "delete_persona",
+    "recover_interrupted_persona_updates",
+]
 
 
 # ── 限额 ──────────────────────────────────────────────────────────────────
@@ -82,21 +114,6 @@ _SKIP_NAMES: frozenset[str] = frozenset(
 )
 
 
-class PersonaImportError(ValueError):
-    """import 失败的统一类型。message 直接 emit 给前端，要够具体能告诉用户怎么修。"""
-
-
-class _GitHubError(PersonaImportError):
-    """带 HTTP 状态码的 GitHub 失败。子类化 :class:`PersonaImportError` —— 现有
-    ``except PersonaImportError`` 全部照常捕获、友好 message 不变；新增 ``code`` 让
-    :func:`check_persona_update` 区分 404（源已删 → source_unavailable）/ 403（rate
-    limit → error）/ 其它（error）。``code is None`` = 网络层错误（URLError）。"""
-
-    def __init__(self, message: str, *, code: Optional[int]) -> None:
-        super().__init__(message)
-        self.code = code
-
-
 @dataclass(frozen=True)
 class ImportedPersona:
     name: str
@@ -107,67 +124,6 @@ class ImportedPersona:
     extras: tuple[str, ...]
     """除 ``<Name>.md`` / ``<Name>.png`` 外被一起拷下来的相对路径（mcp.json / skills/.../SKILL.md 等）。
     给前端报告用 —— 让用户知道有哪些 sidecar 文件被保留，目前 runtime 还没消费它们。"""
-
-
-@dataclass(frozen=True)
-class GithubProvenance:
-    """GitHub 来源细节（provenance 子结构）。"""
-
-    owner: str
-    repo: str
-    ref: Optional[str]
-    """用户给的分支（``tree/<branch>/...``）或 None（仓库根 / 未指定 → default branch）。"""
-    path: str
-    """仓库内子目录（仓库根为 ``""``）。"""
-    commit_sha: Optional[str]
-    """导入时刻该 path 的最新 commit sha。「变没变」的权威锚点；取数失败时 None。"""
-
-    def to_dict(self) -> dict:
-        return {
-            "owner": self.owner,
-            "repo": self.repo,
-            "ref": self.ref,
-            "path": self.path,
-            "commit_sha": self.commit_sha,
-        }
-
-
-@dataclass(frozen=True)
-class PersonaSource:
-    """provenance 内存形态（= ``.chahua-source.json`` 的解析结果）。"""
-
-    name: str
-    source_type: str
-    """``"github"`` | ``"folder"``。"""
-    source_url: str
-    """原始 URL / 路径，给前端展示用。"""
-    content_hash: str
-    """导入时所有采集文件（不含 provenance 自身）的规范化哈希。文件夹源 diff + 本地改动检测共用。"""
-    version: Optional[str]
-    """导入时刻 ``persona.toml`` 的 version（可选）。**纯展示**，不参与判定。"""
-    imported_at: str
-    updated_at: str
-    github: Optional[GithubProvenance] = None
-    source_path: Optional[str] = None
-    """文件夹来源的源目录绝对路径（github 来源为 None）。"""
-    schema_version: int = SOURCE_SCHEMA_VERSION
-
-    def to_dict(self) -> dict:
-        d: dict = {
-            "schema_version": self.schema_version,
-            "name": self.name,
-            "source_type": self.source_type,
-            "source_url": self.source_url,
-            "content_hash": self.content_hash,
-            "version": self.version,
-            "imported_at": self.imported_at,
-            "updated_at": self.updated_at,
-        }
-        if self.source_type == "github" and self.github is not None:
-            d["github"] = self.github.to_dict()
-        if self.source_type == "folder" and self.source_path is not None:
-            d["source_path"] = self.source_path
-        return d
 
 
 @dataclass(frozen=True)
@@ -203,34 +159,6 @@ class UpdatedPersona:
     version: Optional[str]
 
 
-def read_source(persona_dir: Path) -> Optional[PersonaSource]:
-    """读 ``persona_dir/.chahua-source.json``。缺文件 → None（静默）；坏 JSON /
-    schema_version≠1 / 字段不合法 → WARN + None（**不抛**）。
-
-    **容错档**（承重不变量）：provenance 是增强不是承重，坏了只让该 persona「不可更新」，
-    不该让它从「已安装」列表 / picker 消失。与 :func:`load_persona_manifest` 的 fail-fast
-    口径有意相反。
-    """
-    path = persona_dir / SOURCE_FILENAME
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-        _log.warning("provenance 读失败，按无来源处理：%s（%s）", path, e)
-        return None
-    src = _source_from_dict(data)
-    if src is None:
-        _log.warning("provenance 内容不合法，按无来源处理：%s", path)
-    return src
-
-
-def write_source(persona_dir: Path, source: PersonaSource) -> None:
-    """原子写 ``persona_dir/.chahua-source.json``。父目录由调用方（_write_files /
-    _install_files）已建好。"""
-    write_json_atomic(persona_dir / SOURCE_FILENAME, source.to_dict())
-
-
 def _write_source_best_effort(persona_dir: Path, source: PersonaSource) -> None:
     """import 路径专用：写 provenance 失败 WARN 不抛。
 
@@ -246,110 +174,6 @@ def _write_source_best_effort(persona_dir: Path, source: PersonaSource) -> None:
             "写 provenance 失败（persona 已导入但未纳管，可重新导入补全）：%s（%s）",
             persona_dir / SOURCE_FILENAME, e,
         )
-
-
-def _source_from_dict(data: object) -> Optional[PersonaSource]:
-    """``dict`` → :class:`PersonaSource`，任何字段不合法 → None（调用方降级）。"""
-    if not isinstance(data, dict):
-        return None
-    if data.get("schema_version") != SOURCE_SCHEMA_VERSION:
-        return None
-    name = data.get("name")
-    source_type = data.get("source_type")
-    content_hash = data.get("content_hash")
-    source_url = data.get("source_url")
-    version = data.get("version")
-    imported_at = data.get("imported_at")
-    updated_at = data.get("updated_at")
-    if not (isinstance(name, str) and name):
-        return None
-    if source_type not in ("github", "folder"):
-        return None
-    if not (isinstance(content_hash, str) and content_hash):
-        return None
-    if not isinstance(source_url, str):
-        return None
-    if version is not None and not isinstance(version, str):
-        return None
-    if not (isinstance(imported_at, str) and isinstance(updated_at, str)):
-        return None
-    github: Optional[GithubProvenance] = None
-    source_path: Optional[str] = None
-    if source_type == "github":
-        github = _github_prov_from_dict(data.get("github"))
-        if github is None:
-            return None
-    else:  # folder
-        source_path = data.get("source_path")
-        if not (isinstance(source_path, str) and source_path):
-            return None
-    return PersonaSource(
-        name=name,
-        source_type=source_type,
-        source_url=source_url,
-        content_hash=content_hash,
-        version=version,
-        imported_at=imported_at,
-        updated_at=updated_at,
-        github=github,
-        source_path=source_path,
-    )
-
-
-def _github_prov_from_dict(gh: object) -> Optional[GithubProvenance]:
-    if not isinstance(gh, dict):
-        return None
-    owner = gh.get("owner")
-    repo = gh.get("repo")
-    path = gh.get("path")
-    ref = gh.get("ref")
-    commit_sha = gh.get("commit_sha")
-    if not (isinstance(owner, str) and owner):
-        return None
-    if not (isinstance(repo, str) and repo):
-        return None
-    if not isinstance(path, str):  # 仓库根为 ""，合法
-        return None
-    if ref is not None and not isinstance(ref, str):
-        return None
-    if commit_sha is not None and not isinstance(commit_sha, str):
-        return None
-    return GithubProvenance(
-        owner=owner, repo=repo, ref=ref, path=path, commit_sha=commit_sha
-    )
-
-
-def _now_iso() -> str:
-    """UTC ISO8601（秒级 + ``Z``）。provenance 时间戳口径。"""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _content_hash(files: list[tuple[str, bytes]]) -> str:
-    """采集文件的规范化哈希。对 ``sorted(files, key=relpath)`` 逐项喂
-    ``relpath + "\\0" + sha256(bytes).hexdigest() + "\\n"``，relpath 用 ``/`` 归一
-    （跨平台稳定），前缀 ``"sha256:"``。``.chahua-source.json`` 已在 ``_SKIP_NAMES`` 不入 files。
-    """
-    h = hashlib.sha256()
-    for rel, data in sorted(files, key=lambda t: t[0].replace("\\", "/")):
-        rel_norm = rel.replace("\\", "/")
-        h.update(rel_norm.encode("utf-8"))
-        h.update(b"\0")
-        h.update(hashlib.sha256(data).hexdigest().encode("ascii"))
-        h.update(b"\n")
-    return "sha256:" + h.hexdigest()
-
-
-def _version_from_files(files: list[tuple[str, bytes]]) -> Optional[str]:
-    """从采集 files 里挑根级 ``persona.toml`` 读 ``version``。缺 manifest / 缺字段 /
-    解析失败 → None（**纯展示、best-effort，永不阻断**）。import / update / github-check 复用。
-    """
-    for rel, data in files:
-        if rel.replace("\\", "/") == "persona.toml":
-            try:
-                return parse_persona_manifest_bytes(data).version
-            except PersonaManifestError:
-                return None
-    return None
 
 
 # ── 公共入口 ──────────────────────────────────────────────────────────────
@@ -574,43 +398,7 @@ def _walk_local(root: Path, current: Path, *, depth: int, budget: _PackBudget) -
             budget.add(rel, child.read_bytes())
 
 
-# ── GitHub 拉取 ───────────────────────────────────────────────────────────
-
-
-# `urllib` 默认 User-Agent 是 ``Python-urllib/3.x``；GitHub API 要求显式 UA 否则 403。
-_GH_UA = "chahua-persona-importer"
-_GH_API = "https://api.github.com"
-
-
-def _parse_github_url(url: str) -> tuple[str, str, Optional[str], str]:
-    """把 GitHub URL 拆成 ``(owner, repo, branch_or_None, path)``。
-
-    branch 为 None 时调用方走 default branch；这里**不**预先 resolve default branch，让
-    Contents API 用 ref 缺省（=default branch）省一次往返。
-    """
-    parsed = urllib.parse.urlparse(url.strip())
-    host = (parsed.netloc or "").lower()
-    if host not in ("github.com", "www.github.com"):
-        raise PersonaImportError(f"不是 github.com 链接：{url}")
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) < 2:
-        raise PersonaImportError(f"GitHub URL 缺 owner/repo：{url}")
-    owner, repo = parts[0], parts[1]
-    # repo 后缀 `.git` 容忍一下（github 网页 URL 不带，但用户从 clone URL 改过来时常带）。
-    if repo.endswith(".git"):
-        repo = repo[: -len(".git")]
-    if len(parts) == 2:
-        return owner, repo, None, ""
-    kind = parts[2]
-    if kind not in ("tree", "blob"):
-        raise PersonaImportError(
-            f"GitHub URL 第三段必须是 tree/blob：{url}"
-        )
-    if len(parts) < 4:
-        raise PersonaImportError(f"GitHub URL 缺 branch：{url}")
-    branch = urllib.parse.unquote(parts[3])
-    path = "/".join(urllib.parse.unquote(p) for p in parts[4:])
-    return owner, repo, branch, path
+# ── GitHub 拉取（递归下载整目录；低层 HTTP 在 persona_github）────────────────
 
 
 def _fetch_github_dir(
@@ -672,121 +460,16 @@ def _fetch_github_recursive(
         budget.add(rel, data)
 
 
-def _gh_get_contents(
-    owner: str, repo: str, branch: Optional[str], path: str
-) -> object:
-    qs = f"?ref={urllib.parse.quote(branch)}" if branch else ""
-    url = f"{_GH_API}/repos/{owner}/{repo}/contents/{urllib.parse.quote(path)}{qs}"
-    return _gh_get_json(url)
-
-
-def _gh_latest_commit_sha(
-    owner: str, repo: str, ref: Optional[str], path: str
-) -> Optional[str]:
-    """commits API 取 ``path`` 的最新 commit sha（**1 req**，check 的便宜锚点）。
-
-    ``path`` 为空（仓库根 persona）时省略 path 参数 = 该分支最新 commit。HTTP 错误经
-    :class:`_GitHubError` 冒出（调用方分流 404/403）；返回 sha 或 None（响应形态意外）。
-    """
-    params = {"per_page": "1"}
-    if path:
-        params["path"] = path
-    if ref:
-        params["sha"] = ref
-    url = f"{_GH_API}/repos/{owner}/{repo}/commits?{urllib.parse.urlencode(params)}"
-    data = _gh_get_json(url)
-    if not isinstance(data, list) or not data:
-        return None
-    first = data[0]
-    if not isinstance(first, dict):
-        return None
-    sha = first.get("sha")
-    return sha if isinstance(sha, str) and sha else None
-
-
 def _safe_latest_commit_sha(
     owner: str, repo: str, ref: Optional[str], path: str
 ) -> Optional[str]:
-    """:func:`_gh_latest_commit_sha` 的 best-effort 包装 —— 任何 GitHub 失败 WARN + None，
-    不让 import 时取基线 sha 失败回退整次导入。"""
+    """:func:`persona_github._gh_latest_commit_sha` 的 best-effort 包装 —— 任何 GitHub
+    失败 WARN + None，不让 import 时取基线 sha 失败回退整次导入。"""
     try:
         return _gh_latest_commit_sha(owner, repo, ref, path)
     except PersonaImportError as e:
         _log.warning("导入时未取到 commit sha（provenance 降级，可重新导入）：%s", e)
         return None
-
-
-def _gh_fetch_one_file(
-    owner: str, repo: str, ref: Optional[str], path: str
-) -> bytes:
-    """取单个文件字节（contents API）。check 时单取上游 ``persona.toml`` 读 version 用。
-
-    ``path`` 必须指向文件；指向目录（contents API 返 list）→ :class:`PersonaImportError`。
-    HTTP 错误经 :class:`_GitHubError` 冒出。
-    """
-    entry = _gh_get_contents(owner, repo, ref, path)
-    if not isinstance(entry, dict):
-        raise PersonaImportError(f"GitHub 路径不是单文件：{path}")
-    return _gh_get_file_bytes(entry, owner=owner, repo=repo, branch=ref)
-
-
-def _gh_get_file_bytes(
-    entry: dict, *, owner: str, repo: str, branch: Optional[str]
-) -> bytes:
-    """优先取 entry 自带的 base64 content；空（>1MB）则走 raw.githubusercontent.com。"""
-    encoding = entry.get("encoding")
-    content = entry.get("content")
-    if encoding == "base64" and isinstance(content, str) and content:
-        try:
-            return base64.b64decode(content)
-        except (ValueError, TypeError) as e:
-            raise PersonaImportError(f"GitHub 返回的 base64 解码失败：{e}") from e
-    download_url = entry.get("download_url")
-    if not isinstance(download_url, str) or not download_url:
-        # 兜底自拼 raw URL —— GitHub 偶尔会在 contents API 里漏 download_url（实测罕见，
-        # 但 path 含特殊字符时有过报告）。
-        ref = branch or "HEAD"
-        path = entry.get("path") or entry.get("name")
-        if not isinstance(path, str):
-            raise PersonaImportError("GitHub 返回缺 path / download_url，无法取文件内容。")
-        download_url = (
-            f"https://raw.githubusercontent.com/{owner}/{repo}/{urllib.parse.quote(ref)}"
-            f"/{urllib.parse.quote(path)}"
-        )
-    return _gh_get_bytes(download_url)
-
-
-def _gh_get_json(url: str) -> object:
-    raw = _gh_get_bytes(url, accept="application/vnd.github+json")
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise PersonaImportError(f"GitHub 响应 JSON 解析失败 ({url})：{e}") from e
-
-
-def _gh_get_bytes(url: str, *, accept: Optional[str] = None) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": _GH_UA})
-    if accept:
-        req.add_header("Accept", accept)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as e:
-        # 把常见状态翻译成用户能看懂的句子；其余原样带状态码。``_GitHubError`` 子类化
-        # PersonaImportError —— import 路径照常捕获、check 路径读 .code 分流。
-        if e.code == 404:
-            raise _GitHubError(
-                f"GitHub 404 —— 仓库 / 路径 / 分支不存在：{url}", code=404
-            ) from e
-        if e.code == 403:
-            # rate-limit 是匿名访问最常见的 403；body 通常含 "API rate limit exceeded"。
-            raise _GitHubError(
-                f"GitHub 403 —— 可能撞到匿名 rate limit（60 req/h），稍后再试：{url}",
-                code=403,
-            ) from e
-        raise _GitHubError(f"GitHub HTTP {e.code}：{url}", code=e.code) from e
-    except urllib.error.URLError as e:
-        raise _GitHubError(f"无法连接 GitHub：{e.reason}", code=None) from e
 
 
 # ── 写盘 + 结果 ───────────────────────────────────────────────────────────
