@@ -166,6 +166,7 @@ def _make_teaguest(
     g.name = "A"
     g.room = room
     g._recorder = recorder
+    g._share_dir = None  # P13：speak() 调 resolve_images(self._share_dir, ...)
     fake = _FakeTransport()
     g._transport = fake  # type: ignore[assignment]
     agent = type("FakeAgent", (), {})()

@@ -192,6 +192,7 @@ class _SpyServer(ChahuaServer):
         self.emit_snapshot_count = 0
         self.notices: list[tuple[str, str]] = []
         self.run_turn_args: list[str] = []
+        self.run_turn_images: list[tuple[str, ...]] = []
         # 装 spy slot —— 与 ChahuaServer.__init__ 同布局，但 handler 实例是 spy。
         self.admin = _SpyAdmin(self)
         self.io = _SpyIO(self)
@@ -249,9 +250,11 @@ class _SpyServer(ChahuaServer):
     def _clear_room(self, sink):  # type: ignore[override]
         self.calls.append(("_clear_room", {}))
 
-    async def _run_turn(self, runtime, text, *, task_id=None):  # type: ignore[override]
+    async def _run_turn(self, runtime, text, *, task_id=None, images_rel=()):  # type: ignore[override]
         # P9 9.1.3：_run_turn 改为「针对某 runtime」—— spy 同步签名。
+        # P13：记录本轮筛出的 images_rel 供断言。
         self.run_turn_args.append(text)
+        self.run_turn_images.append(tuple(images_rel))
 
 
 def _sink(env) -> None:
@@ -713,6 +716,8 @@ async def test_user_message_with_files_appends_refs(srv: _SpyServer):
     assert "看下" in text
     assert "<./share/a.txt>" in text
     assert "<./share/b.png>" in text
+    # P13：文本标记含全部 files，但 images_rel 只含图片子集。
+    assert srv.run_turn_images[0] == ("share/b.png",)
 
 
 async def test_user_message_files_only_no_text(srv: _SpyServer):

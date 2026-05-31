@@ -46,6 +46,7 @@ from .message_artifacts import MessageArtifactRegistry
 from .permissions import apply_permission_mode
 from .persona_assets import PersonaAssets
 from .handoff_tools import register_handoff_tools
+from .image_input import resolve_images
 from .room import Message, Room
 from .task_tools import register_task_tools
 from .tasks_store import TasksStore
@@ -182,6 +183,11 @@ class TeaGuest:
         self.room = room
         self.working_directory = Path(working_directory)
         self.working_directory.mkdir(parents=True, exist_ok=True)
+        # P13：视觉图像输入懒读落点。``share_dir`` 是 ``<room>/share/`` 实路径（transport
+        # 也吃同一份做 artifact diff）—— speak() 调 ``resolve_images(self._share_dir, ...)``
+        # 把本轮用户图从 share/ 现读现传 arun(images=)。``None`` = 裸构 / 未装配 → 视觉退化
+        # 为无图（resolve_images 兜底返 []，绝不炸 speak）。
+        self._share_dir = share_dir
         # P6.1：speak() 在 message_start/end 处调 recorder；NOOP_RECORDER = 测试 /
         # [debug] enabled=false 时不动盘。也透传到 transport.bind() 给工具事件 hook。
         self._recorder = recorder
@@ -325,6 +331,7 @@ class TeaGuest:
         cancellation_token: Optional[CancellationToken] = None,
         task_id: Optional[str] = None,
         record_debug: bool = True,
+        images_rel: tuple[str, ...] = (),
     ) -> Optional[Message]:
         """让茶客说一句话。
 
@@ -376,11 +383,20 @@ class TeaGuest:
                 self._recorder.record_message_start(
                     message_id=message_id, guest=self.name,
                     speak_prompt=context_message,
+                    # P13：rel-only 落 debug 便于回放本轮带图；bytes 不进取证。
+                    images_rel=images_rel,
                 )
                 try:
+                    # P13：本轮用户图懒读现传。``resolve_images`` 从 ``share/`` 现读现传
+                    # base64，绝不入 transcript / envelope。视觉模型直接看像素；非视觉
+                    # 模型由 agentao reactive 回退换成 ``- share/x.png`` 文本引用重试 ——
+                    # chahua 不做能力探测，逐茶客 model 各自生效。``images_rel`` 空 →
+                    # resolved 为 ``[]``，arun 行为与 P13 前完全一致。
+                    resolved = resolve_images(self._share_dir, images_rel)
                     text = await self.agent.arun(
                         context_message,
                         cancellation_token=cancellation_token,
+                        images=resolved or None,
                     )
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     status = STATUS_CANCELLED

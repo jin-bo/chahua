@@ -146,6 +146,17 @@
   font-size: 16px;
   line-height: 1;
 }
+/* P13 C2：图片 pill 缩略图 —— 撑满同尺寸方块，object-fit:cover 居中裁切，不要橙底。 */
+img.pending-file-thumb {
+  object-fit: cover;
+  background: #f0ebdc;
+}
+/* 拖拽文件悬停 composer 上方时的高亮（dragenter/over 加 .drag-active）。 */
+#composer.drag-active {
+  border-color: #d96749;
+  border-style: dashed;
+  box-shadow: 0 0 0 3px rgba(217, 103, 73, 0.12);
+}
 .pending-file-info {
   display: flex;
   flex-direction: column;
@@ -164,6 +175,14 @@
   color: #999;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+}
+/* P13 C3：图片超视觉上限提示 —— 暖橙小字，与 type 行同区但更醒目。 */
+.pending-file-vision-warn {
+  font-size: 11px;
+  color: #c0512f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* card 上的圆形小按钮基类（attach / remove 共用骨架，颜色 / 字号各覆盖）。 */
 .pending-file-action {

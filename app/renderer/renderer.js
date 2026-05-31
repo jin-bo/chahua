@@ -577,6 +577,59 @@ const upload = createUpload({
   onAttachToTask: (rel) => attachArtifact(rel),
 });
 
+// P13 C2：粘贴 / 拖拽图片入口 —— 复用 upload.uploadFiles 串行上传（与附件按钮同一路径，
+// 同样落 share/、同样发 pill）。后端按扩展名筛 images_rel，前端这里不做能力判断。
+//
+// 粘贴：剪贴板里有图片项时才拦截（截图 / 复制图片）；纯文本粘贴照常进 textarea。
+textInput.addEventListener("paste", (ev) => {
+  const items = ev.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const it of items) {
+    if (it.kind === "file" && it.type.startsWith("image/")) {
+      const f = it.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length === 0) return; // 无图片项 → 不拦，让文本粘贴走默认行为
+  ev.preventDefault();
+  void upload.uploadFiles(files);
+});
+
+// 拖拽：拖文件到 composer 上方高亮，松手即上传。dragover 必须 preventDefault 才能触发
+// drop；用计数器配对 enter/leave 避免子元素冒泡导致高亮闪烁。
+let dragDepth = 0;
+function setDragActive(on) {
+  composer.classList.toggle("drag-active", on);
+}
+composer.addEventListener("dragenter", (ev) => {
+  if (!ev.dataTransfer?.types?.includes("Files")) return;
+  ev.preventDefault();
+  dragDepth += 1;
+  setDragActive(true);
+});
+composer.addEventListener("dragover", (ev) => {
+  if (!ev.dataTransfer?.types?.includes("Files")) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "copy";
+});
+composer.addEventListener("dragleave", (ev) => {
+  // 与 dragenter 同一 Files 守卫 —— 非对称会让 enter/leave 计数错配、高亮卡死或闪烁。
+  if (!ev.dataTransfer?.types?.includes("Files")) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) setDragActive(false);
+});
+composer.addEventListener("drop", (ev) => {
+  const dropped = ev.dataTransfer?.files;
+  if (!dropped || dropped.length === 0) return;
+  ev.preventDefault();
+  dragDepth = 0;
+  setDragActive(false);
+  // 只取图片文件 —— 拖非图也能传（后端会忽略其像素通道），但 C2 体验聚焦图片；
+  // 这里不过滤，交给后端 + pill 统一处理，保持与附件按钮一致。
+  void upload.uploadFiles(dropped);
+});
+
 const decisionSupport = createDecisionSupport({
   modal: markDecisionModal,
   summaryEl: markDecisionSummaryEl,

@@ -51,6 +51,7 @@ from .events import (
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
+from .image_input import _normalize_share_image_rel
 from .room_runtime import (
     ROUTER_MODE_BACKGROUND,
     ROUTER_MODE_FOREGROUND,
@@ -918,6 +919,7 @@ class ChahuaServer:
 
     async def _run_turn(
         self, runtime: RoomRuntime, text: str, *, task_id: Optional[str],
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         """承载一条 user_message 的整个 AI 链。挂在 ``runtime.inflight_task`` 上让
         cancel 入口能 ``task.cancel()`` 它。
@@ -938,7 +940,7 @@ class ChahuaServer:
         """
         try:
             await runtime.session.orchestrator.submit_user_message(
-                text, sink=runtime.router, task_id=task_id,
+                text, sink=runtime.router, task_id=task_id, images_rel=images_rel,
             )
         except asyncio.CancelledError:
             _log.info("turn cancelled by user")
@@ -1300,6 +1302,19 @@ class ChahuaServer:
             # 用户既没打字也没附文件 —— 没东西可投。
             _log.warning("ignoring %s: 空 text + 无 files", INBOUND_USER_MESSAGE)
             return
+        # P13：从 ``files`` 筛出图片子集（canonical ``share/x.png``）。文本标记照旧追加
+        # 进 text（上面 _attach_files_to_text 已做）；``images_rel`` 是额外的「本轮像素」
+        # 通道，只流入 _run_ai_chain（见 P13 不变量）。非 list / 非图 rel 经 normalize
+        # 返 None 被 filter 掉。
+        images_rel: tuple[str, ...] = (
+            tuple(
+                norm
+                for f in files
+                if (norm := _normalize_share_image_rel(f)) is not None
+            )
+            if isinstance(files, list)
+            else ()
+        )
         if self._inflight_alive():
             # 单 in-flight 严格策略：当前 turn 没结束前 drop 后续 user_message。前端
             # composer 在 turn_start / turn_end 之间禁用，正常情况打不到这条；防御性保护
@@ -1312,7 +1327,9 @@ class ChahuaServer:
         runtime = self._foreground_runtime
         runtime.set_inflight(
             asyncio.create_task(
-                self._run_turn(runtime, text, task_id=snapshot_task_id),
+                self._run_turn(
+                    runtime, text, task_id=snapshot_task_id, images_rel=images_rel,
+                ),
                 name="chahua-turn",
             ),
             INFLIGHT_KIND_USER,

@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.6）
+uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.8）
 uv run chahua                                 # CLI（默认入 rooms/p1-test）
 uv run chahua --room rooms/p3-黄河路
 uv run chahua-server --host 127.0.0.1 --port 7860 --room rooms/p3-黄河路  # 独跑 sidecar
@@ -50,7 +50,8 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - `session.py` — 房间装配。CLI 与 server 共用 `build_room_session()` / `discover_rooms()` / `load_env_files()`。
 - `config.py` — `room.toml` 解析，**白名单严格**（未知字段 `RoomConfigError`）。字段：`[room]` / `[room.llm]` / `[scoring]` / `[summary]` / `[[guest]]` / `[[guest.extra_mcp_servers]]`。
 - `llm_spec.py` — `LLMSpec` + `from_env()` / `try_from_env()` / `from_toml()` 三入口 + `build_client()` 出口。toml 强制 `model = "<provider>/<model>"`；env 允许裸 model。`[scoring]` / `[summary]` / `[[guest]]` 各走自己 spec，缺即 fallback 链回房间默认。
-- `guest.py` — `TeaGuest`（包 `agentao.Agentao`）。`speak()` 外层 try/except/finally 保 `message_start` 必配对 `message_end`（status: ok/cancelled/error），envelope 与 transcript 共享同一 message_id。
+- `guest.py` — `TeaGuest`（包 `agentao.Agentao`）。`speak()` 外层 try/except/finally 保 `message_start` 必配对 `message_end`（status: ok/cancelled/error），envelope 与 transcript 共享同一 message_id。**P13 视觉输入透传**：`speak(images_rel=())` → `resolve_images(self._share_dir, images_rel)` → `arun(images=resolved or None)`；本轮用户图懒读现传，非视觉茶客由 agentao reactive 回退退文本引用。
+- `image_input.py` — P13 视觉图像输入 helper（轻量模块，server inbound 与 guest 跨层共用）。`_normalize_share_image_rel`（纯校验，返 canonical `share/x.png`）+ `resolve_images(share_dir, rels)`（IO：normalize → 剥 `share/` 前缀拼 → symlink 围栏（两侧 resolve + `relative_to`）→ 读 bytes → base64 + ext→MIME，`{data, mimeType, _source=rel}`）。0 字节 / >20MB / 缺文件 / 逃逸跳过、>16 图截断 + WARN、`share_dir is None` 返 `[]` + WARN。限额 `from agentao.media_limits import ...`，不另立常量。
 - `orchestrator.py` + `_orchestrator_{chain,handoff_drain,handoff_queue,managed_session,scoring,consts}.py` — 意愿打分主循环：并发打分 → 取 ≥ `want_threshold` 前 1~2 名发言 → 无人过阈值等用户；`@<名字>` 确定性路由不打分。**slot 重构**：5 个 slot（AIChainOps / HandoffDrainOps / HandoffQueueOps / ManagedSessionOps / ScoringOps）经 `_install_orchestrator_slots(orch)` 单点装配，公开 import 路径不动。**主类保留 `_run_ai_chain` / `_intercept_task_proposal` 同名 method**（`monkeypatch.setattr` 替换 / `set_task_proposal_hook` 取 bound method）。
 - `scoring.py` — 轻量打分。transcript 不可信，输出严格 JSON、解析失败降级 0、score clamp `[0,1]`。
 - `room.py` + `cursor.py` + `_persist.py` — 持久化层。`transcript.jsonl` / `summary.jsonl` append-only **加载跳坏行**；`cursor.json` tmp+rename。**不做 fsync**。
@@ -136,6 +137,17 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **envelope `message_start` / `message_end` 必成对**。`TeaGuest.speak()` 外层 try/except/finally 是承重墙。
 - **打分输入不可信**。score 严格 JSON + 解析失败降级 0 + clamp `[0,1]`；`@提及` 走确定性路由不进打分。
 - **`download_file.purpose` 仅前端分流，server 行为对取值无差异**。inbound 可选 `purpose ∈ {download, preview}`（默认 download），envelope 原样回声；server 无白名单。前端 `purpose === "preview"` 单分支判断；preview 失败塞 `<img>.alt` + `.artifact-image-error` class（不弹下载 alert）。
+
+### 视觉图像输入（P13）
+
+完整 rationale / 回归测试见 `docs/INVARIANTS.md` §P13；改不变量两处同步。
+
+- **降级归 agentao，chahua 不复制**。chahua 只把 `images=[{data, mimeType, _source}]` 传进 `arun()`；模型拒图后「换文本引用并重试」由 agentao `_runner`/`_retry` 完成。不写 `_is_image_unsupported` 同义物、不维护 per-provider 视觉能力表 —— 逐茶客 model 各自生效（每个 `TeaGuest` 包独立 `Agentao`）。
+- **视觉附图纯瞬态，base64 懒读不入库**。`images_rel` 是 Python 形参沿当前 turn 同步透传后即弃，**不动 `Message` / transcript / envelope / `schema_version`**。bytes 只在 `speak()` 时从 `share/` 实路径现读现传，绝不写 transcript / envelope。transcript 只留 `<./share/..>` 文本标记（普适视图：非视觉茶客 / 打分 / 历史轮次靠它）。debug 可记 `images_rel`（rel-only）不记 bytes。
+- **附图范围 = 本轮触发用户消息，且只进 `_run_ai_chain` 第一周期**。`submit_user_message` 只把 `images_rel` 透传进 `_run_ai_chain`；`run_ai_chain` 用**本地 `first_cycle` flag**（非 `_consecutive_ai_turns==0`，后者被 pre-drain 污染）只给回应用户那批 let_speak，AI 接力周期 / pre-drain / re-drain / dormant MTS kickoff / handoff / MTS / bg run 一律退文本标记。**Why**：像素只属用户那条消息；省 token、有界可预测。
+- **打分永不吃图**。`scoring.py` 路径不解析 / 不附图，transcript 里图仍是文本标记。
+- **图类型按扩展名白名单 `{png,jpg,jpeg,gif,webp}`，resolve 时映射 MIME**。线协议无 MIME，不扩协议、不嗅探内容。inbound 筛图 + resolve 双点共用 `_normalize_share_image_rel`（要求 `share/` 前缀、扩展名白名单、段非空/`.`/`..`、stem 非空拒 `share/.png`、无绝对路径/反斜杠）。`_source` 直接用 canonical rel（不再前缀 `share/`），与文本标记口径一致。
+- **读盘双层防穿越 + 0 字节跳过**。段形校验（字符串层）+ symlink 逃逸检查（`(share_dir/sub).resolve()` 两侧 resolve + `relative_to`，文件系统层，因 share 本是软链）都要。0 字节图跳过（空 base64 会让 agentao 预校验抛 ValueError、走不到 reactive 回退、整条 speak 失败）。
 
 ### 任务房间
 

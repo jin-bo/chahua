@@ -38,6 +38,7 @@ class _StubGuest:
 
     async def speak(
         self, context_message, *, turn_id, sink, cancellation_token=None, task_id=None,
+        images_rel=(),
     ):
         self.last_task_id_seen = task_id
         message_id = new_message_id()

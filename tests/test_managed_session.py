@@ -72,7 +72,7 @@ class _MtsManagerGuest(SpeakingStubGuest):
         self._orch_box = orch_box
         self._proposals = list(proposals)
 
-    async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None):
+    async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None, images_rel=()):
         msg = await super().speak(
             ctx, turn_id=turn_id, sink=sink, task_id=task_id,
         )
@@ -607,7 +607,7 @@ class _MtsPanelManagerGuest(SpeakingStubGuest):
         self._targets = list(targets)
         self._fired = False
 
-    async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None):
+    async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None, images_rel=()):
         msg = await super().speak(
             ctx, turn_id=turn_id, sink=sink, task_id=task_id,
         )
