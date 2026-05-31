@@ -31,11 +31,11 @@ import json
 import logging
 import os
 import shutil
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from . import _debug_query
 from ._persist import (
     append_jsonl,
     read_jsonl_skip_bad,
@@ -545,81 +545,21 @@ class TurnRecorder:
             # rotate_if_needed 内部 try/except，rotation 失败不阻断房间。
             self.rotate_if_needed()
 
-    # ── 加载入口（P6.3.A）────────────────────────────────────────────────
-
-    def _iter_index_rows(self):
-        """``read_jsonl_skip_bad`` 包一层：``enabled=False`` 直返空迭代。
-
-        其它调用方（:meth:`load_index` / :meth:`rotate_if_needed` /
-        :meth:`__init__` 期 seed）共享这个入口；改"读哪个文件 / 跳坏行口径"只动一处。
-        """
-        if not self.enabled:
-            return iter(())
-        assert self._debug_dir is not None
-        return read_jsonl_skip_bad(self._turns_path)
-
-    @staticmethod
-    def _project_index_row(row: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """投影 ``turns.jsonl`` 行 → 轻量索引 dict（docs §4.1 字段集）。
-
-        ``turn_id`` 缺则跳（坏行；同 ``transcript.jsonl`` 跳坏行口径）。其它字段缺
-        → 各自合理 fallback：``ts_ms`` 缺写 ``0``、``winners`` 缺写 ``[]``、
-        ``trigger_kind`` 走 ``trigger.kind`` 嵌套字段（jsonl schema 把它放在 trigger 内）。
-        """
-        turn_id = row.get("turn_id")
-        if not isinstance(turn_id, str) or not turn_id:
-            return None
-        trigger = row.get("trigger") or {}
-        scoring = row.get("scoring") or {}
-        messages = row.get("messages") or []
-        return {
-            "turn_id": turn_id,
-            "ts_ms": row.get("ts_ms") if isinstance(row.get("ts_ms"), int) else 0,
-            "task_id": row.get("task_id"),
-            "trigger_kind": (
-                trigger.get("kind") if isinstance(trigger, dict) else None
-            ),
-            "scoring_path": row.get("scoring_path") or SCORING_PATH_SCORING,
-            "winners": list(scoring.get("winners") or [])
-            if isinstance(scoring, dict) else [],
-            "n_messages": (
-                len(messages) if isinstance(messages, list) else 0
-            ),
-        }
+    # ── 加载入口（P6.3.A，读盘逻辑见 :mod:`chahua._debug_query`）──────────────
 
     def load_index(self, *, limit: Optional[int] = None) -> list[dict[str, Any]]:
         """读 ``debug/turns.jsonl`` 投影成 ``turns_index``（倒序，最新在前）。
 
-        - ``enabled=False`` → ``[]``。
-        - 跳坏行（复用 :func:`chahua._persist.read_jsonl_skip_bad`）。
-        - ``limit=None`` → 全扫返全部。**rotation 必须用这条**：截断要看到完整老 turn
-          序列，否则 limit 之外的更老 turn 永远删不到、jsonl 仍超 cap（不变量
-          "``rotate_if_needed`` 内 ``load_index`` 必须 ``limit=None``"）。
-        - ``limit=N`` → 内部 ``deque(maxlen=N)`` 持最新 N 条然后反转返；
-          ``room_history`` snapshot 用 ``limit=TURNS_INDEX_HARD_CAP``。
+        ``enabled=False`` → ``[]``；其余逻辑（跳坏行 / ``limit=None`` 全扫 / ``limit=N``
+        取最新 N 条）见 :func:`chahua._debug_query.load_index`。**rotation 必须用
+        ``limit=None``**（不变量"``rotate_if_needed`` 内 ``load_index`` 必须
+        ``limit=None``"），否则 limit 之外的更老 turn 永远删不到。
         """
         if not self.enabled:
             return []
+        assert self._debug_dir is not None
         try:
-            if limit is None:
-                rows = []
-                for row in self._iter_index_rows():
-                    projected = self._project_index_row(row)
-                    if projected is not None:
-                        rows.append(projected)
-                rows.reverse()
-                return rows
-            if limit <= 0:
-                return []
-            # deque(maxlen=N) 自动滚出最老 → 末端是最新 N 条；反转后最新在前。
-            tail: deque[dict[str, Any]] = deque(maxlen=limit)
-            for row in self._iter_index_rows():
-                projected = self._project_index_row(row)
-                if projected is not None:
-                    tail.append(projected)
-            out = list(tail)
-            out.reverse()
-            return out
+            return _debug_query.load_index(self._turns_path, limit=limit)
         except Exception:
             _log.warning("TurnRecorder.load_index failed", exc_info=True)
             return []
@@ -627,122 +567,22 @@ class TurnRecorder:
     def load_turn(
         self, turn_id: str
     ) -> tuple[Optional[dict[str, Any]], dict[str, str]]:
-        """按 ``turn_id`` 查 jsonl 行 + 读关联 prompt 文件。
+        """按 ``turn_id`` 查 jsonl 行 + 读关联 prompt 文件，返回 ``(turn_dict|None, {rel: text})``。
 
-        返回 ``(turn_dict | None, {rel: text})``。
-
-        - 顺序扫（不建内存索引）：单房间 ``turns.jsonl`` 撑死几千行，fetch 是用户主动
-          操作，不在 hot path；建索引就得加 rotation 失效逻辑，复杂度不值。
-        - 找到一条立即停；重复 ``turn_id``（手工编辑 / fsck）取第一条 + WARN。
-        - prompt 文件按行内 ``scoring[].prompt_file`` / ``messages[].speak_prompt_file``
-          字段读；任意路径校验 ``resolve().is_relative_to(debug_dir)`` ——
-          jsonl 自己写下来的字段也防一手（攻击模型：用户编辑 turns.jsonl 塞
-          ``"prompt_file": "../../.env"``）。单文件读失败 / 路径越界 → 该 key 整体
-          缺省（**不空串**），WARN 跳过。
+        ``enabled=False`` → ``(None, {})``；顺序扫 / 重复 turn_id 取第一条 / prompt 文件
+        双校验防穿越的细节见 :func:`chahua._debug_query.load_turn`。
         """
         if not self.enabled:
             return (None, {})
         assert self._debug_dir is not None
         try:
-            hit: Optional[dict[str, Any]] = None
-            for row in self._iter_index_rows():
-                if row.get("turn_id") != turn_id:
-                    continue
-                if hit is None:
-                    hit = row
-                else:
-                    _log.warning(
-                        "TurnRecorder.load_turn: duplicate turn_id=%r in jsonl; "
-                        "using first",
-                        turn_id,
-                    )
-                    break
-            if hit is None:
-                return (None, {})
-            prompts = self._load_prompts_for_row(hit)
-            return (hit, prompts)
+            return _debug_query.load_turn(
+                self._turns_path, self._debug_dir, turn_id,
+                capture_prompts=self.capture_prompts,
+            )
         except Exception:
             _log.warning("TurnRecorder.load_turn failed", exc_info=True)
             return (None, {})
-
-    def _load_prompts_for_row(
-        self, row: dict[str, Any]
-    ) -> dict[str, str]:
-        """收集 ``row`` 内 ``prompt_file`` / ``speak_prompt_file`` 字段并读盘。
-
-        ``capture_prompts=False`` → 整字典空 dict 直接返。用户把 ``capture_prompts``
-        关掉的意图是"我不想再让 prompt 出现在 panel 里"，老 ``=True`` 期残留的 prompt
-        文件也要一起隐藏 —— 否则 P6.3 不变量"单 key 严格 enabled && capture_prompts &&
-        文件可读三重满足才出现"被破坏（codex 评审第 2 轮 P2 找出）。盘上残文件留给
-        ``clear_room`` / rotation / 手工 rm 处理；本函数只管协议层。
-
-        路径校验 + 读失败 → 跳过 + WARN（key 整体缺，不空串）。
-        """
-        if not self.capture_prompts:
-            return {}
-        out: dict[str, str] = {}
-        scoring = row.get("scoring")
-        if isinstance(scoring, dict):
-            results = scoring.get("results")
-            if isinstance(results, list):
-                for entry in results:
-                    if not isinstance(entry, dict):
-                        continue
-                    rel = entry.get("prompt_file")
-                    if isinstance(rel, str) and rel:
-                        text = self._read_prompt_file_safe(rel)
-                        if text is not None:
-                            out[rel] = text
-        messages = row.get("messages")
-        if isinstance(messages, list):
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-                rel = msg.get("speak_prompt_file")
-                if isinstance(rel, str) and rel:
-                    text = self._read_prompt_file_safe(rel)
-                    if text is not None:
-                        out[rel] = text
-        return out
-
-    def _read_prompt_file_safe(self, rel: str) -> Optional[str]:
-        """按相对路径读 ``<debug_dir>/<rel>``，校验 ``resolve()`` 落在 ``debug_dir`` 之下。
-
-        路径越界 / IO 失败 → ``None`` + WARN（不空串，让上层 key 整体缺省）。
-        """
-        assert self._debug_dir is not None
-        try:
-            abs_path = (self._debug_dir / rel).resolve()
-        except (OSError, RuntimeError):
-            _log.warning(
-                "TurnRecorder._read_prompt_file_safe: resolve %r failed", rel,
-                exc_info=True,
-            )
-            return None
-        try:
-            debug_root = self._debug_dir.resolve()
-        except (OSError, RuntimeError):
-            _log.warning(
-                "TurnRecorder._read_prompt_file_safe: resolve debug_dir failed",
-                exc_info=True,
-            )
-            return None
-        try:
-            abs_path.relative_to(debug_root)
-        except ValueError:
-            _log.warning(
-                "TurnRecorder._read_prompt_file_safe: %r escapes debug dir",
-                rel,
-            )
-            return None
-        try:
-            return abs_path.read_text(encoding="utf-8")
-        except OSError:
-            _log.warning(
-                "TurnRecorder._read_prompt_file_safe: read %r failed", rel,
-                exc_info=True,
-            )
-            return None
 
     # ── rotation（P6.3.B）─────────────────────────────────────────────────
 
