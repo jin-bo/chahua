@@ -16,6 +16,10 @@
 - **拆 `persona_import.py` —— 抽出 `persona_github` / `persona_provenance`**（2026-05-28，提交 `d59b53c`）：行为保持的纯重构，把 P12.6 落在 `persona_import.py` 的 GitHub 拉取与 provenance 读写各抽出独立 helper 模块，公开 import 路径与运行行为不动。
 - **精简 CLAUDE.md 不变量 + §9 明细移出到 `docs/INVARIANTS.md`**（2026-05-28，提交 `7d59556`）：CLAUDE.md 不变量段只留「规则 + 关键 why」，完整 rationale / P-版本溯源 / 回归测试搬进 `docs/INVARIANTS.md`，两处约定「改不变量两处同步」。
 
+### Fixed
+- **茶客 / 房间详细设置失败时静默回滚 → 改为 NOTICE error 提醒用户**（2026-05-31）：admin 更新 handler（`update_guest_llm` / `update_room_llm` / `update_guest_permission` / `update_guest_isolation` / `update_guest_extra_mcp` / `add_guest` / `remove_guest` / `create_room` / `delete_room` / `set_persona_mcp_trust`）原先 catch-all 只 `_log.exception` + 重发 snapshot，用户看到设置悄悄回滚、毫无反馈。两条失败路径都补 NOTICE：① toml 校验失败（`admin.update_*` 抛 `ValueError`）；② 会话重建失败 —— `build_room_session` → `build_client` 缺 API key / 未知 provider 无 base_url 时抛 **`SystemExit`**（不是 `Exception` 子类！原 `except Exception` 根本没兜住，异常逸出），`_replace_session` 改 `except (Exception, SystemExit)` 单点兜底 + emit NOTICE。这正是「改了模型但没生效」最常见的真实场景。
+- **`gemini` 加入已知 provider 列表（也可写 `google`）**（2026-05-31）：`_DEFAULT_BASE_URLS` 加 `gemini` → Gemini Developer API 的 OpenAI 兼容端点（`generativelanguage.googleapis.com/v1beta/openai/`），可省 `base_url`；新增 `_PROVIDER_ALIASES`（`google` → `gemini`）+ `canonical_provider()`，toml / env 两条入口都归一到单一 canonical `gemini`，避免 `google/x` 与 `gemini/x` 各走一套 API key 环境变量名互相错配（默认 `GEMINI_API_KEY`，要 `GOOGLE_API_KEY` / Vertex 端点在 toml 显式写 `api_key_env` / `base_url` 覆盖）。
+
 ## [0.1.5] - 2026-05-28
 
 详见 [`docs/releases/v0.1.5.md`](docs/releases/v0.1.5.md)。

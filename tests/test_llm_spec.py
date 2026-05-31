@@ -10,7 +10,13 @@ import os
 
 import pytest
 
-from chahua.llm_spec import LLMSpec, split_model_id
+from chahua.llm_spec import (
+    LLMSpec,
+    _DEFAULT_BASE_URLS,
+    build_client,
+    canonical_provider,
+    split_model_id,
+)
 
 
 # ── split_model_id ────────────────────────────────────────────────────────
@@ -39,6 +45,57 @@ def test_split_model_id_valid(value, expected):
 def test_split_model_id_invalid(bad):
     with pytest.raises(ValueError):
         split_model_id(bad)
+
+
+# ── gemini / google provider（已知列表 + 别名归一）─────────────────────────
+
+
+def test_gemini_in_known_providers():
+    """``gemini`` 进已知 provider 列表，自带默认 base_url（可省 base_url）。"""
+    assert "gemini" in _DEFAULT_BASE_URLS
+    assert _DEFAULT_BASE_URLS["gemini"].startswith("https://generativelanguage.googleapis.com")
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("gemini/gemini-2.5-pro", ("gemini", "gemini-2.5-pro")),
+    # google 是 gemini 的别名，归一到 canonical gemini。
+    ("google/gemini-2.5-pro", ("gemini", "gemini-2.5-pro")),
+    ("GOOGLE/gemini-2.5-flash", ("gemini", "gemini-2.5-flash")),
+    (" google / gemini-2.5-pro ", ("gemini", "gemini-2.5-pro")),
+])
+def test_split_model_id_google_alias(value, expected):
+    assert split_model_id(value) == expected
+
+
+def test_canonical_provider_alias():
+    assert canonical_provider("google") == "gemini"
+    assert canonical_provider("GOOGLE") == "gemini"
+    assert canonical_provider("openai") == "openai"      # 非别名原样
+    assert canonical_provider(" Anthropic ") == "anthropic"
+
+
+def test_from_toml_google_normalizes_to_gemini():
+    """``google/...`` toml 写法归一到 gemini —— 单一 canonical provider，
+    env 前缀 / 默认 base_url / 展示字面量都走 gemini。"""
+    spec = LLMSpec.from_toml({"model": "google/gemini-2.5-pro"}, label="[[guest]] x")
+    assert spec.provider == "gemini"
+    assert spec.model == "gemini-2.5-pro"
+    assert spec.model_id == "gemini/gemini-2.5-pro"
+    assert spec.default_api_key_env() == "GEMINI_API_KEY"
+
+
+def test_from_toml_gemini_no_base_url_needed():
+    """gemini 在已知列表，不写 base_url 也能过 from_toml（不抛未知 provider）。"""
+    spec = LLMSpec.from_toml({"model": "gemini/gemini-2.5-flash"}, label="[[guest]] x")
+    assert spec.base_url is None
+
+
+def test_build_client_gemini(monkeypatch):
+    """gemini spec 缺 base_url 时用默认端点 + GEMINI_API_KEY 建 client 成功。"""
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-gemini-test")
+    spec = LLMSpec.from_toml({"model": "google/gemini-2.5-pro"}, label="[[guest]] x")
+    client = build_client(spec)  # 不抛 SystemExit
+    assert client is not None
 
 
 # ── LLMSpec.from_toml ─────────────────────────────────────────────────────

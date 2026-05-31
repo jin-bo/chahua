@@ -79,10 +79,13 @@ class AdminHandlers:
             self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
             self.server._emit_room_snapshot(sink)
             return
-        except Exception:
+        except Exception as e:
             _log.exception("add_guest: persona=%r name=%r 失败", persona, name)
             # 写 toml 失败 / 校验失败：room.toml 已被回滚到 snapshot，session 还是旧的。
-            # 重发 snapshot 让前端 UI 复位（添加按钮的 loading 等状态消除）。
+            # NOTICE 说明原因 + 重发 snapshot 让前端 UI 复位（添加按钮的 loading 等状态消除）。
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"添加茶客失败：{e}"
+            )
             self.server._emit_room_snapshot(sink)
             return
         if not self.server._replace_session(room_dir, sink, label="add_guest"):
@@ -115,10 +118,13 @@ class AdminHandlers:
             return
         try:
             trust.set_mcp_trust(self.server._paths, persona_rel, trusted)
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "set_persona_mcp_trust: persona_rel=%r trusted=%r 写盘失败",
                 persona_rel, trusted,
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"更新 MCP 信任失败：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -145,9 +151,12 @@ class AdminHandlers:
             admin.update_guest_permission(
                 paths=self.server._paths, room_dir=room_dir, name=name, permission=permission
             )
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "update_guest_permission: name=%r permission=%r 失败", name, permission
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"权限设置未生效：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -171,9 +180,12 @@ class AdminHandlers:
             new_rc = admin.update_room_orchestrator(
                 paths=self.server._paths, room_dir=room_dir, overrides=overrides
             )
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "update_room_orchestrator: overrides=%r 失败", overrides
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"编排参数未生效：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -196,9 +208,12 @@ class AdminHandlers:
                 paths=self.server._paths, room_dir=room_dir,
                 section=section, spec_dict=spec_dict,
             )
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "update_room_llm: section=%r spec=%r 失败", section, spec_dict
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"模型设置未生效：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -222,9 +237,12 @@ class AdminHandlers:
                 paths=self.server._paths, room_dir=room_dir,
                 name=name, isolation=isolation,
             )
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "update_guest_isolation: name=%r isolation=%r 失败", name, isolation
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"隔离设置未生效：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -246,9 +264,12 @@ class AdminHandlers:
                 paths=self.server._paths, room_dir=room_dir,
                 name=name, spec_dict=spec_dict,
             )
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "update_guest_llm: name=%r spec=%r 失败", name, spec_dict
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"模型设置未生效：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -272,9 +293,12 @@ class AdminHandlers:
                 paths=self.server._paths, room_dir=room_dir,
                 name=name, servers=servers,
             )
-        except Exception:
+        except Exception as e:
             _log.exception(
                 "update_guest_extra_mcp: name=%r servers=%r 失败", name, servers
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"MCP 设置未生效：{e}"
             )
             self.server._emit_room_snapshot(sink)
             return
@@ -290,8 +314,11 @@ class AdminHandlers:
         room_dir = self.server._session.room_config.room_dir
         try:
             admin.remove_guest(paths=self.server._paths, room_dir=room_dir, name=name)
-        except Exception:
+        except Exception as e:
             _log.exception("remove_guest: name=%r 失败", name)
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"移除茶客失败：{e}"
+            )
             self.server._emit_room_snapshot(sink)
             return
         if not self.server._replace_session(room_dir, sink, label="remove_guest"):
@@ -326,10 +353,13 @@ class AdminHandlers:
             self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=str(e))
             self.server._emit_room_snapshot(sink)
             return
-        except Exception:
+        except Exception as e:
             _log.exception("create_room: room_id=%r 失败", room_id)
-            # 创建失败：磁盘已 rmtree 回滚（admin.create_room 内部）；前端没切走，重发当
-            # 前 snapshot 让"创建中…"按钮态归位。
+            # 创建失败：磁盘已 rmtree 回滚（admin.create_room 内部）；前端没切走，NOTICE
+            # 说明原因 + 重发当前 snapshot 让"创建中…"按钮态归位。
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"创建房间失败：{e}"
+            )
             self.server._emit_room_snapshot(sink)
             return
         if not self.server._replace_session(rc.room_dir, sink, label=f"create_room→{rc.room_dir.name!r}"):
@@ -358,8 +388,11 @@ class AdminHandlers:
             admin.delete_room(
                 paths=self.server._paths, room_id=room_id, current_room_id=current
             )
-        except Exception:
+        except Exception as e:
             _log.exception("delete_room: room_id=%r 失败", room_id)
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"删除房间失败：{e}"
+            )
             self.server._emit_room_snapshot(sink)
             return
         _log.info("delete_room: %r 已删", room_id)

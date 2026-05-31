@@ -757,8 +757,15 @@ class ChahuaServer:
         """
         try:
             new_session = build_room_session(new_room_dir, paths=self._paths)
-        except Exception:
+        except (Exception, SystemExit) as e:
+            # SystemExit（不是 Exception 子类！）—— build_client 在缺 API key /
+            # 未知 provider 无 base_url 时抛它，这正是"改了模型但没生效"最常见的原因。
+            # 不 emit NOTICE 用户只看到设置悄悄回滚、毫无反馈（本次 bugfix 的核心）。
             _log.exception("%s: build_room_session 失败", label)
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text=f"设置未生效，已回滚到上一个可用配置：{e}",
+            )
             self._emit_room_info(sink)
             return False
         old = self._session
