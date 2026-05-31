@@ -10,36 +10,41 @@
 **故意拒绝覆盖**：目标 ``<Name>.md``（flat 或 dir form 任一）已存在 → ``PersonaImportError``。
 用户改名重导或先删旧的；静默 overwrite 容易把用户改过的 persona 清掉。
 
-本模块是「import / update / check / delete」编排层；两块低层原语已抽出：
+本模块是「import / update / check / delete」编排层；低层原语已分四块抽出：
 - :mod:`chahua.persona_provenance` —— provenance 数据模型 / 读写 / 内容哈希 / 状态词表 /
   基类异常 :class:`PersonaImportError`。
 - :mod:`chahua.persona_github` —— GitHub Contents API 低层 HTTP（单资源取字节 / JSON）。
+- :mod:`chahua._persona_collect` —— 文件采集（本地递归读 / GitHub 递归下载 + ``_MAX_*`` 限额）。
+- :mod:`chahua._persona_fs` —— 写盘 / 原子替换 / 崩溃恢复。
 
 为保持公开 import 路径与历史一致（``from chahua.persona_import import X`` /
-``persona_import.X`` 仍可用），这两块的对外符号在本模块顶部 re-export；测试 monkeypatch
-``persona_import._gh_latest_commit_sha`` 等仍生效 —— 它们的内部调用方（``_safe_latest_commit_sha``
-/ ``_check_github`` / ``_fetch_github_recursive`` …）都留在本模块，经本模块命名空间解析。
-"""
+``persona_import.X`` 仍可用），各块的对外符号在本模块顶部 re-export；测试 monkeypatch
+``persona_import._gh_latest_commit_sha`` / ``._collect_local_files`` / ``._collect_from_source``
+/ ``._safe_latest_commit_sha`` / ``._gh_fetch_one_file`` 仍生效 —— **它们的 bare-name 调用方
+（``_safe_latest_commit_sha`` / ``_check_github`` / ``_check_folder`` / ``_collect_from_source``
+/ ``_detect_local_modified`` / ``import_from_*`` / ``update_persona`` …）都留在本模块**，经本
+模块命名空间解析 patch。被抽出的纯函数（采集 / 写盘）不 bare-call 任何被 patch 的名字，故
+搬走后语义不变。"""
 
 from __future__ import annotations
 
 import logging
-import os
-import re
-import secrets
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from ._paths import Paths
-from ._persist import write_bytes_atomic
+from ._persona_collect import _collect_local_files, _fetch_github_dir
+from ._persona_fs import (
+    _recover_interrupted_updates,
+    _replace_dir_atomic,
+    _write_files,
+)
 from .admin import PERSONAS_REL_DIR, sanitize_fs_name
 from .persona_github import (
     _GitHubError,
     _gh_fetch_one_file,
-    _gh_get_contents,
-    _gh_get_file_bytes,
     _gh_latest_commit_sha,
     _parse_github_url,
 )
@@ -92,26 +97,6 @@ __all__ = [
     "delete_persona",
     "recover_interrupted_persona_updates",
 ]
-
-
-# ── 限额 ──────────────────────────────────────────────────────────────────
-
-
-# 单文件 / 总包尺寸 + 文件数 / 目录深度上限。导入一个 persona 不该拉整个仓库；
-# 上限拍在足够留一些 skill 文档的体量，超过明显是手误（指错了根）。
-_MAX_FILE_BYTES = 2 * 1024 * 1024
-_MAX_TOTAL_BYTES = 8 * 1024 * 1024
-_MAX_FILES = 200
-_MAX_DEPTH = 6
-
-# 写盘前丢掉的文件 / 目录 —— 没人想把 .git 或编辑器缓存导进来。
-# ``.chahua-source.json``（provenance）在此 —— 三处采集（_walk_local / GitHub walker /
-# installed-dir 哈希遍历经 _collect_local_files）都按 name 跳过它：它是 chahua 内部元
-# 数据，不该跟着包被「再导出/再导入」漂走，且更新时由 importer 先于替换重算永远新鲜。
-_SKIP_NAMES: frozenset[str] = frozenset(
-    {".git", ".github", ".vscode", "__pycache__", "node_modules", ".DS_Store",
-     SOURCE_FILENAME}
-)
 
 
 @dataclass(frozen=True)
@@ -337,127 +322,7 @@ def _validate_target(paths: Paths, name: str) -> Path:
     return target_dir
 
 
-# ── 限额累加器 ─────────────────────────────────────────────────────────────
-
-
-@dataclass
-class _PackBudget:
-    """单次 import 的累计状态 —— 文件数 / 总字节。本地 + GitHub walker 共用。
-
-    每加一份文件就 :meth:`add` 一次，超限抛 ``PersonaImportError``。
-    """
-
-    files: list[tuple[str, bytes]] = field(default_factory=list)
-    total_bytes: int = 0
-
-    def add(self, rel: str, data: bytes) -> None:
-        size = len(data)
-        if size > _MAX_FILE_BYTES:
-            raise PersonaImportError(
-                f"文件 {rel} 太大（{size} bytes，单文件上限 {_MAX_FILE_BYTES}）"
-            )
-        if len(self.files) >= _MAX_FILES:
-            raise PersonaImportError(
-                f"包含的文件数超过 {_MAX_FILES}，请检查源是否指错了根。"
-            )
-        if self.total_bytes + size > _MAX_TOTAL_BYTES:
-            raise PersonaImportError(
-                f"包体总大小超过 {_MAX_TOTAL_BYTES} bytes，请精简 persona 目录。"
-            )
-        self.total_bytes += size
-        self.files.append((rel, data))
-
-
-# ── 本地文件采集 ───────────────────────────────────────────────────────────
-
-
-def _collect_local_files(src: Path) -> list[tuple[str, bytes]]:
-    """递归读 src，返回 ``[(相对路径, bytes), ...]``。受 ``_MAX_*`` 约束。"""
-    budget = _PackBudget()
-    _walk_local(src, src, depth=0, budget=budget)
-    if not budget.files:
-        raise PersonaImportError(f"源目录为空：{src}")
-    return budget.files
-
-
-def _walk_local(root: Path, current: Path, *, depth: int, budget: _PackBudget) -> None:
-    """递归把 ``current`` 下的文件加进 ``budget``；``rel`` 全部相对最初的 ``root``。"""
-    if depth > _MAX_DEPTH:
-        raise PersonaImportError(f"目录嵌套超过 {_MAX_DEPTH} 层，请检查源路径。")
-    for child in sorted(current.iterdir()):
-        if child.name in _SKIP_NAMES:
-            continue
-        # symlink 拒收：避免环路 / 跨出源目录；导入要的是确定来源。
-        if child.is_symlink():
-            _log.info("skip symlink %s", child)
-            continue
-        if child.is_dir():
-            _walk_local(root, child, depth=depth + 1, budget=budget)
-        elif child.is_file():
-            rel = str(child.relative_to(root))
-            budget.add(rel, child.read_bytes())
-
-
-# ── GitHub 拉取（递归下载整目录；低层 HTTP 在 persona_github）────────────────
-
-
-def _fetch_github_dir(
-    owner: str, repo: str, branch: Optional[str], path: str
-) -> list[tuple[str, bytes]]:
-    """递归下载 GitHub 仓库 ``path`` 下的所有文件，返回 ``[(相对路径, bytes), ...]``。
-
-    Contents API 对 >1MB 的文件不直接返 base64 content（``content`` 为空、要走 raw URL）。
-    我们的 _MAX_FILE_BYTES 是 2MB，常态命中 inline content；超时退到 raw.githubusercontent.com。
-    """
-    budget = _PackBudget()
-    _fetch_github_recursive(
-        owner, repo, branch, path, prefix="", depth=0, budget=budget
-    )
-    return budget.files
-
-
-def _fetch_github_recursive(
-    owner: str,
-    repo: str,
-    branch: Optional[str],
-    api_path: str,
-    *,
-    prefix: str,
-    depth: int,
-    budget: _PackBudget,
-) -> None:
-    if depth > _MAX_DEPTH:
-        raise PersonaImportError(f"GitHub 目录嵌套超过 {_MAX_DEPTH} 层。")
-    entries = _gh_get_contents(owner, repo, branch, api_path)
-    if isinstance(entries, dict):
-        # path 指向单个文件而非目录 —— Contents API 在 path 是文件时返单 dict。
-        raise PersonaImportError(
-            f"GitHub 路径指向单文件而非目录：{api_path or '<repo root>'}"
-        )
-    for entry in entries:
-        name = entry.get("name")
-        if not isinstance(name, str) or name in _SKIP_NAMES:
-            continue
-        etype = entry.get("type")
-        rel = f"{prefix}/{name}" if prefix else name
-        if etype == "dir":
-            sub_api = f"{api_path}/{name}" if api_path else name
-            _fetch_github_recursive(
-                owner, repo, branch, sub_api,
-                prefix=rel, depth=depth + 1, budget=budget,
-            )
-            continue
-        if etype != "file":
-            _log.info("skip non-file entry %s (type=%s)", rel, etype)
-            continue
-        # 提前看 entry.size 拒大文件，省一次下载往返；最终 budget.add 再校验实际 bytes。
-        size = entry.get("size", 0)
-        if isinstance(size, int) and size > _MAX_FILE_BYTES:
-            raise PersonaImportError(
-                f"文件 {rel} 太大（{size} bytes，单文件上限 {_MAX_FILE_BYTES}）"
-            )
-        data = _gh_get_file_bytes(entry, owner=owner, repo=repo, branch=branch)
-        budget.add(rel, data)
+# ── GitHub 基线 sha（best-effort；低层 HTTP / 递归采集见 persona_github / _persona_collect）──
 
 
 def _safe_latest_commit_sha(
@@ -472,124 +337,7 @@ def _safe_latest_commit_sha(
         return None
 
 
-# ── 写盘 + 结果 ───────────────────────────────────────────────────────────
-
-
-def _validate_rels(files: list[tuple[str, bytes]]) -> None:
-    """防 traversal：``..`` 段 / 绝对路径拒（即便 _walk_local 上层已过滤）。"""
-    for rel, _ in files:
-        rel_path = Path(rel)
-        if rel_path.is_absolute() or any(part == ".." for part in rel_path.parts):
-            raise PersonaImportError(f"非法相对路径（含 ..）：{rel}")
-
-
-def _write_files_into(dir_path: Path, files: list[tuple[str, bytes]]) -> None:
-    """把 files 写到**已存在**的 ``dir_path``（不建目录、不回滚、不校验 —— 调用方负责）。
-    每个文件走 :func:`write_bytes_atomic`，写一半被 kill 不留半截内容。"""
-    for rel, data in files:
-        write_bytes_atomic(dir_path / Path(rel), data)
-
-
-def _write_files(target_dir: Path, files: list[tuple[str, bytes]]) -> None:
-    """create 路径（import）：建新目录 + 写 + 失败 rmtree 回滚（与 create_room 同款）。
-
-    ``mkdir(exist_ok=False)`` 兼当目标占用检查 —— 已存在直接 ``FileExistsError``，外层
-    包成 ``PersonaImportError``。
-    """
-    _validate_rels(files)
-    try:
-        target_dir.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as e:
-        raise PersonaImportError(
-            f"persona 目录 {target_dir} 已存在。请先删除或导入到别的名字。"
-        ) from e
-    try:
-        _write_files_into(target_dir, files)
-    except Exception:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        raise
-
-
-def _replace_dir_atomic(
-    target_dir: Path, files: list[tuple[str, bytes]], *, source: PersonaSource
-) -> None:
-    """update 路径：原子替换**已存在**的 ``target_dir``，绝不原地改写。
-
-    ``personas/.<Name>.update-<pid>/`` 写新内容 + provenance（**provenance 进 tmp，与
-    内容同次换入** —— 不分两步写，避免 swap 成功但 provenance 写失败的中间态）→
-    ``rename(target → .<Name>.bak-<pid>)`` → ``rename(tmp → target)`` → 成功删 bak；
-    任一步失败 restore bak。manifest dry-run 由调用方 :func:`update_persona` 在调本函数
-    **之前**做（坏 manifest → 根本不开始 swap，旧版完好）。
-
-    **Why**：更新目标已存在，必须保证「替换中途被 kill / rename 失败」时旧版完好无损 ——
-    半个 persona 比旧 persona 危险得多。
-    """
-    _validate_rels(files)
-    parent = target_dir.parent
-    # tmp/bak 名带 pid + 随机 token：``update_persona`` 经 ``asyncio.to_thread`` 跑，同
-    # 进程内两次并发更新同一 persona（双击 / 两帧）会共享 pid —— 仅用 pid 会撞名 + 让开头
-    # 的 rmtree 误删对方的工作目录。token 保证每次更新独占自己的 tmp/bak。
-    token = f"{os.getpid()}-{secrets.token_hex(3)}"
-    tmp_dir = parent / f".{target_dir.name}.update-{token}"
-    bak_dir = parent / f".{target_dir.name}.bak-{token}"
-    # 1) 写新内容 + provenance 到 tmp。
-    try:
-        tmp_dir.mkdir(parents=True, exist_ok=False)
-        _write_files_into(tmp_dir, files)
-        write_source(tmp_dir, source)
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
-    # 2) swap：旧版挪 bak（target 随即不存在）→ 新版就位。失败 restore。
-    try:
-        os.replace(target_dir, bak_dir)
-    except OSError:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
-    try:
-        os.replace(tmp_dir, target_dir)
-    except OSError:
-        os.replace(bak_dir, target_dir)  # 还原旧版
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
-    # 3) 成功，删 bak。
-    shutil.rmtree(bak_dir, ignore_errors=True)
-
-
-# .<name>.update-<pid>-<hex6> / .<name>.bak-<pid>-<hex6>（_replace_dir_atomic 的工作目录）。
-_UPDATE_WORKDIR_RE = re.compile(
-    r"^\.(?P<name>.+)\.(?P<kind>update|bak)-(?P<pid>\d+)-[0-9a-f]{6}$"
-)
-
-
-def _recover_interrupted_updates(personas_root: Path) -> None:
-    """崩溃恢复 + 残骸清理。:func:`_replace_dir_atomic` 在 ``rename(target→bak)`` 与
-    ``rename(tmp→target)`` 之间被 SIGKILL / 断电打断时，旧版只剩在 ``.<name>.bak-…/``
-    （dot-dir，listing 跳过）—— persona 看起来「消失」了。这里把这种孤儿 bak 还原回
-    ``<name>/``，并清掉其余工作残骸。
-
-    **只碰 pid ≠ 当前进程的工作目录**：当前进程 pid 的 ``.update-`` / ``.bak-`` 可能是本
-    进程正在跑的并发更新（``update_persona`` 走 ``asyncio.to_thread``，bak/tmp 名嵌 pid），
-    绝不能抢；异进程 pid 的必是上次运行崩溃 / 收尾失败的残骸，安全处理。pid 复用极罕见且
-    最坏只是跳过恢复（无数据损失）。失败永不阻断 —— 仅 WARN。
-    """
-    if not personas_root.is_dir():
-        return
-    me = os.getpid()
-    for entry in sorted(personas_root.iterdir()):
-        m = _UPDATE_WORKDIR_RE.match(entry.name)
-        if m is None or not entry.is_dir() or int(m.group("pid")) == me:
-            continue
-        target = personas_root / m.group("name")
-        if m.group("kind") == "bak" and not target.exists():
-            # swap 中途崩溃，旧版只剩在 bak → 还原回 target。
-            try:
-                os.replace(entry, target)
-            except OSError as e:
-                _log.warning("恢复中断的 persona 更新失败 %s → %s：%s", entry.name, target.name, e)
-            continue
-        # 其余残骸（target 已就位的 bak / 任意 update tmp）→ 清掉。
-        shutil.rmtree(entry, ignore_errors=True)
+# ── 崩溃恢复入口 + 结果（写盘 / 原子替换原语见 _persona_fs）─────────────────────
 
 
 def recover_interrupted_persona_updates(paths: Paths) -> None:
