@@ -32,6 +32,17 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
     # 阿里云 DashScope 的 OpenAI 兼容端点。国际版走 dashscope-intl.aliyuncs.com，
     # 国内用户绝大多数走主域，差异让用户在 toml 里显式写 base_url 覆盖即可。
     "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    # Google Gemini 的 OpenAI 兼容端点（Gemini Developer API）。默认 api_key_env
+    # 走 GEMINI_API_KEY（见 provider_env_prefix）；要用 GOOGLE_API_KEY / Vertex 端点
+    # 在 toml 里显式写 api_key_env / base_url 覆盖即可。
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+}
+
+# provider 别名 → canonical。``google`` 是 ``gemini`` 的常见同义写法，统一归一到
+# ``gemini`` —— 一个 canonical provider（env 前缀 / 默认 base_url / 展示字面量都一致），
+# 避免 ``google/x`` 与 ``gemini/x`` 各走一套 API key 环境变量名而互相错配。
+_PROVIDER_ALIASES: dict[str, str] = {
+    "google": "gemini",
 }
 
 # 闲聊场景调高，比 agentao 自带的 0.2 暖；可被 LLM_TEMPERATURE 覆盖。
@@ -54,8 +65,8 @@ def split_model_id(value: str) -> tuple[str, str]:
     取**第一个** ``/`` 作 provider/model 分隔 —— OpenRouter / LiteLLM 的 model id 普遍
     含 ``/`` 二级路径，必须保留。无 ``/`` 或两侧为空 → :class:`ValueError`。
 
-    返回的 provider 已 lowercase（与 :data:`_DEFAULT_BASE_URLS` 键风格一致）；model 保留
-    原大小写。
+    返回的 provider 已 lowercase + 别名归一（:data:`_PROVIDER_ALIASES`，如 ``google``
+    → ``gemini``，与 :data:`_DEFAULT_BASE_URLS` 键风格一致）；model 保留原大小写。
     """
     if "/" not in value:
         raise ValueError(
@@ -66,7 +77,18 @@ def split_model_id(value: str) -> tuple[str, str]:
         raise ValueError(
             f"model={value!r} 形态不合法 —— '/' 两侧都不能为空"
         )
-    return provider.strip().lower(), model.strip()
+    return canonical_provider(provider), model.strip()
+
+
+def canonical_provider(name: str) -> str:
+    """provider 名归一：lowercase + strip + 别名映射（``google`` → ``gemini``）。
+
+    toml / env 两条入口都过这里，保证同一 provider 不因写法不同走两套 env 前缀 /
+    默认 base_url。未知 provider 原样返回（lowercase），由下游 ``build_client`` 决定
+    是否需要显式 base_url。
+    """
+    norm = name.strip().lower()
+    return _PROVIDER_ALIASES.get(norm, norm)
 
 
 # toml 表层 LLM 字段的写出 / 解析顺序（model 在前 + 可选三项在后，与设计 §3 示例对齐
@@ -157,7 +179,7 @@ class LLMSpec:
         本方法返回的 spec ``api_key_env=None`` —— ``room_info`` 渲染时能看出"这是 env
         推断的默认 spec"（与 ``[room.llm]`` toml 显式配置形成对照）。
         """
-        provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
+        provider = canonical_provider(os.environ.get("LLM_PROVIDER") or "openai") or "openai"
         prefix = provider_env_prefix(provider)
 
         model = os.environ.get(f"{prefix}_MODEL")
@@ -184,7 +206,7 @@ class LLMSpec:
         spec = cls.try_from_env()
         if spec is not None:
             return spec
-        provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower() or "openai"
+        provider = canonical_provider(os.environ.get("LLM_PROVIDER") or "openai") or "openai"
         prefix = provider_env_prefix(provider)
         known = ", ".join(sorted(_DEFAULT_BASE_URLS.keys()))
         raise SystemExit(
