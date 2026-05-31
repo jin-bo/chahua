@@ -5,7 +5,7 @@
 
 ## [Unreleased]
 
-## [0.1.6] - 2026-05-30
+## [0.1.6] - 2026-05-31
 
 详见 [`docs/releases/v0.1.6.md`](docs/releases/v0.1.6.md)。
 
