@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-30
+
+详见 [`docs/releases/v0.1.6.md`](docs/releases/v0.1.6.md)。
+
+### Added
+- **P13 多模态图像输入**（2026-05-30，详见 [`docs/P13-多模态图像输入.md`](docs/P13-多模态图像输入.md)）：让用户发的图，在视觉能力的茶客模型那里**真正看到像素** —— 本轮触发用户消息里的图片在茶客 `speak()` 时作为 OpenAI `image_url` content block 附给该茶客 model；不支持视觉的茶客模型自动退化为 `- share/x.png (image/png)` 文本引用（逐茶客独立，因每个 `TeaGuest` 包独立 `Agentao`）。**降级零自研**，全交给 agentao（≥0.4.8）的 reactive「图→文本引用」回退，chahua 不维护 per-provider 视觉能力表。**视觉附图纯瞬态**：`images_rel` 是 Python 形参沿当前 turn 同步透传后即弃，不动 `Message` / transcript / envelope / `schema_version`；base64 只在 `speak()` 时从 `share/` 懒读现传，transcript 只留 `<./share/..>` 文本标记。**附图范围有界**：只进 `_run_ai_chain` 第一周期（本地 `first_cycle` flag，非被 pre-drain 污染的 `_consecutive_ai_turns==0`），handoff / MTS / bg run / 接力轮一律退文本；**打分永不吃图**。读盘双层防穿越（段形校验 + symlink 逃逸 `resolve()`+`relative_to`）+ 0 字节 / >20MB / 缺文件跳过 + >16 图截断；图类型按扩展名白名单 `{png, jpg, jpeg, gif, webp}` 识别、resolve 时映射 MIME。新增 `chahua/image_input.py` 轻量 helper（server inbound 与 guest 跨层共用）；前端 picker / paste / drag-drop 共用 `uploadFiles(files)` + objectURL 缩略图 pill（FIFO 透传 + revoke 防泄漏，超 20MB 提示「茶客看文本引用」）。含 C1/C2/C3 每步 code-review + codex review 收敛（图泄漏到接力轮 / `share/.png` dotfile 漏白名单 / 0 字节图让 agentao 预校验抛 ValueError / paste-drop 绕禁用按钮静默丢文件 / `dragleave` 缺 `Files` 守卫）。依赖 agentao `0.4.6 → 0.4.8`。
+
+### Changed
+- **拆 `persona_import.py` —— 抽出 `persona_github` / `persona_provenance`**（2026-05-28，提交 `d59b53c`）：行为保持的纯重构，把 P12.6 落在 `persona_import.py` 的 GitHub 拉取与 provenance 读写各抽出独立 helper 模块，公开 import 路径与运行行为不动。
+- **精简 CLAUDE.md 不变量 + §9 明细移出到 `docs/INVARIANTS.md`**（2026-05-28，提交 `7d59556`）：CLAUDE.md 不变量段只留「规则 + 关键 why」，完整 rationale / P-版本溯源 / 回归测试搬进 `docs/INVARIANTS.md`，两处约定「改不变量两处同步」。
+
 ## [0.1.5] - 2026-05-28
 
 详见 [`docs/releases/v0.1.5.md`](docs/releases/v0.1.5.md)。

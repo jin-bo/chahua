@@ -86,6 +86,7 @@ class SpeakingStubGuest:
         sink,
         cancellation_token=None,
         task_id=None,
+        images_rel=(),
     ):
         message_id = new_message_id()
         if self._recorder is not None:
@@ -205,7 +206,7 @@ def task_inbound_srv(env_paths, monkeypatch):
     )
     from chahua.session import build_room_session
 
-    async def _noop_ai_chain(self, *, sink, active_task_id=None):
+    async def _noop_ai_chain(self, *, sink, active_task_id=None, images_rel=()):
         return None
 
     monkeypatch.setattr(Orchestrator, "_run_ai_chain", _noop_ai_chain)

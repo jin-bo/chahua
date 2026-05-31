@@ -242,7 +242,7 @@ async def test_panel_during_user_turn_cancels_and_starts_drain(
     user_turn_started = asyncio.Event()
     drain_started = asyncio.Event()
 
-    async def _block_user(self, text, *, sink, task_id):
+    async def _block_user(self, text, *, sink, task_id, images_rel=()):
         user_turn_started.set()
         await asyncio.Event().wait()
 

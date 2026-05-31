@@ -148,7 +148,7 @@ class _ProposeAfterSpeakManager(SpeakingStubGuest):
         self._orch_box = orch_box
         self._target = target
 
-    async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None):
+    async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None, images_rel=()):
         msg = await super().speak(
             ctx, turn_id=turn_id, sink=sink, task_id=task_id,
         )
@@ -377,7 +377,7 @@ async def test_dormant_resume_enqueues_manager_kickoff_and_skips_chain(
     orch, _ = _build("Maya", "Wei", store=_make_store("t1"))
     chain_called: list[int] = []
 
-    async def _record_chain(self, *, sink, active_task_id=None):
+    async def _record_chain(self, *, sink, active_task_id=None, images_rel=()):
         chain_called.append(1)
 
     monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
@@ -424,7 +424,7 @@ async def test_dormant_resume_falls_back_to_chain_when_manager_offline(
     orch, _ = _build("Wei", store=_make_store("t1"))  # 注意：没 Maya
     chain_called: list[int] = []
 
-    async def _record_chain(self, *, sink, active_task_id=None):
+    async def _record_chain(self, *, sink, active_task_id=None, images_rel=()):
         chain_called.append(1)
 
     monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
@@ -458,7 +458,7 @@ async def test_dormant_resume_falls_back_to_chain_when_manager_busy(
     orch.active_guest_names = {"Maya"}  # 模拟 bg run 占用 Maya
     chain_called: list[int] = []
 
-    async def _record_chain(self, *, sink, active_task_id=None):
+    async def _record_chain(self, *, sink, active_task_id=None, images_rel=()):
         chain_called.append(1)
 
     monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)
@@ -482,7 +482,7 @@ async def test_non_dormant_user_message_keeps_chain_path(monkeypatch) -> None:
     orch, _ = _build("Maya", "Wei", store=_make_store("t1"))
     chain_called: list[int] = []
 
-    async def _record_chain(self, *, sink, active_task_id=None):
+    async def _record_chain(self, *, sink, active_task_id=None, images_rel=()):
         chain_called.append(1)
 
     monkeypatch.setattr(Orchestrator, "_run_ai_chain", _record_chain)

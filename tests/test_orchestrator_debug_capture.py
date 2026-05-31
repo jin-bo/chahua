@@ -61,6 +61,7 @@ class _CancellableStubGuest(SpeakingStubGuest):
 
     async def speak(
         self, context_message, *, turn_id, sink, cancellation_token=None, task_id=None,
+        images_rel=(),
     ):
         message_id = new_message_id()
         if self._recorder is not None:

@@ -62,14 +62,22 @@ class AIChainOps:
         self.orch = orch
 
     async def run_ai_chain(
-        self, *, sink: EnvelopeSink, active_task_id: Optional[str] = None
+        self, *, sink: EnvelopeSink, active_task_id: Optional[str] = None,
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         orch = self.orch
         # 上一轮已经 emit ``turn_end(next='ai')``、UI 仍守在"停止"按钮等下一个 turn_start
         # 的那个 turn_id；下一次 pick 成功（emit 新 turn_start / turn_end）就清零，pick 失败
         # 则用这个 id 补一帧 ``turn_end(next='user')`` 让 UI 收回按钮。None = 无未结链。
         last_open_turn_id: Optional[str] = None
+        # P13：视觉附图只给 chain 第一个真正发言的 pick 周期（直接回应用户消息那批）。
+        # 之后是 AI→AI 接力（「后续 turn」），按不变量「历史图对后续 turn 退回文本引用」
+        # 只看 ``<./share/...>`` 标记、不再重发 base64 —— 省 token、语义上像素只属于用户
+        # 那条消息。**本地 flag 而非 ``_consecutive_ai_turns == 0``**：pre-drain 会先
+        # bump 共享计数器（单一 cap），用计数器判会误伤「pre-drain 后才回应用户的首发者」。
+        first_cycle = True
         while orch._consecutive_ai_turns < orch.config.max_consecutive_ai_turns:
+            round_images = images_rel if first_cycle else ()
             # scoring 阶段被 cancel：上一轮已 emit turn_end(next='ai')，UI 守在「停止」
             # 按钮等下一个 turn_start。不补 fixup 的话 UI 永远收不到链终态。first-iter
             # （last_open_turn_id=None）UI 还在「发送」状态，无须补。
@@ -164,15 +172,21 @@ class AIChainOps:
                     if not bypass_inner_cap and orch._consecutive_ai_turns >= orch.config.max_consecutive_ai_turns:
                         break
                     # 经主类 ``_let_speak`` 薄转发 —— 保 monkeypatch 可拦截。
+                    # P13：本轮触发用户图只流入 chain 第一周期的 let_speak（``round_images``
+                    # 在 AI 接力周期为空）。pre-drain / re-drain / dormant MTS kickoff 不接像素。
                     await orch._let_speak(
                         guest_name, turn_id=turn_id, sink=sink,
-                        task_id=active_task_id,
+                        task_id=active_task_id, images_rel=round_images,
                     )
                     orch._consecutive_ai_turns += 1
                     orch._rounds_without_user_or_mention += 1
             except asyncio.CancelledError:
                 self.cancel_fixup_and_flush(sink, turn_id=turn_id)
                 raise
+
+            # P13：第一周期（回应用户那批）已发言完毕 —— 后续 while 迭代是 AI 接力，
+            # 不再带像素。``winners`` 非空才走到这里（``not winners`` 早 return）。
+            first_cycle = False
 
             next_state = (
                 "ai"

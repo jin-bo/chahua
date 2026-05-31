@@ -406,6 +406,7 @@ class Orchestrator:
         *,
         sink: Optional[EnvelopeSink] = None,
         task_id: Any = _UNSET,
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         """处理一条用户消息，跑到本回合结束（轮上限 / 没人想接话 / 失败）。
 
@@ -419,6 +420,11 @@ class Orchestrator:
           调用走这条路。
         - 显式传值（含 ``None``）= 用传入值，不回读 store —— server 端必须在接帧同步上下文
           先 snapshot 再传，防止 schedule 与协程实际运行之间 ``open_task`` 偷胜改 active。
+
+        ``images_rel``（P13）：本轮触发用户消息携带的图片 rel（canonical ``share/x.png``），
+        **只透传进 ``_run_ai_chain``**；pre-drain（``run_pending_handoff``）/ re-drain /
+        dormant MTS kickoff 不接像素 —— 那些路径只看 ``<./share/...>`` 文本标记。纯瞬态
+        形参，turn 内用完即弃，不落 transcript / 不改任何 schema。
         """
         if not text:
             return
@@ -477,7 +483,9 @@ class Orchestrator:
         # 空队列时 ``run_pending_handoff`` 早 return，零开销。
         await self.run_pending_handoff(sink, task_id=active_task_id)
         if not dormant_mts_kickoff:
-            await self._run_ai_chain(sink=sink, active_task_id=active_task_id)
+            await self._run_ai_chain(
+                sink=sink, active_task_id=active_task_id, images_rel=images_rel,
+            )
         # P8.4：MTS 收尾 re-drain —— chain 内管理者（被 ``@`` 强制 / scoring 胜出）经
         # ``intercept_task_proposal`` hook 自动入队 delegate / panel，chain ↔ drain
         # 严格分流不知道要切回 drain；本段在 chain 后补一次 re-drain。dormant kickoff
@@ -504,10 +512,11 @@ class Orchestrator:
     # 但符号要在 ``Orchestrator`` 上）。
 
     async def _run_ai_chain(
-        self, *, sink: EnvelopeSink, active_task_id: Optional[str] = None
+        self, *, sink: EnvelopeSink, active_task_id: Optional[str] = None,
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         await self._chain_ops.run_ai_chain(
-            sink=sink, active_task_id=active_task_id,
+            sink=sink, active_task_id=active_task_id, images_rel=images_rel,
         )
 
     # ── handoff drain（P7.1.5，docs/P7 §3.4）─────────────────────────────
@@ -562,6 +571,7 @@ class Orchestrator:
         sink: EnvelopeSink,
         task_id: Optional[str] = None,
         extra_blocks: Optional[list[str]] = None,
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         await self._scoring_ops.let_speak(
             guest_name,
@@ -569,6 +579,7 @@ class Orchestrator:
             sink=sink,
             task_id=task_id,
             extra_blocks=extra_blocks,
+            images_rel=images_rel,
         )
 
     # slot 拆分：turn-级 envelope emit + cancel fixup 搬到 :class:`AIChainOps`；

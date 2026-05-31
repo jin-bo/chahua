@@ -11,11 +11,26 @@ import { Inbound } from "./events.js";
 // 与 server.py 的 _UPLOAD_MAX_BYTES 同步（200MB）。前端早拒省一次 base64 + ws 来回。
 const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
 
+// P13 C3：视觉输入上限（与后端 agentao.media_limits.MAX_IMAGE_BYTES = 20MB 对齐）。
+// 超过此值的图片仍能上传（≤200MB），但茶客模型看不到像素、退回 `<./share/..>` 文本
+// 引用 —— pill 上提示一下，避免用户以为大图也被「看见」。
+const VISION_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
 const SHARE_PREFIX = "share/";
 
-// pending-file card 左侧色块图标。当前所有文件类型共用一个 emoji —— 想做按扩展名分图
-// 标时改这里。
+// pending-file card 左侧色块图标。非图片文件共用一个 emoji；图片走缩略图（见 renderPills）。
 const PENDING_FILE_ICON = "📄";
+
+// P13 C2：与后端 image_input._EXT_TO_MIME / chat_view 预览白名单一致 —— 只对这些扩展名
+// 渲缩略图。SVG 不内嵌（可藏 <script>），与视觉输入白名单同口径。
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+
+function isImageName(name) {
+  if (typeof name !== "string") return false;
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return false;
+  return IMAGE_EXTS.has(name.slice(dot + 1).toLowerCase());
+}
 
 // "." 在首位（dotfile，如 .gitignore）当作无扩展名走 fallback，避免把整个文件名当 type
 // 显示出来。
@@ -92,9 +107,19 @@ export function createUpload({
       const landedName = f.rel.slice(SHARE_PREFIX.length);
       const displayName = f.original || landedName;
 
-      const icon = document.createElement("div");
-      icon.className = "pending-file-icon";
-      icon.textContent = PENDING_FILE_ICON;
+      let icon;
+      if (f.thumb) {
+        // P13 C2：图片 pill 渲缩略图（本地 blob URL，不走网络）。object-fit:cover
+        // 由 .pending-file-thumb 样式定，撑满与 emoji 图标同尺寸的方块。
+        icon = document.createElement("img");
+        icon.className = "pending-file-icon pending-file-thumb";
+        icon.src = f.thumb;
+        icon.alt = displayName;
+      } else {
+        icon = document.createElement("div");
+        icon.className = "pending-file-icon";
+        icon.textContent = PENDING_FILE_ICON;
+      }
 
       const info = document.createElement("div");
       info.className = "pending-file-info";
@@ -110,6 +135,14 @@ export function createUpload({
       type.className = "pending-file-type";
       type.textContent = fileTypeLabel(displayName);
       info.append(name, type);
+      // P13 C3：超视觉上限的图片 —— pill 上挂一行小提示，茶客看到的是文本引用而非像素。
+      if (f.visionOversize) {
+        const warn = document.createElement("span");
+        warn.className = "pending-file-vision-warn";
+        warn.textContent = "超 20MB · 茶客看文本引用";
+        warn.title = "图片超过视觉模型上限（20MB），茶客将收到 <./share/..> 文本引用而非像素";
+        info.append(warn);
+      }
 
       li.append(icon, info);
       if (onAttachToTask) {
@@ -129,6 +162,7 @@ export function createUpload({
       remove.addEventListener("click", () => {
         const idx = pendingFiles.indexOf(f);
         if (idx >= 0) {
+          if (f.thumb) URL.revokeObjectURL(f.thumb);
           pendingFiles.splice(idx, 1);
           renderPills();
         }
@@ -158,8 +192,15 @@ export function createUpload({
       // 读期间用户切了房 / 清了房 —— 这个文件已经"属于"旧房，不再发送。
       throw new Error("room switched during upload");
     }
+    // P13 C2：图片在丢弃 File 前生成一份 objectURL 缩略图，随 FIFO echo 透传给 pill
+    // （上传串行 → echo 顺序与 send 顺序一致，head.thumb 即当前文件的缩略图）。非图为
+    // null。pill 移除 / clear / 重复覆盖时 revoke，避免 blob URL 泄漏。
+    const isImage = isImageName(file.name);
+    const thumb = isImage ? URL.createObjectURL(file) : null;
+    // 图片超视觉上限 → 标记 pill，提示「茶客将看到文本引用而非像素」。
+    const visionOversize = isImage && file.size > VISION_MAX_IMAGE_BYTES;
     const echo = new Promise((resolve, reject) => {
-      pendingEchoes.push({ resolve, reject });
+      pendingEchoes.push({ resolve, reject, thumb, visionOversize });
     });
     try {
       send({
@@ -172,6 +213,7 @@ export function createUpload({
       // 顺序对齐；后续 echo（理论上不会再来）shift 出的 head 仍是真正在飞的请求。
       const head = pendingEchoes.pop();
       if (head) head.reject(e);
+      if (thumb) URL.revokeObjectURL(thumb);
       throw e;
     }
     // 立即丢弃本地引用，让 GC 回收 ~267MB 字符串（ws 已自己拷一份进 bufferedAmount）。
@@ -186,9 +228,21 @@ export function createUpload({
     fileInputEl.click();
   });
 
-  fileInputEl.addEventListener("change", async () => {
-    const files = Array.from(fileInputEl.files || []);
-    if (files.length === 0 || isUploading) return;
+  // 串行上传一批 File —— 文件选择 / paste / drag-drop 三入口共用。``isUploading``
+  // 重入门保证「最多 1 个 in-flight」+ FIFO echo 顺序不乱（见 pendingEchoes 注释）。
+  async function uploadFiles(files) {
+    files = Array.from(files || []);
+    if (files.length === 0) return;
+    // paste / drag-drop 绕过附件按钮的 disabled 视觉提示 —— 这两条入口忙 / 断线时必须
+    // 给状态反馈，否则用户粘了图却无声丢弃（附件按钮路径靠 disabled 自然挡住）。
+    if (!isConnected()) {
+      setStatus("error", "未连接，无法上传；连上后再试。");
+      return;
+    }
+    if (isUploading) {
+      setStatus("", "还有文件在上传，等当前批次完成后再粘贴 / 拖拽。");
+      return;
+    }
     isUploading = true;
     attachFileBtn.disabled = true;
     try {
@@ -212,31 +266,51 @@ export function createUpload({
         attachFileBtn.disabled = false;
       }
     }
+  }
+
+  fileInputEl.addEventListener("change", () => {
+    void uploadFiles(fileInputEl.files);
   });
 
   return {
     // FILE_UPLOADED envelope 来时调；server 已落盘并 echo 回 rel/original/...
     onServerEcho(data) {
+      // FIFO 唤醒上传循环 —— echo 顺序与 send 顺序匹配（server inbound 单 ws 串行消费）。
+      // 先 shift 取出本 echo 对应的 head（含缩略图），再挂到 pill 上。
+      const head = pendingEchoes.shift();
+      const thumb = head?.thumb ?? null;
+      const visionOversize = head?.visionOversize ?? false;
       const rel = data?.rel;
       if (typeof rel === "string" && rel) {
         const original = data?.original || rel;
-        if (pendingFiles.some((f) => f.rel === rel)) {
-          // 重复上传同名 → server 覆盖落盘；pill 去重避免 pending 区两条同名。
+        const existing = pendingFiles.find((f) => f.rel === rel);
+        if (existing) {
+          // 重复上传同名 → server 覆盖落盘；pill 去重，缩略图更新（revoke 旧 blob）。
+          if (existing.thumb) URL.revokeObjectURL(existing.thumb);
+          existing.thumb = thumb;
+          existing.visionOversize = visionOversize;
+          renderPills();
           setStatus("ok", `已覆盖「${original}」`);
         } else {
-          pendingFiles.push({ rel, original: data?.original || "" });
+          pendingFiles.push({
+            rel, original: data?.original || "", thumb, visionOversize,
+          });
           renderPills();
           setStatus("ok", `已上传「${original}」`);
         }
+      } else if (thumb) {
+        // rel 缺失的异常 echo —— 缩略图无处挂载，revoke 防 blob 泄漏。
+        URL.revokeObjectURL(thumb);
       }
-      // FIFO 唤醒上传循环 —— echo 顺序与 send 顺序匹配（server inbound 单 ws 串行消费）。
-      const head = pendingEchoes.shift();
       if (head) head.resolve();
     },
+    uploadFiles,
     dropPending(reason = "connection closed") {
       // ws.onclose 时调一次 —— 把 await echo 翻成 reject，让正在跑的上传 finally 清状态。
       while (pendingEchoes.length > 0) {
-        pendingEchoes.shift().reject(new Error(reason));
+        const head = pendingEchoes.shift();
+        if (head.thumb) URL.revokeObjectURL(head.thumb);
+        head.reject(new Error(reason));
       }
     },
     snapshotRels() {
@@ -249,13 +323,19 @@ export function createUpload({
       return isUploading;
     },
     clear() {
+      // 先 revoke 所有 pill 缩略图 blob URL 再清，避免泄漏。
+      for (const f of pendingFiles) {
+        if (f.thumb) URL.revokeObjectURL(f.thumb);
+      }
       pendingFiles.length = 0;
       renderPills();
       // 切房 / 清空房间时：① bump generation 让 readFileAsBase64 后的 send 早路径被
       // 跳过；② 拒掉所有已经 push 的 echo waiter，让在飞循环抛错走 finally。
       generation += 1;
       while (pendingEchoes.length > 0) {
-        pendingEchoes.shift().reject(new Error("room switched"));
+        const head = pendingEchoes.shift();
+        if (head.thumb) URL.revokeObjectURL(head.thumb);
+        head.reject(new Error("room switched"));
       }
     },
   };

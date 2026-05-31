@@ -336,11 +336,19 @@ class TurnRecorder:
         message_id: str,
         guest: str,
         speak_prompt: str,
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         """记一位茶客开讲。``speak_prompt`` 是已拼好的 context_message。
 
         ``capture_prompts=False`` 时不持有 prompt 引用，落盘缺 ``speak_prompt_file``
         字段（不空串）。
+
+        P13：``images_rel``（**rel-only**，本轮**传入** speak 的视觉图引用，**resolve 前**）
+        落进 ``images_rel`` 字段便于回放「这轮带了哪几张图」。注意是「传入」非「喂到模型」——
+        ``resolve_images`` 之后还会跳掉超 20MB / 逃逸 / 0 字节 / 超 16 张的图，记录的是请求集
+        不是实投集（要精确实投得另记 resolved ``_source``，但那需把懒读提到 MESSAGE_START 之前、
+        违背「懒读在 arun 内」时序，得不偿失）。**绝不记 base64 bytes**（与不变量「base64
+        懒读不入库」同精神）。空则不写 key。
         """
         if not self.enabled or self._current is None:
             return
@@ -354,6 +362,8 @@ class TurnRecorder:
                 "tool_calls": [],
                 "artifact_paths": [],
             }
+            if images_rel:
+                entry["images_rel"] = list(images_rel)
             prompt_file = self._write_prompt_file(
                 f"prompts/{self._current['turn_id']}/speak_{message_id}.txt",
                 speak_prompt,

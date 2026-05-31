@@ -304,6 +304,7 @@ class ScoringOps:
         sink: EnvelopeSink,
         task_id: Optional[str] = None,
         extra_blocks: Optional[list[str]] = None,
+        images_rel: tuple[str, ...] = (),
     ) -> None:
         orch = self.orch
         entry = orch._guests[guest_name]
@@ -321,8 +322,12 @@ class ScoringOps:
         try:
             # speak() 内部负责 message_start / message_end 合成 + transcript 写入。
             # 返回 None = 失败（速度内已 emit message_end(error)）；CancelledError 透传。
+            # P13：``images_rel`` 仅由 ``_run_ai_chain`` 内的 let_speak 传非空（本轮触发
+            # 用户图）；drain / dormant MTS kickoff 路径的 let_speak 传默认空 tuple ——
+            # 那些路径只看 ``<./share/...>`` 文本标记、不接像素（见 P13 不变量）。
             msg = await entry.guest.speak(
                 ctx, turn_id=turn_id, sink=sink, task_id=task_id,
+                images_rel=images_rel,
             )
         finally:
             if names is not None:
