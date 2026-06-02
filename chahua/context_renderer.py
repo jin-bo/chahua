@@ -417,8 +417,17 @@ class ContextRenderer:
         return "\n\n".join(blocks) + "\n"
 
     def _speak_instruction_block(self, guest_name: str) -> str:
+        # 末句纠偏 chat vs 交付物：agentao base prompt 把茶客定位成「知识工作执行者」，
+        # 默认产物是「结论/证据/局限」「分步骤交付物」「待办清单」。群聊闲聊轮若照此输出
+        # 会跑偏成长篇正式文档。这里每轮后置纠偏成「角色化短消息」，但**条件化豁免**：
+        # 用户明确要 文档/分析/代码/任务产物，或被显式指派去做事（如 <agent_run_task>
+        # bg run 块要求「一次性写完整产物」）时，仍切回完整交付形态。
         body = (
             f"（请以「{guest_name}」的身份发言。只说你要说的内容，"
-            f"不要复述别人的话，不要加引号或前缀。）"
+            f"不要复述别人的话，不要加引号或前缀。\n"
+            f"这是群聊对话：默认用角色化的口语短消息回应，不要套用"
+            f"「结论/证据/局限」「分步骤交付物」「待办清单」等正式产出格式；"
+            f"只有当用户明确要求产出文档 / 分析 / 代码 / 任务产物，"
+            f"或你被显式指派去做事时，才切换到完整的工作交付形态。）"
         )
         return f"<speak_instruction>\n{body}\n</speak_instruction>"
