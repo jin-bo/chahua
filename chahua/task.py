@@ -44,24 +44,29 @@ ARTIFACT_CREATED_BY_GUEST = "guest"
 茶客直接写 ``./task/<name>`` 后由 ``Orchestrator._kick_detect_new_artifacts`` emit。
 "用户上传"对应值复用 :data:`MARKED_BY_USER`（同 wire 字面 "user"）。"""
 
-TASK_UNTITLED = "(无标题)"
-"""title 为空时的展示 fallback。与 ``app/renderer/events.js::TASK_UNTITLED`` 同源
-（JS 那份镜像 Python；新增标题策略两边同步）。"""
+TASK_UNTITLED = "(untitled)"
+"""title 为空时的展示 fallback。**P14 起 LLM-facing 英文**（只进 task 渲染 prompt +
+``task_tools`` ack，全回灌 LLM）。**有意与前端分叉**：``app/renderer/events.js::
+TASK_UNTITLED`` 保留用户中文 —— 二者不再镜像，改本常量不要顺手改 JS。"""
 
 TASK_STATUS_DISPLAY: dict[TaskStatus, str] = {
-    "open": "未开始",
-    "ready": "已就绪",
-    "doing": "进行中",
-    "blocked": "被阻塞",
-    "review": "评审中",
-    "done": "已完成",
-    "abandoned": "已放弃",
+    "open": "not started",
+    "ready": "ready",
+    "doing": "in progress",
+    "blocked": "blocked",
+    "review": "in review",
+    "done": "done",
+    "abandoned": "abandoned",
 }
-"""``TaskStatus`` → 中文 label。与 ``app/renderer/events.js::TASK_STATUS_OPTIONS`` 同源
-（JS 那份镜像 Python；本模块 Literal 顺序与 JS options 顺序一致）。
+"""``TaskStatus`` → display label。**P14 起 LLM-facing 英文**：只被 ``task_rendering``
+（渲进 ``<current_task status="...">`` + task block body）与 ``task_tools`` ack 消费，
+全回灌 LLM；``task_info`` envelope 下发的是**裸 status 枚举**（非本 label），前端按枚举
+渲自己的中文。**有意与前端分叉**：``app/renderer/events.js::TASK_STATUS_OPTIONS`` 保留
+用户中文 label，二者不再镜像。本模块 Literal 顺序与 JS options 顺序仍一致。
 
-新增 status 时：① 改本 dict；② 改 ``TaskStatus`` Literal；③ 改 JS 的 ``TASK_STATUS_OPTIONS``。
-缺哪一项不会启动失败，但 LLM prompt / UI 任一面会暴露原始 enum 字面值。"""
+新增 status 时：① 改本 dict；② 改 ``TaskStatus`` Literal；③ 改 JS 的 ``TASK_STATUS_OPTIONS``
+（前端那份用中文 label）。缺哪一项不会启动失败，但 LLM prompt / UI 任一面会暴露原始
+enum 字面值。"""
 
 
 # ── artifact 字段格式化 ──────────────────────────────────────────────────────

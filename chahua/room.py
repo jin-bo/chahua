@@ -261,19 +261,22 @@ class Room:
 def format_messages(
     messages: Iterable[Message], display_for: Mapping[str, str]
 ) -> str:
-    """渲染 ``<message>\\n<display_name> 说：<text>\\n</message>`` 块序列。
+    """渲染 ``<message>\\n<display_name>: <text>\\n</message>`` 块序列。
 
-    所有喂养 prompt（onboarding 末段原文 / 增量 / 打分 / 摘要）走同一格式 —— 茶客
-    人格卡（``personas/*.md``）里也明示 "X 说：…"格式（内部内容不变，外层多一层
-    ``<message>`` 包裹），所以**任何变更要同步检查 personas**。单点定义在这里，避免
-    4+ 处复制。
+    所有喂养 prompt（onboarding 末段原文 / 增量 / 打分 / 摘要）走同一格式。单点定义
+    在这里，避免 4+ 处复制。
+
+    P14：分隔符由原「X 说：」改成**语言无关的 ``{display}: {text}``** —— 冒号无语种，
+    省「说：」token 且不依赖 persona 描述特定语种格式。历史上本 docstring 与 INVARIANTS
+    曾假设 ``personas/*.md`` 明示「X 说：」格式，但内置卡无一描述该格式（纯防御性假设），
+    故分隔符走语言中性即可，**不依赖** persona 同步；用户 / 社区 persona 不迁移。
 
     外层 ``<message>`` 包是边界承重墙：消息 body 可能含 markdown HR（``---``）、H2
-    （``## xxx``）等结构化内容，单纯用 ``\\n`` 分隔会让"下一条 `X 说：` 起始"在视觉
-    与 tokenization 上都与"上一条 body 内的 markdown"难以区分。XML 包外层 + Markdown
+    （``## xxx``）等结构化内容，单纯用 ``\\n`` 分隔会让"下一条消息起始"在视觉与
+    tokenization 上都与"上一条 body 内的 markdown"难以区分。XML 包外层 + Markdown
     渲内层是茶话室的标准口径（CLAUDE.md 关键不变量）。
     """
     return "\n".join(
-        f"<message>\n{display_for.get(m.speaker_id, m.speaker_id)} 说：{m.text}\n</message>"
+        f"<message>\n{display_for.get(m.speaker_id, m.speaker_id)}: {m.text}\n</message>"
         for m in messages
     )

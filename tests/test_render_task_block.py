@@ -69,42 +69,45 @@ def test_full_block_all_fields_present():
         summary_tail=[_summary_span("- 老金说想做个茶话室")],
         compact=False,
     )
-    assert "标题：写 README" in body
-    assert "目标：" in body and "把 README 写完" in body
-    assert status_display == "进行中"
+    assert "Title: 写 README" in body
+    assert "Goal:" in body and "把 README 写完" in body
+    assert status_display == "in progress"
     # status 不再出现在 body 里——由调用方拼到 <current_task status="..."> 属性
     assert "状态：" not in body
-    assert "负责人：汪小姐" in body
-    assert "近期决策" in body and "用 Electron" in body
-    assert "当前产物" in body and "README.md" in body
-    # artifact label 强调 ./task/ 读路径 + 写走 task_write_artifact 工具
+    assert "Owner: 汪小姐" in body
+    assert "Recent decisions" in body and "用 Electron" in body
+    assert "Current artifacts:" in body and "README.md" in body
+    # artifact 指引强调 ./task/ 读路径 + 写走 task_write_artifact 工具（P14 精练后承重点）
     assert "./task/" in body
+    assert "read_file" in body
     assert "task_write_artifact" in body
-    assert "自动入任务" in body
-    assert "任务近期进展" in body and "老金说想做个茶话室" in body
+    assert "NOT write_file" in body
+    assert "Recent task progress:" in body and "老金说想做个茶话室" in body
 
 
 # ─── ② full vs compact 输出格式 ──────────────────────────────────────────────
 
 
 def test_compact_block_short_header():
-    task = _task()  # 默认 goal 非空 → 完整 3 行
+    task = _task()  # 默认 goal 非空 → header 2 行 + ./task/ 指引
     body, status_display = _render_task_block(task, [], [], [], compact=True)
     lines = body.split("\n")
-    assert len(lines) == 3
-    assert lines[0] == "标题：写 README"
-    assert lines[1] == "目标：把 README 写完"
-    # compact 文案告诉茶客 ./task/ 读 + 写走 task_write_artifact 工具
-    assert "./task/" in lines[2]
-    assert "task_write_artifact" in lines[2]
-    assert "自动入任务" in lines[2]
+    assert lines[0] == "Title: 写 README"
+    assert lines[1] == "Goal: 把 README 写完"
+    # compact 文案告诉茶客 ./task/ 读 + 写走 task_write_artifact 工具（P14 精练 2 行）
+    guidance = "\n".join(lines[2:])
+    assert "./task/" in guidance
+    assert "read_file" in guidance
+    assert "task_write_artifact" in guidance
+    assert "NOT write_file" in guidance
+    assert "summary + file ref" in guidance  # 概要 + 引用承重点
     # compact 不含 full 块的小标题
-    assert "近期决策" not in body
-    assert "当前产物" not in body
-    assert "任务近期进展" not in body
+    assert "Recent decisions" not in body
+    assert "Current artifacts:" not in body
+    assert "Recent task progress:" not in body
     assert "状态：" not in body
     # status_display 仍然返回，给调用方拼 XML 属性用
-    assert status_display == "未开始"
+    assert status_display == "not started"
 
 
 def test_full_block_no_artifacts_no_decisions_no_summary():
@@ -112,15 +115,15 @@ def test_full_block_no_artifacts_no_decisions_no_summary():
     # 但 full 模式无 artifact 时会渲一行 ./task/ 当前为空 + task_write_artifact 落盘指引
     task = _task(owner=None)
     body, _ = _render_task_block(task, [], [], [], compact=False)
-    assert "近期决策" not in body
-    assert "任务近期进展" not in body
-    assert "标题：写 README" in body
-    assert "目标：" in body
+    assert "Recent decisions" not in body
+    assert "Recent task progress:" not in body
+    assert "Title: 写 README" in body
+    assert "Goal:" in body
     # 不变量：full 模式始终告诉茶客 ./task/ + task_write_artifact 工具 + 当前为空
     assert "./task/" in body
+    assert "read_file" in body
     assert "task_write_artifact" in body
-    assert "当前为空" in body
-    assert "自动入任务" in body
+    assert "No artifacts yet" in body
 
 
 # ─── ③ owner=None 跳"负责人"行 ────────────────────────────────────────────────
@@ -129,9 +132,9 @@ def test_full_block_no_artifacts_no_decisions_no_summary():
 def test_full_block_owner_none_skips_owner_line():
     task = _task(owner=None, status="open")
     body, status_display = _render_task_block(task, [], [], [], compact=False)
-    assert status_display == "未开始"
+    assert status_display == "not started"
     assert "状态：" not in body
-    assert "负责人" not in body
+    assert "Owner" not in body
 
 
 def test_full_block_owner_user_renders_raw():
@@ -139,7 +142,7 @@ def test_full_block_owner_user_renders_raw():
     # name 应在调用方传 task 前替换 owner，不在本函数）。
     task = _task(owner="user")
     body, _ = _render_task_block(task, [], [], [], compact=False)
-    assert "负责人：user" in body
+    assert "Owner: user" in body
 
 
 # ─── ④ decisions / artifacts / summary tail 各自截断 ─────────────────────────
@@ -152,7 +155,7 @@ def test_decisions_truncated_to_5_keep_last():
     assert "决策3" in body  # 末 5 个：3,4,5,6,7
     assert "决策7" in body
     assert "决策2" not in body  # 第 3 条往前被砍
-    assert "近期决策（最近 5 条）" in body
+    assert "Recent decisions (last 5):" in body
 
 
 def test_artifacts_truncated_to_10_keep_first():
@@ -178,7 +181,7 @@ def test_summary_tail_truncated_to_3_keep_last():
 def test_compact_goal_multiline_first_line_only():
     task = _task(goal="第一行目标\n第二行细节\n第三行更多细节")
     body, _ = _render_task_block(task, [], [], [], compact=True)
-    assert "目标：第一行目标" in body
+    assert "Goal: 第一行目标" in body
     assert "第二行细节" not in body
     assert "第三行更多细节" not in body
 
@@ -186,8 +189,8 @@ def test_compact_goal_multiline_first_line_only():
 def test_compact_empty_goal_skips_goal_line():
     task = _task(goal="")
     body, _ = _render_task_block(task, [], [], [], compact=True)
-    assert "标题：写 README" in body
-    assert "目标：" not in body
+    assert "Title: 写 README" in body
+    assert "Goal:" not in body
     assert "./task/" in body
 
 
@@ -195,49 +198,40 @@ def test_compact_empty_goal_skips_goal_line():
 
 
 def test_compact_artifact_hint_is_concise():
-    """compact 路径每轮喂，文案极简 —— 软触发"你判断" + 专用工具名 + 边界提醒三句，
-    不含 full 的类型枚举 / 命名示例 / 落盘原因等长内容。
+    """compact 路径每轮喂，文案极简（P14 精练后 2 行祈使）——承重点：专用工具名 +
+    边界否定 + 概要引用；不含 full 才有的「持久化类型清单 / 命名示例」长内容。
     """
     body, _ = _render_task_block(_task(), [], [], [], compact=True)
-    # 软触发 + 落盘动作（指明专用工具名）+ 边界提醒
-    assert "你判断" in body  # 软触发（让 Agent 自主判断，不给硬阈值）
-    assert "task_write_artifact" in body  # 落盘动作（专用工具名，绕开 PathPolicy）
-    assert "聊天里只放一句概要" in body  # 边界提醒
-    # 极简：不含 full 才有的类型枚举 / 命名建议 / 为什么详细段
-    assert "评审意见" not in body  # 类型枚举留给 full（onboarding 看过即可）
-    assert "命名建议" not in body
-    assert "何时该落盘" not in body
-    assert "为什么" not in body  # full 路径才解释"为什么要落盘"
-    # 不再给字数硬阈值（让 Agent 自主判断）
-    assert "200 字" not in body
+    # 承重点：落盘动作（专用工具名，绕开 PathPolicy）+ 否定 write_file + 概要引用
+    assert "task_write_artifact" in body
+    assert "NOT write_file" in body
+    assert "summary + file ref" in body
+    # 极简：不含 full 才有的类型清单 / 命名示例
+    assert "reviews, designs" not in body  # 持久化类型清单留给 full
+    assert "Name with role" not in body  # 命名示例留给 full
 
 
-def test_full_empty_artifact_hint_has_four_sections():
-    """full 路径无 artifact 时给详细版：触发 / 命名 / 为什么 四段，鼓励 onboarding
-    阶段就建立"长内容落盘"习惯。触发条件用软描述"你判断"，类型枚举只作锚点。
+def test_full_detailed_guidance_has_persist_and_naming():
+    """full 路径给详细版（P14 精练后）：承重点除 compact 的三点外，多「持久化类型清单」
+    与「命名示例」，鼓励 onboarding 阶段就建立长内容落盘习惯。
     """
     body, _ = _render_task_block(_task(owner=None), [], [], [], compact=False)
-    # 四段标题（markdown 加粗）
-    assert "**何时该落盘**" in body
-    assert "**命名建议**" in body
-    assert "**为什么**" in body
-    # 软触发（不再给"超过 200 字"硬阈值——茶客自主判断）
-    assert "你判断" in body
-    assert "200 字" not in body
-    # 类型枚举作为锚点示例（不是硬规则）
-    assert "评审意见" in body or "决策清单" in body or "报告草稿" in body
-    # 命名示例（含角色 placeholder + 版本号）
-    assert "你的名字" in body
-    # 原有不变量（向后兼容老断言）仍在
+    # full 专属：持久化类型清单 + 命名示例（含角色 placeholder + 版本号）
+    assert "Persist any reusable output" in body
+    assert "reviews, designs" in body
+    assert "Name with role + version" in body
+    assert "<you>" in body
+    # 承重点仍在
     assert "./task/" in body
-    assert "task_write_artifact" in body  # 专用工具名替代旧"可读写"措辞
-    assert "当前为空" in body
-    assert "自动入任务" in body  # 包含在"自动入任务产物清单"里
+    assert "read_file" in body
+    assert "task_write_artifact" in body
+    assert "NOT write_file" in body
+    assert "No artifacts yet" in body
 
 
-def test_full_with_artifacts_includes_when_to_save_again_hint():
-    """full 路径已经有 artifact 时，提醒"何时该再落盘 + 命名习惯"，避免茶客把后续
-    报告又只塞回聊天。同样用"你判断"软触发，不给字数硬阈值。
+def test_full_with_artifacts_keeps_guidance():
+    """full 路径已经有 artifact 时，产物清单 + 落盘指引同时在 —— 避免茶客把后续
+    报告又只塞回聊天。
     """
     body, _ = _render_task_block(
         _task(),
@@ -247,36 +241,31 @@ def test_full_with_artifacts_includes_when_to_save_again_hint():
         compact=False,
     )
     # 已有产物清单照常渲染
-    assert "当前产物" in body
+    assert "Current artifacts:" in body
     assert "水文献-评审-v1.md" in body
-    # 升级文案：催"再落盘"
-    assert "再落盘" in body or "何时该再落盘" in body
-    # 软触发（不再 "200 字"）
-    assert "你判断" in body
-    assert "200 字" not in body
-    assert "命名建议" in body
-    # 边界提醒仍在
-    assert "./share/" in body
+    # 落盘指引（承重点 + 命名示例）仍在
+    assert "task_write_artifact" in body
+    assert "Persist any reusable output" in body
+    assert "Name with role + version" in body
 
 
-def test_full_block_significantly_longer_than_compact():
-    """compact 极简 vs full 详细的分层验证 —— 同 task 同上下文下，full 显著长于 compact。
+def test_full_block_longer_than_compact():
+    """compact 极简 vs full 详细的分层验证 —— P14 精练后两者都收敛，但 full 仍比
+    compact 长（full 多「持久化类型清单 + 命名示例」，with-artifacts 再多产物清单）。
 
-    阈值：
-    - full empty ≥ compact 的 2×（onboarding 空产物，最积极催落盘）。
-    - full with artifacts ≥ compact 的 1.5×（已有产物作为视觉证据，催"再落盘"文案略短）。
-    这是文案分层的硬底线 —— 防止后续维护时把 full 的内容回流到 compact 让每轮都涨 token，
-    或反过来把 full 削得跟 compact 没差。
+    这是文案分层的底线 —— 防止后续维护把 full 的内容回流到 compact 让每轮都涨 token，
+    或反过来把 full 削得跟 compact 没差。精练后不再用 2×/1.5× 硬倍数（已失效），改为
+    严格「full > compact」。
     """
     compact_body, _ = _render_task_block(_task(), [], [], [], compact=True)
     full_empty_body, _ = _render_task_block(_task(owner=None), [], [], [], compact=False)
     full_with_artifacts_body, _ = _render_task_block(
         _task(), [], [_artifact("a.md")], [], compact=False,
     )
-    assert len(full_empty_body) >= 2 * len(compact_body), (
-        f"full empty ({len(full_empty_body)}) 应至少是 compact ({len(compact_body)}) 的 2×"
+    assert len(full_empty_body) > len(compact_body), (
+        f"full empty ({len(full_empty_body)}) 应长于 compact ({len(compact_body)})"
     )
-    assert len(full_with_artifacts_body) >= 1.5 * len(compact_body), (
+    assert len(full_with_artifacts_body) > len(compact_body), (
         f"full with artifacts ({len(full_with_artifacts_body)}) "
-        f"应至少是 compact ({len(compact_body)}) 的 1.5×"
+        f"应长于 compact ({len(compact_body)})"
     )

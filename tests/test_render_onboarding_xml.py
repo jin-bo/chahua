@@ -84,7 +84,7 @@ def test_onboarding_all_blocks_present_and_ordered(tmp_path: Path):
     # 6 个块的开标签都在
     assert '<room name="t">' in ctx
     assert '<user_persona display_name="老金">' in ctx
-    assert '<current_task status="未开始">' in ctx
+    assert '<current_task status="not started">' in ctx
     assert "<order_hint>" in ctx
     assert "<recent_messages " in ctx
     assert "<speak_instruction>" in ctx
@@ -107,8 +107,8 @@ def test_onboarding_all_blocks_present_and_ordered(tmp_path: Path):
         < ctx.index('<speak_instruction>')
     )
 
-    # 在场行用"（人类用户）"后缀标注用户
-    assert "老金（人类用户）" in ctx
+    # 在场行用 "(human user)" 后缀标注用户
+    assert "老金 (human user)" in ctx
     # USER.md 内部的 H2 在 prompt 里出现（被 <user_persona> 包住，与外层结构不冲突）
     assert "## 身份" in ctx
     assert "## 忌讳" in ctx
@@ -155,11 +155,11 @@ def test_onboarding_minimal_room_block(tmp_path: Path):
     # <room> 标签仍在（name 永远有）
     assert '<room name="t">' in ctx
     assert "</room>" in ctx
-    # 但 "话题：" / "规则：" 行不出现
-    assert "话题：" not in ctx
-    assert "规则：" not in ctx
+    # 但 "Topic:" / "Rules:" 行不出现
+    assert "Topic:" not in ctx
+    assert "Rules:" not in ctx
     # 在场行仍在
-    assert "在场：" in ctx
+    assert "Present:" in ctx
 
 
 # ─── ⑤ incremental 路径 → ``<room_update>`` + 可选 task + speak_instruction ──
@@ -181,8 +181,8 @@ def test_incremental_xml_structure(tmp_path: Path):
     assert "（房间·t·继续）" not in ctx
 
     # task 块（compact）在 + order_hint 紧跟其后
-    assert '<current_task status="未开始">' in ctx
-    assert "标题：审稿" in ctx
+    assert '<current_task status="not started">' in ctx
+    assert "Title: 审稿" in ctx
     assert "<order_hint>" in ctx
     assert "</order_hint>" in ctx
     # speak_instruction 在
@@ -215,6 +215,58 @@ def test_incremental_no_task_block(tmp_path: Path):
     assert "<speak_instruction>" in ctx
 
 
+# ─── P14：<speak_instruction> body 文案（英文化 + recall + 语言锚点）─────────────
+
+
+def _extract_speak_instruction(ctx: str) -> str:
+    """从 prompt 里抠出 ``<speak_instruction>...</speak_instruction>`` 块内文。"""
+    start = ctx.index("<speak_instruction>")
+    end = ctx.index("</speak_instruction>")
+    return ctx[start:end]
+
+
+def test_speak_instruction_body_is_english_with_recall_and_language_anchor(tmp_path: Path):
+    """P14：``<speak_instruction>`` body 英文化，含身份 / recall / 语言锚点关键句。
+
+    现状测试只断言标签存在 + 顺序，从不校验 body 文案 —— 这是新增 body 断言，
+    否则文案改动在零回归覆盖下落地。
+    """
+    orch, _, _ = _build_orch(tmp_path)
+    ctx = orch._build_context_for("魏理论", task_id=None)
+    block = _extract_speak_instruction(ctx)
+    # ① 身份指令（插值 guest_name）
+    assert 'Speak as "魏理论"' in block
+    # ② recall 段落：回顾自身历史 tool 结果
+    assert "review your own conversation history" in block
+    assert "tool-call results" in block
+    # recall 兜底：截断 / 缺失才回 source 重读 ./share/
+    assert "./share/" in block
+    # ③ 语言锚点：输出语言随对话
+    assert "reply in the same language" in block
+
+
+def test_speak_instruction_recall_present_in_both_states(tmp_path: Path):
+    """P14：recall 段落对 onboarding 与 incremental 两态都生效（改一处两态生效）。"""
+    # onboarding 态
+    orch_a, _, _ = _build_orch(tmp_path)
+    ctx_onboarding = orch_a._build_context_for("魏理论", task_id=None)
+    assert "<room name=" in ctx_onboarding  # 确认走 onboarding
+    block_onboarding = _extract_speak_instruction(ctx_onboarding)
+    assert "review your own conversation history" in block_onboarding
+    assert "reply in the same language" in block_onboarding
+
+    # incremental 态
+    orch_b, _, room = _build_orch(tmp_path)
+    room.append(USER_SPEAKER_ID, "x")
+    orch_b.cursor.set("魏理论", room.latest_seq)
+    room.append(USER_SPEAKER_ID, "y")
+    ctx_incremental = orch_b._build_context_for("魏理论", task_id=None)
+    assert "<room_update name=" in ctx_incremental  # 确认走 incremental
+    block_incremental = _extract_speak_instruction(ctx_incremental)
+    assert "review your own conversation history" in block_incremental
+    assert "reply in the same language" in block_incremental
+
+
 def test_user_persona_intro_uses_display_name_not_generic_referent(tmp_path: Path):
     """``<user_persona>`` 介绍语应称呼具体 display_name，而非旧的 "该参与者" 占位词。
 
@@ -226,8 +278,8 @@ def test_user_persona_intro_uses_display_name_not_generic_referent(tmp_path: Pat
     ctx = orch._build_context_for("魏理论", task_id=None)
     # 旧措辞已撤
     assert "该参与者" not in ctx
-    # 新措辞含 display_name
-    assert "以下是 老金 关于自己的说明：" in ctx
+    # 新措辞含 display_name（P14 英文化）
+    assert "Here is what 老金 says about themselves:" in ctx
 
 
 def test_order_hint_content_references_current_task(tmp_path: Path):
@@ -246,9 +298,9 @@ def test_order_hint_content_references_current_task(tmp_path: Path):
     # ① 标签名一致：hint 里引用的 <current_task> 必须在 prompt 中真实存在
     assert "<order_hint>" in ctx
     assert "<current_task" in ctx
-    # ② 行为指令：让位句关键词
-    assert "让位" in ctx
-    assert "完整发言" in ctx
+    # ② 行为指令：让位句关键词（P14 英文化）
+    assert "Yield" in ctx
+    assert "Speak in full" in ctx
     # ③ 位置：紧贴 </current_task>，在 <speak_instruction> 之前
     assert ctx.index("</current_task>") < ctx.index("<order_hint>")
     assert ctx.index("</order_hint>") < ctx.index("<speak_instruction>")
@@ -275,10 +327,10 @@ def test_recent_messages_wraps_each_in_message_xml_tag(tmp_path: Path):
     # 3 条 message → 3 对开闭标签
     assert ctx.count("<message>") == 3
     assert ctx.count("</message>") == 3
-    # 内层 "X 说：<text>" 格式不变（personas 描述仍准确）
-    assert "老金 说：第一条" in ctx
-    assert "魏理论 说：第二条" in ctx
-    assert "贾数据 说：第三条" in ctx
+    # 内层 "X: <text>" 格式（P14：语言无关分隔符）
+    assert "老金: 第一条" in ctx
+    assert "魏理论: 第二条" in ctx
+    assert "贾数据: 第三条" in ctx
     # 三条按顺序出现
     assert (
         ctx.index("第一条")

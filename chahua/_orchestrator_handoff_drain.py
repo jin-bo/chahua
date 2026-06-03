@@ -386,7 +386,7 @@ class HandoffDrainOps:
         message_xml = format_messages([msg], self.orch._display_map())
         return (
             "<review_target>\n"
-            "请你审阅下面这条发言：\n\n"
+            "Review the message below:\n\n"
             f"{message_xml}\n\n"
             f"{_REVIEW_INSTRUCTION}\n"
             "</review_target>"
@@ -403,12 +403,13 @@ class HandoffDrainOps:
         保证 ``<panel_context>`` 列的是**存活** panelist（codex review P2）。
         """
         dmap = self.orch._display_map()
-        names = "、".join(dmap.get(t, t) for t in panelists)
+        names = ", ".join(dmap.get(t, t) for t in panelists)
         return (
             "<panel_context>\n"
-            f"本轮是一次圆桌平行讨论，参与的茶客是：{names}。\n"
-            "请你独立给出自己的观点，不必附和、也不必复述其他茶客已经说过的内容；\n"
-            "如果你与前面发言的茶客看法不同，直接说出分歧。这是一次平行表态，"
-            "不是接龙。\n"
+            f"This is a round-table parallel discussion. Participants: {names}.\n"
+            "Give your own independent view — do NOT echo or restate what other "
+            "guests already said; if you disagree with an earlier speaker, say so "
+            "directly. This is a parallel statement, not a relay.\n"
+            "Always reply in the same language as the conversation (default: Chinese).\n"
             "</panel_context>"
         )

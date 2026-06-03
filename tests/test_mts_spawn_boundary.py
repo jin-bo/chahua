@@ -19,7 +19,7 @@ from typing import Optional
 
 import pytest
 
-from chahua.agent_run import AGENT_RUN_ISSUED_BY_AGENT
+from chahua.agent_run import AGENT_RUN_ERR_ROOM_CAP, AGENT_RUN_ISSUED_BY_AGENT
 from chahua.context_renderer import render_managed_session_block
 from chahua.events import (
     ChahuaEnvelope,
@@ -321,7 +321,7 @@ async def test_spawn_still_counts_against_max_agent_runs_per_room() -> None:
         task_id=None, source_guest="G0",
     )
     assert run_id is None
-    assert err is not None and "已达上限" in err
+    assert err == AGENT_RUN_ERR_ROOM_CAP  # P14：源头返无参数原因码
 
     await _drain(rt)
 
@@ -334,26 +334,26 @@ def test_managed_session_block_mentions_spawn_agent_runs() -> None:
     用法 + 「别用 propose_panel 并发」纠偏。"""
     block = render_managed_session_block("Carol", 5)
     assert "spawn_agent_runs" in block
-    assert "并发" in block
+    assert "parallel" in block  # P14 英文化
     # 反向：不要把 propose_panel 当并发工具用。
     assert "propose_panel" in block
-    assert "panel 仍是串行" in block
+    assert "panel drains serially" in block
     # XML 边界 + manager 转义保留。
     assert "<managed_session" in block and "</managed_session>" in block
     assert 'manager="Carol"' in block
     # remaining_budget 仍显式打出（与既有断言口径一致，让前端 / LLM 都能直读）。
     assert 'remaining_budget="5"' in block
+    # P14：功能块也带语言锚点（指令英文、输出仍随对话）。
+    assert "reply in the same language" in block
 
 
 def test_managed_session_block_allows_dormant_no_force_propose() -> None:
     """P8.4 §5：``<managed_session>`` 块明确告知管理者「没下一步就讲完就行」，
     不再为维持会话硬派活；且 MTS 不因这一轮没派活而结束（进入待机）。"""
     block = render_managed_session_block("Maya", 3)
-    # 「没下一步直接讲完」软触发文案 —— 抓两个特征词钉锁，避免过度依赖具体措辞。
-    assert "没有可派的下一步" in block or "没下一步" in block
-    assert "硬派活" in block or "硬 propose" in block
-    # 明确告知 MTS 进入待机、不因此结束。
-    assert "待机" in block
-    # 反向钉锁：不能出现「不再派活时托管会话自动结束」一类 P8.3 旧文案。
-    assert "不再派活时托管会话自动结束" not in block
-    assert "你这一轮不再派活时" not in block
+    # 「没下一步直接讲完」软触发文案 —— 抓特征词钉锁，避免过度依赖具体措辞（P14 英文化）。
+    assert "No next step" in block
+    assert "Just finish your turn" in block
+    # 明确告知 MTS 进入待机、不因此结束（"does NOT end" 是 P8.4 语义，正向钉死即可
+    # 反推旧 P8.3「没派活就结束」语义不复存在）。
+    assert "idles" in block and "does NOT end" in block

@@ -31,7 +31,15 @@ from typing import TYPE_CHECKING
 
 import logging
 
-from .agent_run import AGENT_RUN_ISSUED_BY_USER
+from .agent_run import (
+    AGENT_RUN_ERR_MTS_MANAGER,
+    AGENT_RUN_ERR_ROOM_CAP,
+    AGENT_RUN_ERR_TARGET_ABSENT,
+    AGENT_RUN_ERR_TARGET_BUSY,
+    AGENT_RUN_ERR_TASK_CLOSED,
+    AGENT_RUN_ERR_TASK_NOT_FOUND,
+    AGENT_RUN_ISSUED_BY_USER,
+)
 from ._server_helpers import require_str as _require_str
 from .events import (
     EnvelopeSink,
@@ -59,6 +67,32 @@ _AGENT_RUN_CANCEL_ALLOWED = frozenset({"type", "run_id"})
 # 每房间 bg run 数硬上限。docs §「Phases」P11.2：``max_agent_runs_per_room=4`` ——
 # C8 inbound 与 C11 ``spawn_agent_run(s)`` 工具共用同一上限。
 MAX_AGENT_RUNS_PER_ROOM = 4
+
+
+def _agent_run_err_zh(code: str, *, target: str, task_id: object) -> str:
+    """把 ``_start_agent_run`` 的无参数原因码（``agent_run.AgentRunError``）本地化成
+    **中文** NOTICE 文案。
+
+    P14：原 ``_start_agent_run`` 直接返中文句、inbound 原样塞 NOTICE；现源头改返无参数
+    原因码，这里复原与改前**逐字一致**的中文（NOTICE 用户可见、P14 范围外保持中文）。
+    工具侧（``agent_run_tools``）走平行的英文 render —— 同一原因码两语言由构造保证同步。
+    """
+    if code == AGENT_RUN_ERR_TARGET_ABSENT:
+        return f"target={target!r} 不在场"
+    if code == AGENT_RUN_ERR_TASK_NOT_FOUND:
+        return f"task_id={task_id!r} 不存在"
+    if code == AGENT_RUN_ERR_TASK_CLOSED:
+        return f"task_id={task_id!r} 已关闭，无法绑定 bg run"
+    if code == AGENT_RUN_ERR_TARGET_BUSY:
+        return f"target={target!r} 正忙（前台 / handoff / 已有 bg run），稍后再试"
+    if code == AGENT_RUN_ERR_ROOM_CAP:
+        return f"房间 bg run 数已达上限 {MAX_AGENT_RUNS_PER_ROOM}，稍后再试"
+    if code == AGENT_RUN_ERR_MTS_MANAGER:
+        return (
+            f"target={target!r} 是当前 MTS 管理者，bg run 指向管理者会污染托管"
+            f"队列（intercept hook 自动入队），请改用 @{target} 或先 stop MTS"
+        )
+    return str(code)  # 未知码兜底：原样回显（不该发生）
 
 
 class AgentRunHandlers:
@@ -128,7 +162,10 @@ class AgentRunHandlers:
         if err is not None:
             srv._emit_notice(
                 sink, level=NOTICE_LEVEL_ERROR,
-                text=f"{INBOUND_AGENT_RUN_START}: {err}",
+                text=(
+                    f"{INBOUND_AGENT_RUN_START}: "
+                    f"{_agent_run_err_zh(err, target=target, task_id=task_id)}"
+                ),
             )
             return
 

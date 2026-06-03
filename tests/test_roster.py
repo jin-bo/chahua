@@ -75,16 +75,16 @@ def _build_orch(*, roster=None, guests=("范总", "汪小姐")) -> Orchestrator:
 def test_room_block_renders_summary_roster():
     orch = _build_orch(roster={"范总": "擅长成本测算"})
     ctx = orch._build_context_for("范总", task_id=None)
-    assert "在场：\n-" in ctx            # 有摘要 → bullet 花名册
-    assert "- 范总 —— 擅长成本测算" in ctx
+    assert "Present:\n-" in ctx            # 有摘要 → bullet 花名册
+    assert "- 范总 — 擅长成本测算" in ctx
     assert "- 汪小姐" in ctx            # 无摘要的茶客只列名
-    assert "- 老金（人类用户）" in ctx   # 用户无摘要、不带 ——
+    assert "- 老金 (human user)" in ctx   # 用户无摘要、不带 —
 
 
 def test_room_block_no_summary_falls_back_to_comma():
     orch = _build_orch(roster=None)
     ctx = orch._build_context_for("范总", task_id=None)
-    assert "在场：老金（人类用户）, 范总, 汪小姐" in ctx
+    assert "Present: 老金 (human user), 范总, 汪小姐" in ctx
 
 
 def test_room_summary_truncated():

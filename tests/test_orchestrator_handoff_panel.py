@@ -118,8 +118,10 @@ async def test_panelist_prompt_has_panel_context_listing_all_panelists() -> None
     for name in ("C", "D", "E"):
         ctx = orch._guests[name].guest.last_ctx or ""
         assert "<panel_context>" in ctx and "</panel_context>" in ctx
-        assert "C、D、E" in ctx
+        assert "C, D, E" in ctx
         assert "<panel_summary_request>" not in ctx
+        # P14：panel 块带语言锚点。
+        assert "reply in the same language" in ctx
 
 
 async def test_summarizer_is_last_and_gets_summary_block() -> None:
@@ -378,10 +380,12 @@ async def test_removed_panelist_not_listed_in_panel_context() -> None:
     for name in ("C", "D"):
         ctx = orch._guests[name].guest.last_ctx or ""
         assert "<panel_context>" in ctx
-        assert "C、D" in ctx
+        # P14：roster 与 panel 现都用 ", " 分隔，"C, D, E" 会与 <room> 在场行碰撞，
+        # 故成员名单断言必须 scope 到 <panel_context> 内的 "Participants: ..." 行。
+        members = ctx.split("Participants: ")[1].split(".")[0]
+        assert "C, D" in members
         # 被删的 E 不能出现在圆桌成员名单里。
-        assert "C、D、E" not in ctx
-        assert "E" not in ctx.split("参与的茶客是：")[1].split("。")[0]
+        assert "E" not in members
 
 
 def test_handoff_cost() -> None:

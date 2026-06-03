@@ -65,16 +65,15 @@ def test_onboarding_with_task_id_includes_full_block(tmp_path: Path):
     ctx = orch._build_context_for("A", task_id=task.id)
     assert '<room name="t">' in ctx
     assert "</room>" in ctx
-    assert '<current_task status="未开始">' in ctx
+    assert '<current_task status="not started">' in ctx
     assert "</current_task>" in ctx
-    assert "标题：写 README" in ctx
-    assert "目标：" in ctx and "把 README 写完" in ctx
-    assert "负责人：A" in ctx
+    assert "Title: 写 README" in ctx
+    assert "Goal:" in ctx and "把 README 写完" in ctx
+    assert "Owner: A" in ctx
     # full 模式无 artifact 时告诉茶客 ./task/ + 用 task_write_artifact 工具落盘
     assert "./task/" in ctx
     assert "task_write_artifact" in ctx
-    assert "当前为空" in ctx
-    assert "自动入任务" in ctx
+    assert "No artifacts yet" in ctx
 
 
 # ─── ② 同任务 + incremental 路径 → prompt 含 compact 块 ──────────────────────
@@ -90,15 +89,15 @@ def test_incremental_with_task_id_includes_compact_block(tmp_path: Path):
     ctx = orch._build_context_for("A", task_id=task.id)
     assert '<room_update name="t">' in ctx
     assert "</room_update>" in ctx
-    assert '<current_task status="未开始">' in ctx
-    assert "标题：写 README" in ctx
-    assert "目标：把 README 写完" in ctx
-    # compact 模式告诉茶客 ./task/ + 用 task_write_artifact 工具 + 自动入任务
+    assert '<current_task status="not started">' in ctx
+    assert "Title: 写 README" in ctx
+    assert "Goal: 把 README 写完" in ctx
+    # compact 模式告诉茶客 ./task/ + 用 task_write_artifact 工具
     assert "./task/" in ctx
     assert "task_write_artifact" in ctx
-    assert "自动入任务" in ctx
+    assert "NOT write_file" in ctx
     # compact 不带 full 块小标题
-    assert "近期决策" not in ctx
+    assert "Recent decisions" not in ctx
     # status 走 XML 属性，body 里不再含"状态："行
     assert "状态：" not in ctx
 
@@ -172,7 +171,7 @@ def test_snapshot_task_id_isolation(tmp_path: Path):
     # store 当前 active 是 t2（open_task 自动 set_active），但我们传 t1.id snapshot
     assert store.active_task_id == t2.id
     ctx = orch._build_context_for("A", task_id=t1.id)
-    assert "标题：任务一" in ctx
+    assert "Title: 任务一" in ctx
     assert "任务二" not in ctx
     assert "目标一" in ctx
     assert "目标二" not in ctx
@@ -196,7 +195,7 @@ def test_room_summaries_preserved_in_onboarding(tmp_path: Path):
     assert "老金在群里招呼了一声" in ctx
     assert "A 说今天聊 README" in ctx
     # task 块也在
-    assert "标题：写 README" in ctx
+    assert "Title: 写 README" in ctx
     # 顺序：<room_summary> 在 <current_task> 之前
     assert ctx.index("<room_summary>") < ctx.index("<current_task")
 

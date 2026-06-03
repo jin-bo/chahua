@@ -38,6 +38,12 @@ import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .agent_run import (
+    AGENT_RUN_ERR_MTS_MANAGER,
+    AGENT_RUN_ERR_ROOM_CAP,
+    AGENT_RUN_ERR_TARGET_ABSENT,
+    AGENT_RUN_ERR_TARGET_BUSY,
+    AGENT_RUN_ERR_TASK_CLOSED,
+    AGENT_RUN_ERR_TASK_NOT_FOUND,
     AGENT_RUN_ISSUED_BY_AGENT,
     AgentRun,
     IssuedBy,
@@ -82,8 +88,9 @@ class AgentRunOps:
         """工厂：返回绑定 ``runtime`` 的 ``start_agent_run`` 回调。
 
         回调签名 ``(target, instruction, task_id, source_guest) -> (run_id, error)``：
-        成功返 ``(run_id, None)``；任一校验拒返 ``(None, error_msg)`` —— 工具侧把
-        error_msg 拼回 ``Error: ...`` 字符串作为 tool result，inbound 侧走 NOTICE error。
+        成功返 ``(run_id, None)``；任一校验拒返 ``(None, err_code)`` —— ``err_code`` 是
+        ``agent_run.AgentRunError`` 无参数原因码（P14），工具侧本地化成英文 ``Error: ...``
+        作为 tool result，inbound 侧本地化成中文 NOTICE error。
 
         ``issued_by`` 在工具路径恒 ``"agent"``（spawn 工具是茶客调用产物）；inbound
         路径不经此回调、直接调 ``_start_agent_run`` 传 ``"user"``。
@@ -139,8 +146,9 @@ class AgentRunOps:
 
         校验顺序与 ``server_inbound_agent_run`` 一致：① target 在场 → ② task_id
         若给须未关闭 → ③ ``guest_busy(target) == False`` → ④ 房间 bg run 数未到
-        ``MAX_AGENT_RUNS_PER_ROOM`` 上限。返 ``(None, err)`` 任一校验拒，调用方
-        负责把 ``err`` 翻成 NOTICE / tool result。
+        ``MAX_AGENT_RUNS_PER_ROOM`` 上限。返 ``(None, err_code)`` 任一校验拒（P14：
+        ``err_code`` 是 ``agent_run.AgentRunError`` 无参数原因码），调用方负责本地化
+        成 NOTICE（中文）/ tool result（英文）。
 
         成功路径同步登记 ``agent_runs[run_id]=run`` + ``active_guest_names.add(target)``
         **先于** ``asyncio.create_task`` —— 让同 target 的第二条请求在 wrapper 进
@@ -150,9 +158,11 @@ class AgentRunOps:
         ``_emit_agent_run_terminal`` 同口径）；前端 ``room_info.background_runs``
         快照 + 实时 envelope 两条线一致。
         """
+        # P14：校验失败返**无参数原因码**，由调用方按消费方语言本地化（inbound→中文
+        # NOTICE / tool→英文 Error），见 ``agent_run.AgentRunError`` 注释。
         # 1. target 在场。
         if target not in runtime.session.orchestrator.guest_names:
-            return None, f"target={target!r} 不在场"
+            return None, AGENT_RUN_ERR_TARGET_ABSENT
 
         # 2. task_id 若给须存在且未关闭。变量名 ``task_obj`` 避免与下方
         #    ``asyncio.create_task`` 返回值 ``task`` 冲突（同函数内同名 shadow 是
@@ -160,23 +170,17 @@ class AgentRunOps:
         if task_id is not None:
             task_obj = runtime.session.tasks_store.get_task(task_id)
             if task_obj is None:
-                return None, f"task_id={task_id!r} 不存在"
+                return None, AGENT_RUN_ERR_TASK_NOT_FOUND
             if task_obj.status in CLOSED_STATUSES:
-                return None, (
-                    f"task_id={task_id!r} 已关闭，无法绑定 bg run"
-                )
+                return None, AGENT_RUN_ERR_TASK_CLOSED
 
         # 3. target 不 busy（含前台 / handoff / 已有 bg run）。
         if runtime.guest_busy(target):
-            return None, (
-                f"target={target!r} 正忙（前台 / handoff / 已有 bg run），稍后再试"
-            )
+            return None, AGENT_RUN_ERR_TARGET_BUSY
 
         # 4. 房间 bg run 数上限。
         if len(runtime.agent_runs) >= MAX_AGENT_RUNS_PER_ROOM:
-            return None, (
-                f"房间 bg run 数已达上限 {MAX_AGENT_RUNS_PER_ROOM}，稍后再试"
-            )
+            return None, AGENT_RUN_ERR_ROOM_CAP
 
         # P11.2.X 快照 MTS 状态：读 ``managed_session`` 公开 @property（code-review F9
         # 改：原 ``getattr(orch, '_managed_session', None)`` 默认值会静默吞 @property
@@ -193,10 +197,7 @@ class AgentRunOps:
             ms is not None
             and target == ms.manager_guest
         ):
-            return None, (
-                f"target={target!r} 是当前 MTS 管理者，bg run 指向管理者会污染托管"
-                f"队列（intercept hook 自动入队），请改用 @{target} 或先 stop MTS"
-            )
+            return None, AGENT_RUN_ERR_MTS_MANAGER
 
         # ── 校验通过：登记 + 启动 wrapper + emit started ──
         # P11.2.X：spawn 时刻 MTS 快照 —— 当且仅当 MTS 活、且 source_guest 就是当前

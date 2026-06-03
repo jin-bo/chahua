@@ -79,16 +79,16 @@ def _format_artifacts_md(artifacts: list[dict]) -> str:
     """与 :func:`chahua.orchestrator._render_task_block` 的 artifact 段同格式：
     ``- {name} ({size}, {mtime})``。空清单 / 超 cap 时分别 fallback。"""
     if not artifacts:
-        return "（当前任务暂无产物）"
+        return "(no artifacts in the current task yet)"
     head = artifacts[:_LIST_ARTIFACTS_CAP]
-    lines = ["当前任务产物清单（不嵌内容，按需 ls / cat 走 ``./task/`` 读取）："]
+    lines = ["Current task artifacts (no inline content; read via ./task/ with read_file):"]
     for a in head:
         lines.append(
             f"- {a['name']} "
             f"({format_artifact_size(a['size'])}, {format_artifact_mtime(a['mtime_ms'])})"
         )
     if len(artifacts) > _LIST_ARTIFACTS_CAP:
-        lines.append(f"…（另有 {len(artifacts) - _LIST_ARTIFACTS_CAP} 个未列）")
+        lines.append(f"… ({len(artifacts) - _LIST_ARTIFACTS_CAP} more not listed)")
     return "\n".join(lines)
 
 
@@ -111,9 +111,10 @@ class TaskListArtifactsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "查看当前任务的产物文件清单（不嵌内容，只列文件名 + 大小）。"
-            "需要读取某个产物的真实内容时，用 read_file 走 ./task/<name>。"
-            "当前无活跃任务 / 任务已被删除时返提示字符串。"
+            "List the current task's artifact files (names + sizes, no inline "
+            "content). To read an artifact's actual content, use read_file on "
+            "./task/<name>. Returns a notice string when there is no active task "
+            "or the task was deleted."
         )
 
     @property
@@ -127,10 +128,10 @@ class TaskListArtifactsTool(Tool):
     def execute(self, **kwargs: Any) -> str:
         task_id = self._transport.current_task_id
         if task_id is None:
-            return "当前无活跃任务，无产物可列。"
+            return "No active task; no artifacts to list."
         task = self._tasks_store.get_task(task_id)
         if task is None:
-            return f"任务 {task_id} 不存在（可能已被删除）。"
+            return f"Task {task_id} does not exist (may have been deleted)."
         return _format_artifacts_md(self._tasks_store.list_artifacts(task_id))
 
 
@@ -166,7 +167,10 @@ class _TaskProposeBase(Tool):
                 "payload": payload,
             },
         )
-        return f"已提议「{ack_label[:_PROPOSE_ACK_TRUNC]}」，等用户在 UI 采纳后入库。"
+        return (
+            f"Proposed \"{ack_label[:_PROPOSE_ACK_TRUNC]}\"; "
+            "committed only after the user accepts in the UI."
+        )
 
 
 class TaskProposeDecisionTool(_TaskProposeBase):
@@ -179,10 +183,11 @@ class TaskProposeDecisionTool(_TaskProposeBase):
     @property
     def description(self) -> str:
         return (
-            "提议一条任务决策。提议 ≠ 入库 —— UI 渲染成采纳 / 忽略卡片；"
-            "用户点采纳后才走既有 add_decision 入 decisions.jsonl。"
-            "summary 一句话（≤ 200 字）；supporting_message_ids 指向决策依据的"
-            "transcript 消息 id（可选）。"
+            "Propose a task decision. Proposing is not committing — the UI renders "
+            "an accept / dismiss card; only after the user accepts does it go through "
+            "the existing add_decision into decisions.jsonl. summary is one sentence "
+            "(≤ 200 chars); supporting_message_ids point to the transcript message "
+            "ids backing the decision (optional)."
         )
 
     @property
@@ -192,12 +197,12 @@ class TaskProposeDecisionTool(_TaskProposeBase):
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "决策摘要（≤ 200 字一句话）。",
+                    "description": "Decision summary (one sentence, ≤ 200 chars).",
                 },
                 "supporting_message_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "决策依据的消息 id 列表（可选）。",
+                    "description": "List of message ids backing the decision (optional).",
                 },
             },
             "required": ["summary"],
@@ -227,8 +232,10 @@ class TaskProposeOpenTool(_TaskProposeBase):
     @property
     def description(self) -> str:
         return (
-            "提议开一个新任务。提议 ≠ 入库 —— UI 渲染成采纳 / 忽略卡片；"
-            "用户点采纳后才走既有 open_task。title ≤ 60 字；goal 多行 markdown。"
+            "Propose opening a new task. Proposing is not committing — the UI "
+            "renders an accept / dismiss card; only after the user accepts does it "
+            "go through the existing open_task. title ≤ 60 chars; goal is multi-line "
+            "markdown."
         )
 
     @property
@@ -236,8 +243,8 @@ class TaskProposeOpenTool(_TaskProposeBase):
         return {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "任务标题（≤ 60 字）。"},
-                "goal": {"type": "string", "description": "任务目标（多行 markdown）。"},
+                "title": {"type": "string", "description": "Task title (≤ 60 chars)."},
+                "goal": {"type": "string", "description": "Task goal (multi-line markdown)."},
             },
             "required": ["title", "goal"],
             "additionalProperties": False,
@@ -265,10 +272,13 @@ class TaskProposeStatusTool(_TaskProposeBase):
     @property
     def description(self) -> str:
         return (
-            "提议把当前任务改成某个状态。提议 ≠ 入库 —— UI 渲染成采纳 / 忽略卡片；"
-            "用户点采纳后才真正改状态。status 取值见枚举（不含创建态 open）；"
-            "reason 一句话说明理由（可选，仅显示在采纳卡片上、不入库）。"
-            "用于达成时提议标记 done、卡住时提议 blocked、需复核时提议 review 等。"
+            "Propose changing the current task to a status. Proposing is not "
+            "committing — the UI renders an accept / dismiss card; only after the "
+            "user accepts is the status actually changed. status values are in the "
+            "enum (excludes the creation state open); reason is a one-sentence "
+            "rationale (optional, shown only on the accept card, not stored). Use to "
+            "propose marking done when achieved, blocked when stuck, review when a "
+            "re-check is needed, etc."
         )
 
     @property
@@ -279,11 +289,11 @@ class TaskProposeStatusTool(_TaskProposeBase):
                 "status": {
                     "type": "string",
                     "enum": _PROPOSE_STATUS_VALUES_SORTED,
-                    "description": "目标状态。",
+                    "description": "Target status.",
                 },
                 "reason": {
                     "type": "string",
-                    "description": "改状态的理由（一句话，可选）。",
+                    "description": "Rationale for the status change (one sentence, optional).",
                 },
             },
             "required": ["status"],
@@ -293,16 +303,16 @@ class TaskProposeStatusTool(_TaskProposeBase):
     def execute(self, *, status: str, reason: str = "", **_: Any) -> str:
         # parameters 已声明 enum，但 LLM 可能无视约束传任意值 —— 显式再校验。
         if status not in _PROPOSE_STATUS_VALUES:
-            return f"Error: status 必须是 {_PROPOSE_STATUS_VALUES_SORTED!r} 之一。"
+            return f"Error: status must be one of {_PROPOSE_STATUS_VALUES_SORTED!r}."
         # 改状态提议必须挂某个任务——前端采纳卡按 data.task_id 拼 update_task /
         # close_task inbound，无 active 时发出去的卡片必然不可采纳（codex P2）。
         if self._transport.current_task_id is None:
-            return "Error: 当前无活跃任务，无法提议改任务状态。"
+            return "Error: no active task; cannot propose a task status change."
         payload: dict[str, Any] = {"status": status}
         if reason:
             payload["reason"] = reason
         label = TASK_STATUS_DISPLAY.get(status, status)
-        return self._emit_proposal(payload, ack_label=f"把任务标记为 {label}")
+        return self._emit_proposal(payload, ack_label=f"mark the task as {label}")
 
 
 # ── 写产物工具（绕开 agentao PathPolicy）────────────────────────────────────
@@ -342,13 +352,17 @@ class TaskWriteArtifactTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "把内容写入当前任务的产物 ./task/<name>，自动入任务产物清单。"
-            "用于落盘评审意见 / 设计方案 / 决策清单 / 代码片段 / 报告草稿等结构化产物。"
-            "name 必须是单一文件名（不含 / 或 .. 或前缀 .）。"
-            "默认整体覆盖同名文件；append=true 时追加到文件末尾（文件不存在则新建）——"
-            "往复盘 / 日志类产物增量补内容时用 append，省去先读全文再整体写回。"
-            "当前无活跃任务 / 任务已关闭 / name 不合法时返 ``Error: ...`` 字符串。"
-            "**用本工具写**——普通 write_file('./task/<x>') 会被权限边界拒绝（PathPolicy）。"
+            "Write content to the current task's artifact ./task/<name>; "
+            "auto-added to the task artifact list. Use to persist structured "
+            "outputs such as reviews / designs / decision lists / code snippets / "
+            "report drafts. name must be a single filename (no /, no .., no leading "
+            ".). Overwrites the same-named file by default; with append=true, "
+            "appends to the end (creates the file if missing) — use append for "
+            "incremental additions to ledger / log artifacts, avoiding a "
+            "read-all-then-rewrite. Returns an ``Error: ...`` string when there is "
+            "no active task / the task is closed / name is invalid. **Use this tool "
+            "to write** — a plain write_file('./task/<x>') is rejected by the "
+            "permission boundary (PathPolicy)."
         )
 
     @property
@@ -359,17 +373,18 @@ class TaskWriteArtifactTool(Tool):
                 "name": {
                     "type": "string",
                     "description": (
-                        "产物文件名（单一文件名，不含 / 或 .. 或前缀 .）。"
-                        "建议带角色身份与版本，如 ``水文献-评审.md`` / ``决策清单-v2.md`` / ``report-final.md``。"
+                        "Artifact filename (single filename, no /, no .., no "
+                        "leading .). Prefer role identity + version, e.g. "
+                        "``review-v2.md`` / ``decisions-v2.md`` / ``report-final.md``."
                     ),
                 },
                 "content": {
                     "type": "string",
-                    "description": "要写入的内容（覆盖模式为文件全部内容；append 模式为追加的片段）。",
+                    "description": "Content to write (full file content in overwrite mode; the appended fragment in append mode).",
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "追加到文件末尾而非覆盖（默认 false）。",
+                    "description": "Append to the end of the file instead of overwriting (default false).",
                 },
             },
             "required": ["name", "content"],
@@ -385,12 +400,12 @@ class TaskWriteArtifactTool(Tool):
     ) -> str:
         task_id = self._transport.current_task_id
         if task_id is None:
-            return "Error: 当前无活跃任务，无法落盘产物。"
+            return "Error: no active task; cannot write an artifact."
         task = self._tasks_store.get_task(task_id)
         if task is None:
-            return f"Error: 任务 {task_id} 不存在（可能已被删除）。"
+            return f"Error: task {task_id} does not exist (may have been deleted)."
         if task.status in CLOSED_STATUSES:
-            return f"Error: 任务 {task_id} 已 {task.status}，无法落盘新产物。"
+            return f"Error: task {task_id} is already {task.status}; cannot write a new artifact."
         try:
             result = self._tasks_store.write_artifact(
                 task_id, name=name, content=content, append=append,
@@ -400,11 +415,11 @@ class TaskWriteArtifactTool(Tool):
         except TaskNotFoundError as e:
             return f"Error: {e}"
         except OSError as e:
-            return f"Error: 写入失败 - {e}"
+            return f"Error: write failed - {e}"
         action = "appended to" if append else "wrote"
         return (
             f"Successfully {action} ./task/{result['name']}"
-            f"（文件现 {result['size']} bytes）。"
+            f" (file is now {result['size']} bytes)."
         )
 
 

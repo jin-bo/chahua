@@ -171,7 +171,7 @@ def test_list_artifacts_caps_at_ten(tmp_path: Path):
     assert "file00.md" in out
     assert "file09.md" in out
     assert "file10.md" not in out  # 越过 cap
-    assert "另有 5 个未列" in out
+    assert "5 more not listed" in out
 
 
 def test_list_artifacts_empty_task(tmp_path: Path):
@@ -180,7 +180,7 @@ def test_list_artifacts_empty_task(tmp_path: Path):
     transport = _FakeTransport(task_id=task.id)
     tool = TaskListArtifactsTool(tasks_store=store, transport=transport)
     out = tool.execute()
-    assert "暂无产物" in out
+    assert "no artifacts in the current task yet" in out
 
 
 # ─── ③ propose_* emit envelope ──────────────────────────────────────────────
@@ -190,7 +190,7 @@ def test_propose_decision_emits_envelope(tmp_path: Path):
     transport = _FakeTransport(guest_name="汪小姐", task_id="task_abc")
     tool = TaskProposeDecisionTool(transport=transport)
     ack = tool.execute(summary="用 Electron 做", supporting_message_ids=["msg_1"])
-    assert "已提议" in ack
+    assert "Proposed" in ack
     assert "用 Electron 做" in ack
     assert len(transport.emitted) == 1
     et, data = transport.emitted[0]
@@ -226,7 +226,7 @@ def test_propose_ack_truncates_long_label(tmp_path: Path):
     tool = TaskProposeDecisionTool(transport=transport)
     long = "决策" * 100  # 200 字
     ack = tool.execute(summary=long)
-    assert "已提议「" in ack
+    assert "Proposed \"" in ack
     # ack 不会把 200 字全喂回去
     assert ack.count("决策") < 50
 
@@ -249,7 +249,7 @@ def test_propose_status_emits_envelope_non_terminal(tmp_path: Path):
     transport = _FakeTransport(guest_name="Maya", task_id="task_abc")
     tool = TaskProposeStatusTool(transport=transport)
     ack = tool.execute(status="review", reason="初稿已齐，请复核")
-    assert "已提议" in ack
+    assert "Proposed" in ack
     et, data = transport.emitted[0]
     assert et is ChahuaEventType.TASK_PROPOSAL
     assert data["proposer"] == "Maya"
@@ -284,7 +284,7 @@ def test_propose_status_no_active_task_returns_error(tmp_path: Path):
     tool = TaskProposeStatusTool(transport=transport)
     out = tool.execute(status="done")
     assert out.startswith("Error:")
-    assert "无活跃任务" in out
+    assert "no active task" in out
     assert transport.emitted == []
 
 
@@ -296,7 +296,7 @@ def test_list_artifacts_no_active_returns_hint(tmp_path: Path):
     transport = _FakeTransport(task_id=None)
     tool = TaskListArtifactsTool(tasks_store=store, transport=transport)
     out = tool.execute()
-    assert "当前无活跃任务" in out
+    assert "No active task" in out
 
 
 def test_list_artifacts_deleted_task_returns_hint(tmp_path: Path):
@@ -305,7 +305,7 @@ def test_list_artifacts_deleted_task_returns_hint(tmp_path: Path):
     transport = _FakeTransport(task_id="task_ghost")
     tool = TaskListArtifactsTool(tasks_store=store, transport=transport)
     out = tool.execute()
-    assert "不存在" in out
+    assert "does not exist" in out
     assert "task_ghost" in out
 
 
@@ -392,7 +392,7 @@ def test_write_artifact_no_active_task_returns_error(tmp_path: Path):
     )
     out = tool.execute(name="x.md", content="hi")
     assert out.startswith("Error:")
-    assert "无活跃任务" in out
+    assert "no active task" in out
 
 
 def test_write_artifact_deleted_task_returns_error(tmp_path: Path):
@@ -405,7 +405,7 @@ def test_write_artifact_deleted_task_returns_error(tmp_path: Path):
     out = tool.execute(name="x.md", content="hi")
     assert out.startswith("Error:")
     assert "task_ghost" in out
-    assert "不存在" in out
+    assert "does not exist" in out
 
 
 def test_write_artifact_closed_task_returns_error(tmp_path: Path):

@@ -16,7 +16,11 @@ from typing import Any, Optional
 
 import pytest
 
-from chahua.agent_run import AgentRun
+from chahua.agent_run import (
+    AGENT_RUN_ERR_TARGET_ABSENT,
+    AGENT_RUN_ERR_TARGET_BUSY,
+    AgentRun,
+)
 from chahua.agent_run_tools import (
     MAX_AGENT_RUNS_PER_TOOL_CALL,
     SpawnAgentRunTool,
@@ -131,14 +135,14 @@ async def test_single_returns_error_when_callback_none() -> None:
     assert guest.start_agent_run is None
     out = await _single(guest).async_execute(target="Bob", instruction="x")
     assert out.startswith("Error:")
-    assert "bg run 入口未装" in out
+    assert "bg run entry not wired" in out
 
 
 async def test_batch_returns_error_when_callback_none() -> None:
     guest = _FakeGuest("Carol")
     out = await _batch(guest).async_execute(runs=[{"target": "Bob", "instruction": "x"}])
     assert out.startswith("Error:")
-    assert "bg run 入口未装" in out
+    assert "bg run entry not wired" in out
 
 
 # ── 拒绝路径：单条工具 shape 校验 ────────────────────────────────────────────
@@ -148,21 +152,21 @@ async def test_single_rejects_empty_target() -> None:
     guest = _FakeGuest("Carol")
     guest.start_agent_run = _StubCallback()
     out = await _single(guest).async_execute(target="", instruction="x")
-    assert out == "Error: target 必须是非空字符串。"
+    assert out == "Error: target must be a non-empty string."
 
 
 async def test_single_rejects_empty_instruction() -> None:
     guest = _FakeGuest("Carol")
     guest.start_agent_run = _StubCallback()
     out = await _single(guest).async_execute(target="Bob", instruction="   ")
-    assert out == "Error: instruction 必须是非空字符串。"
+    assert out == "Error: instruction must be a non-empty string."
 
 
 async def test_single_rejects_bad_task_id() -> None:
     guest = _FakeGuest("Carol")
     guest.start_agent_run = _StubCallback()
     out = await _single(guest).async_execute(target="Bob", instruction="x", task_id="")
-    assert out == "Error: task_id 若给须为非空字符串。"
+    assert out == "Error: task_id, if given, must be a non-empty string."
 
 
 async def test_single_passes_through_callback_error() -> None:
@@ -170,10 +174,10 @@ async def test_single_passes_through_callback_error() -> None:
     返 ``Error: <err>``，不抛、不重试。"""
     guest = _FakeGuest("Carol")
     cb = _StubCallback()
-    cb.next_errors.append("target='Bob' 不在场")
+    cb.next_errors.append(AGENT_RUN_ERR_TARGET_ABSENT)
     guest.start_agent_run = cb
     out = await _single(guest).async_execute(target="Bob", instruction="x")
-    assert out == "Error: target='Bob' 不在场"
+    assert out == "Error: target='Bob' is not in the room"  # P14 工具侧英文
     # 即便拒，也调过 callback 一次（让 server 端能做统一上限 / busy 校验）。
     assert len(cb.calls) == 1
 
@@ -184,7 +188,7 @@ async def test_single_passes_through_callback_error() -> None:
 async def test_batch_rejects_empty_runs() -> None:
     guest = _FakeGuest("Carol")
     guest.start_agent_run = _StubCallback()
-    assert await _batch(guest).async_execute(runs=[]) == "Error: runs 必须是非空数组。"
+    assert await _batch(guest).async_execute(runs=[]) == "Error: runs must be a non-empty array."
 
 
 async def test_batch_rejects_over_size_cap() -> None:
@@ -195,7 +199,7 @@ async def test_batch_rejects_over_size_cap() -> None:
         for i in range(MAX_AGENT_RUNS_PER_TOOL_CALL + 1)
     ]
     out = await _batch(guest).async_execute(runs=runs)
-    assert out.startswith("Error: 单次调用 runs 不能超过")
+    assert out.startswith("Error: a single call may not exceed")
     assert str(MAX_AGENT_RUNS_PER_TOOL_CALL) in out
 
 
@@ -224,7 +228,7 @@ async def test_batch_rejects_dup_target_in_same_batch() -> None:
     ]
     out = await _batch(guest).async_execute(runs=runs)
     assert out.startswith("Error: runs[1].target=")
-    assert "本批次重复" in out
+    assert "duplicated in this batch" in out
     # 拒在工具层 —— 一条 callback 都没调（整批未启动）。
     assert cb.calls == []
 
@@ -233,7 +237,7 @@ async def test_batch_rejects_non_object_item() -> None:
     guest = _FakeGuest("Carol")
     guest.start_agent_run = _StubCallback()
     out = await _batch(guest).async_execute(runs=["not-an-object"])
-    assert out == "Error: runs[0] 必须是 object。"
+    assert out == "Error: runs[0] must be an object."
 
 
 async def test_batch_rejects_missing_instruction() -> None:
@@ -241,7 +245,7 @@ async def test_batch_rejects_missing_instruction() -> None:
     guest.start_agent_run = _StubCallback()
     runs = [{"target": "Bob", "instruction": "   "}]
     out = await _batch(guest).async_execute(runs=runs)
-    assert out == "Error: runs[0].instruction 必须是非空字符串。"
+    assert out == "Error: runs[0].instruction must be a non-empty string."
 
 
 # ── 成功路径 ─────────────────────────────────────────────────────────────────
@@ -296,7 +300,7 @@ async def test_batch_partial_success_reports_created() -> None:
     能后续 cancel 那些已起的 run）。"""
     guest = _FakeGuest("Carol")
     cb = _StubCallback()
-    cb.next_errors = [None, "target='X' 正忙"]
+    cb.next_errors = [None, AGENT_RUN_ERR_TARGET_BUSY]
     guest.start_agent_run = cb
     runs = [
         {"target": "Bob", "instruction": "x"},
@@ -304,9 +308,9 @@ async def test_batch_partial_success_reports_created() -> None:
     ]
     out = await _batch(guest).async_execute(runs=runs)
     assert out.startswith("Error: runs[1]")
-    assert "target='X' 正忙" in out
+    assert "is busy" in out  # P14 工具侧英文（target 名由 batch 项决定）
     assert "run_stub_1" in out
-    assert "本批前 1 条已创建" in out
+    assert "first 1 of this batch created" in out
 
 
 # ── getter 闭合回归（核心契约）───────────────────────────────────────────────
@@ -344,5 +348,5 @@ async def test_getter_handles_unbinding_back_to_none() -> None:
 
     guest.start_agent_run = None
     out_err = await tool.async_execute(target="Bob", instruction="y")
-    assert out_err.startswith("Error: bg run 入口未装")
+    assert out_err.startswith("Error: bg run entry not wired")
     assert len(cb.calls) == 1  # 第二次没走到 cb
