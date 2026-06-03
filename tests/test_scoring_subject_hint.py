@@ -40,7 +40,7 @@ def test_prompt_contains_rubric_for_topic_about_you():
         transcript_text="老金 说：我们送 Elon Musk 去机场",
         user_config=UserConfig(display_name="老金", full_md=None, source=None),
     )
-    assert "话题就在讨论你" in prompt
+    assert "The topic is about you" in prompt
     assert "0.6-0.8" in prompt
 
 

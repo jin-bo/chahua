@@ -32,6 +32,15 @@ from typing import Any, Callable, ClassVar, Optional
 
 from agentao.tools.base import AsyncToolBase
 
+from .agent_run import (
+    AGENT_RUN_ERR_MTS_MANAGER,
+    AGENT_RUN_ERR_ROOM_CAP,
+    AGENT_RUN_ERR_TARGET_ABSENT,
+    AGENT_RUN_ERR_TARGET_BUSY,
+    AGENT_RUN_ERR_TASK_CLOSED,
+    AGENT_RUN_ERR_TASK_NOT_FOUND,
+)
+
 
 _log = logging.getLogger(__name__)
 
@@ -39,6 +48,37 @@ _log = logging.getLogger(__name__)
 # 单工具调用一批次的上限。docs §「Phases」P11.2：``max_agent_runs_per_tool_call = 4``
 # —— 按 P9 5 个后台房算，4 已覆盖典型「3 审稿 + 1 主持」。
 MAX_AGENT_RUNS_PER_TOOL_CALL = 4
+
+
+def _agent_run_err_en(code: str, *, target: str, task_id: object) -> str:
+    """把 ``_start_agent_run`` 的无参数原因码（``agent_run.AgentRunError``）本地化成
+    **英文** tool-result 文案（回灌发起调用茶客的 LLM）。
+
+    P14：inbound NOTICE 路径走平行的中文 render（``server_inbound_agent_run.
+    _agent_run_err_zh``，用户可见保持中文）—— 同一原因码两语言由构造保证同步
+    （docs/P14「双路 err」）。所有插值参数在工具侧都可得（room_cap 不带具体上限数字：
+    LLM 不需要精确值，用户那侧的中文 NOTICE 仍带数字）。
+    """
+    if code == AGENT_RUN_ERR_TARGET_ABSENT:
+        return f"target={target!r} is not in the room"
+    if code == AGENT_RUN_ERR_TASK_NOT_FOUND:
+        return f"task_id={task_id!r} does not exist"
+    if code == AGENT_RUN_ERR_TASK_CLOSED:
+        return f"task_id={task_id!r} is closed; cannot bind a bg run"
+    if code == AGENT_RUN_ERR_TARGET_BUSY:
+        return (
+            f"target={target!r} is busy (foreground / handoff / existing bg run); "
+            "try again later"
+        )
+    if code == AGENT_RUN_ERR_ROOM_CAP:
+        return "the room is at its background-run limit; try again later"
+    if code == AGENT_RUN_ERR_MTS_MANAGER:
+        return (
+            f"target={target!r} is the current MTS manager; a bg run targeting the "
+            "manager would pollute the managed queue (auto-enqueued by the intercept "
+            f"hook) — use @{target} or stop the MTS first"
+        )
+    return str(code)  # 未知码兜底：原样回显（不该发生）
 
 
 # Callback 协议：
@@ -122,7 +162,7 @@ class _SpawnBase(AsyncToolBase):
                 "spawn tool: cb() raised — translating to Error: tool result",
                 exc_info=True,
             )
-            return None, f"内部错误（{type(exc).__name__}）：{exc}"
+            return None, f"internal error ({type(exc).__name__}): {exc}"
 
 
 class SpawnAgentRunTool(_SpawnBase):
@@ -137,15 +177,18 @@ class SpawnAgentRunTool(_SpawnBase):
     @property
     def description(self) -> str:
         return (
-            "立即把一条后台 run 派给某位茶客（与 propose_delegate 的区别：spawn 不等"
-            "用户采纳、不阻塞当前回答，target 立刻进入后台执行）。"
-            "并行后台执行用本工具或 spawn_agent_runs，**不要**用 propose_panel —— "
-            "panel 仍是串行 drain。"
-            "MTS 内可用，**绕开 budget 做并发分发**（不扣管理者预算 / 不计连发上限）。"
-            "instruction 必填非空，会作为指令喂给 target 茶客；可选 task_id 把 bg run"
-            "绑到指定任务上下文。"
-            "拒绝条件：target 不在场 / 正忙（前台 / handoff / 已有 bg run）/ 房间 bg "
-            "run 数到上限 / task_id 不存在或已关闭。失败时返 ``Error: ...`` 字符串。"
+            "Immediately dispatch one background run to a guest (vs propose_delegate: "
+            "spawn does NOT wait for user approval and does NOT block your current "
+            "reply — target starts executing in the background right away). For "
+            "parallel background execution use this tool or spawn_agent_runs — do NOT "
+            "use propose_panel (panel still drains serially). Usable inside an MTS, "
+            "**bypassing budget for parallel dispatch** (does not spend the manager's "
+            "budget / does not count toward the consecutive-turn cap). instruction is "
+            "required and non-empty, fed to target as its instruction; optional "
+            "task_id binds the bg run to a task context. Rejected when: target absent "
+            "/ busy (foreground / handoff / existing bg run) / room bg-run count at "
+            "cap / task_id missing or closed. Returns an ``Error: ...`` string on "
+            "failure."
         )
 
     @property
@@ -153,14 +196,14 @@ class SpawnAgentRunTool(_SpawnBase):
         return {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "被指派的茶客名。"},
+                "target": {"type": "string", "description": "Name of the guest to dispatch to."},
                 "instruction": {
                     "type": "string",
-                    "description": "派给 target 的指令文字（必填非空）。",
+                    "description": "Instruction text given to target (required, non-empty).",
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "可选：绑定的任务 id（须未关闭）。",
+                    "description": "Optional: bound task id (must not be closed).",
                 },
             },
             "required": ["target", "instruction"],
@@ -177,19 +220,19 @@ class SpawnAgentRunTool(_SpawnBase):
     ) -> str:
         cb = self._resolve_callback()
         if cb is None:
-            return "Error: bg run 入口未装（session 未挂 server runtime）。"
+            return "Error: bg run entry not wired (session has no server runtime)."
         if not isinstance(target, str) or not target:
-            return "Error: target 必须是非空字符串。"
+            return "Error: target must be a non-empty string."
         if not isinstance(instruction, str) or not instruction.strip():
-            return "Error: instruction 必须是非空字符串。"
+            return "Error: instruction must be a non-empty string."
         instruction = instruction.strip()
         if task_id is not None and (not isinstance(task_id, str) or not task_id):
-            return "Error: task_id 若给须为非空字符串。"
+            return "Error: task_id, if given, must be a non-empty string."
         run_id, err = self._safe_call(
             cb, target=target, instruction=instruction, task_id=task_id,
         )
         if err is not None:
-            return f"Error: {err}"
+            return f"Error: {_agent_run_err_en(err, target=target, task_id=task_id)}"
         return f"Successfully spawned bg run {run_id} → {target}."
 
 
@@ -210,15 +253,21 @@ class SpawnAgentRunsTool(_SpawnBase):
     @property
     def description(self) -> str:
         return (
-            "立即把一批后台 run 并发派给多位茶客（每位茶客一条 instruction）。"
-            "并行后台执行用本工具，**不要**用 propose_panel —— panel 仍是串行 drain。"
-            "MTS 内可用，**绕开 budget 做并发分发**（不扣管理者预算 / 不计连发上限）。"
-            "runs[*].target 同批次不可重复（一茶客一时刻 1 个 speak）；批次大小 ≤ 4。"
-            "**shape 错误（target/instruction 缺失 / 同批重复 / 超数量）在调用前整批拒**；"
-            "**逐条创建过程中**若第 k+1 条被服务端拒（target 不在场 / 正忙 / task_id 已关闭），"
-            "前 k 条已起 bg run 不回滚，返 ``Error: runs[k+1] ...；本批前 k 条已创建`` 列出"
-            "已起的 run_id（可用 ``agent_run_cancel`` 单独停）。"
-            "成功时返 ``Successfully spawned N bg run(s): ...`` 摘要。"
+            "Immediately dispatch a batch of background runs to several guests "
+            "concurrently (one instruction per guest). For parallel background "
+            "execution use this tool — do NOT use propose_panel (panel still drains "
+            "serially). Usable inside an MTS, **bypassing budget for parallel "
+            "dispatch** (does not spend the manager's budget / does not count toward "
+            "the consecutive-turn cap). runs[*].target must not repeat within a batch "
+            "(one speak per guest at a time); batch size ≤ 4. **Shape errors "
+            "(missing target/instruction / duplicate in batch / over the limit) "
+            "reject the whole batch before any dispatch**; **during per-item "
+            "creation** if item k+1 is rejected by the server (target absent / busy / "
+            "task_id closed), the first k already-started bg runs are NOT rolled "
+            "back, and it returns ``Error: runs[k+1] ...; first k of this batch "
+            "created`` listing the started run_ids (cancel individually with "
+            "``agent_run_cancel``). On success returns a ``Successfully spawned N bg "
+            "run(s): ...`` summary."
         )
 
     @property
@@ -233,21 +282,21 @@ class SpawnAgentRunsTool(_SpawnBase):
                         "properties": {
                             "target": {
                                 "type": "string",
-                                "description": "被指派的茶客名。",
+                                "description": "Name of the guest to dispatch to.",
                             },
                             "instruction": {
                                 "type": "string",
-                                "description": "派给 target 的指令文字（必填非空）。",
+                                "description": "Instruction text given to target (required, non-empty).",
                             },
                             "task_id": {
                                 "type": "string",
-                                "description": "可选：绑定的任务 id（须未关闭）。",
+                                "description": "Optional: bound task id (must not be closed).",
                             },
                         },
                         "required": ["target", "instruction"],
                         "additionalProperties": False,
                     },
-                    "description": "批量 bg run 描述（≤4 条，target 不可重复）。",
+                    "description": "Batch of bg-run specs (≤4, target must not repeat).",
                 },
             },
             "required": ["runs"],
@@ -257,13 +306,13 @@ class SpawnAgentRunsTool(_SpawnBase):
     async def async_execute(self, *, runs: list[dict[str, Any]], **_: Any) -> str:
         cb = self._resolve_callback()
         if cb is None:
-            return "Error: bg run 入口未装（session 未挂 server runtime）。"
+            return "Error: bg run entry not wired (session has no server runtime)."
         if not isinstance(runs, list) or not runs:
-            return "Error: runs 必须是非空数组。"
+            return "Error: runs must be a non-empty array."
         if len(runs) > MAX_AGENT_RUNS_PER_TOOL_CALL:
             return (
-                f"Error: 单次调用 runs 不能超过 {MAX_AGENT_RUNS_PER_TOOL_CALL} 条"
-                f"（当前 {len(runs)} 条）。"
+                f"Error: a single call may not exceed {MAX_AGENT_RUNS_PER_TOOL_CALL} "
+                f"runs (got {len(runs)})."
             )
         # 工具层先做 shape + 同批次 dup 校验 —— **整批**校验过再下 server，让失败
         # 时返单条错误信息能定位到具体下标。
@@ -271,23 +320,23 @@ class SpawnAgentRunsTool(_SpawnBase):
         parsed: list[tuple[str, str, Optional[str]]] = []
         for i, item in enumerate(runs):
             if not isinstance(item, dict):
-                return f"Error: runs[{i}] 必须是 object。"
+                return f"Error: runs[{i}] must be an object."
             target = item.get("target")
             instruction = item.get("instruction")
             task_id = item.get("task_id")
             if not isinstance(target, str) or not target:
-                return f"Error: runs[{i}].target 必须是非空字符串。"
+                return f"Error: runs[{i}].target must be a non-empty string."
             if not isinstance(instruction, str) or not instruction.strip():
-                return f"Error: runs[{i}].instruction 必须是非空字符串。"
+                return f"Error: runs[{i}].instruction must be a non-empty string."
             instruction = instruction.strip()
             if task_id is not None and (
                 not isinstance(task_id, str) or not task_id
             ):
-                return f"Error: runs[{i}].task_id 若给须为非空字符串。"
+                return f"Error: runs[{i}].task_id, if given, must be a non-empty string."
             if target in seen:
                 return (
-                    f"Error: runs[{i}].target={target!r} 在本批次重复出现"
-                    f"（一茶客一时刻 1 个 speak）。"
+                    f"Error: runs[{i}].target={target!r} is duplicated in this batch "
+                    "(one speak per guest at a time)."
                 )
             seen.add(target)
             parsed.append((target, instruction, task_id))
@@ -302,16 +351,19 @@ class SpawnAgentRunsTool(_SpawnBase):
                 cb, target=target, instruction=instruction, task_id=task_id,
             )
             if err is not None:
+                err_en = _agent_run_err_en(err, target=target, task_id=task_id)
                 if created:
                     return (
-                        f"Error: runs[{i}] ({target}): {err}；"
-                        f"本批前 {len(created)} 条已创建（run_id: {', '.join(created)}）。"
+                        f"Error: runs[{i}] ({target}): {err_en}; "
+                        f"first {len(created)} of this batch created "
+                        f"(run_id: {', '.join(created)})."
                     )
-                return f"Error: runs[{i}] ({target}): {err}"
+                return f"Error: runs[{i}] ({target}): {err_en}"
             # err is None ↔ run_id is not None；显式护栏（assert 在 -O 模式被剥）。
             if run_id is None:
                 return (
-                    f"Error: runs[{i}] ({target}): server 返回空 run_id（不变量破坏）"
+                    f"Error: runs[{i}] ({target}): server returned an empty run_id "
+                    "(invariant violation)"
                 )
             created.append(run_id)
         return (

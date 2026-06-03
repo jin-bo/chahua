@@ -35,11 +35,11 @@ from .user_md import USER_SPEAKER_ID, UserConfig, strip_top_h1
 # 当作发言指令污染分数计算，speak 看到 scoring 的"调整想接话的程度"等同空指令。
 _SPEAK_ORDER_HINT_BLOCK = (
     "<order_hint>\n"
-    "如果 <current_task> 中的目标指定了发言顺序（如\"先 X 再 Y 后 Z\"、\"Z 最后总结\"），"
-    "请先判断现在是否轮到你发言：\n"
-    "- 没轮到你时**不要按本职角色完整发言**——只输出一句简短的让位句"
-    "（如\"等评审专家先依次评完，我再来总结\"），把麦让给该轮到的角色。\n"
-    "- 轮到你时按本职完整发言。\n"
+    "If <current_task> specifies a speaking order (e.g. \"X then Y then Z\", "
+    "\"Z summarizes last\"), check whether it is your turn:\n"
+    "- Not your turn? Yield in one short line (e.g. \"I'll wrap up after the "
+    "reviewers finish\") — do NOT speak in full.\n"
+    "- Your turn? Speak in full.\n"
     "</order_hint>"
 )
 
@@ -66,11 +66,14 @@ def render_agent_run_block(
     )
     return (
         f"<agent_run_task issued_by={quoteattr(issued_by)}{src_attr}>\n"
-        "你正在「后台 Agent run」中独立执行 ——\n"
-        "- 这一次发言由本块的 instruction 直接驱动，不依赖房间打分 / @ 提及；\n"
-        "- 后台执行**不流式刷聊天区**，请一次性给出完整结论 / 产物路径，"
-        "不要写「我先想想」「稍等再说」等占位；\n"
-        "- 完成后房间内无需「等你下一句」的语义 —— 用户 / 调度方会自行决定后续。\n"
+        "You are running independently as a background Agent run.\n"
+        "- This turn is driven directly by the instruction below, not by room "
+        "scoring / @-mentions.\n"
+        "- Background execution does NOT stream to the chat — give your full "
+        "conclusion / artifact paths in one shot, no placeholder lines.\n"
+        "- When done, the room needs no \"waiting for your next line\" — the user / "
+        "scheduler decides what follows.\n"
+        "Always reply in the same language as the conversation (default: Chinese).\n"
         f"<instruction>{escape(instruction)}</instruction>\n"
         "</agent_run_task>"
     )
@@ -95,28 +98,32 @@ def render_managed_session_block(manager: str, budget: int) -> str:
 
     **CLAUDE.md MTS 不变量「块第 ② 条作废 propose_* 等待语义」** —— 渲染顺序中
     第 ② 条仍是「忽略 propose_* 工具 ack 的等待语义」；后续若调整顺序需同步
-    CLAUDE.md 该不变量的条目编号。
+    CLAUDE.md 该不变量的条目编号。**P14 英文化 + 精练后 5 条 bullet 顺序保持不变**
+    （rationale 移本 docstring，bullet 体精简为祈使句）。
 
     ``manager`` 走 ``quoteattr`` 转义防 XML 属性注入（与 ``<room>`` 等块同口径）。
     """
     rounds = max(0, budget)
     return (
         f"<managed_session manager={quoteattr(manager)} remaining_budget=\"{rounds}\">\n"
-        "你正在一个「托管任务会话」中主持推进 —— 由用户显式开启并授权你在预算内自主续推。\n"
-        "- 复查完当前进展后，**直接**用 propose_delegate / propose_panel 指派下一步："
-        "托管期内这些提议会自动入队生效，无需用户逐次采纳；不要说「请用户决定」「等你确认」。\n"
-        "- 若 propose_delegate / propose_panel 工具返回「已提议……等用户采纳」一类"
-        "等待语义，在托管会话中请**忽略**它 —— 你的 delegate / panel 已自动生效，照常继续推进。\n"
-        "- 需要**并发**派工（多人同步审稿 / 多线索分头排查）时用 spawn_agent_runs —— "
-        "绕开托管 budget 做并行后台分发，不扣预算、不计连发上限。**别**用 propose_panel "
-        "并发（panel 仍是串行 drain）。\n"
-        "- 没有可派的下一步时（如需要再读资料、需要用户输入、暂时想不清下一步），"
-        "**直接讲完当前发言、结束本轮即可**，不要为了维持托管会话而硬派活。"
-        "托管会话不会因为你这一轮没派活而结束 —— 它会进入待机，等用户下一句话再续上。\n"
-        "- 当任务目标已达成、不需要再派活时，用 task_propose_status(\"done\") 收尾"
-        "（这个提议会交给用户确认、不自动生效），并停止派活。\n"
-        f"- 当前剩余托管预算：{rounds} 轮复查。预算用尽（budget=0）/ 任务被关 / 用户停止托管 "
-        "时托管会话自然结束；其它情况你这一轮没派活只会进入待机，不会结束。\n"
+        "You autonomously drive this task within budget.\n"
+        "- After reviewing, directly call propose_delegate / propose_panel; in this "
+        "session they auto-queue and take effect — do NOT wait for user approval, do "
+        "NOT say \"let the user decide\".\n"
+        "- Ignore any \"proposed, awaiting user approval\" wording in a propose_delegate "
+        "/ propose_panel ack here — your delegate / panel already took effect; keep going.\n"
+        "- For parallel dispatch (multi-reviewer, multi-thread investigation) use "
+        "spawn_agent_runs — off-budget background dispatch. Do NOT use propose_panel for "
+        "parallelism (panel drains serially).\n"
+        "- No next step (need to read more, need user input, stuck)? Just finish your "
+        "turn — the session idles and waits for the user; it does NOT end because you "
+        "did not delegate this round.\n"
+        "- Goal met? Call task_propose_status(\"done\") to wrap up (the proposal goes to "
+        "the user for confirmation, not auto-applied) and stop delegating.\n"
+        f"Budget left: {rounds} review rounds. The session ends on budget exhausted "
+        "(budget=0) / task closed / user stop; otherwise a round with no delegation "
+        "just idles.\n"
+        "Always reply in the same language as the conversation (default: Chinese).\n"
         "</managed_session>"
     )
 
@@ -294,17 +301,17 @@ class ContextRenderer:
 
         def label(p: str) -> str:
             name = display_for.get(p, p)
-            return f"{name}（人类用户）" if p == USER_SPEAKER_ID else name
+            return f"{name} (human user)" if p == USER_SPEAKER_ID else name
 
         entries = [
             (label(p), clamp_summary(self.roster.get(p, "")))
             for p in self.room.participants
         ]
         if not any(summary for _, summary in entries):
-            return "在场：" + ", ".join(name for name, _ in entries)
-        lines = ["在场："]
+            return "Present: " + ", ".join(name for name, _ in entries)
+        lines = ["Present:"]
         for name, summary in entries:
-            lines.append(f"- {name} —— {summary}" if summary else f"- {name}")
+            lines.append(f"- {name} — {summary}" if summary else f"- {name}")
         return "\n".join(lines)
 
     # ── XML 块拼装 ────────────────────────────────────────────────────
@@ -333,9 +340,9 @@ class ContextRenderer:
         # 篡改、LLM 看到的结构错位。quoteattr 自带外层引号，f-string 里 attr 名后直接拼。
         room_lines = [f"<room name={quoteattr(self.room.name)}>"]
         if self.room.topic:
-            room_lines.append(f"话题：{self.room.topic}")
+            room_lines.append(f"Topic: {self.room.topic}")
         if self.room.rules:
-            room_lines.append(f"规则：{self.room.rules}")
+            room_lines.append(f"Rules: {self.room.rules}")
         room_lines.append(self._render_roster())
         room_lines.append("</room>")
         blocks.append("\n".join(room_lines))
@@ -354,7 +361,7 @@ class ContextRenderer:
                 display_name = self.user_config.display_name
                 blocks.append(
                     f"<user_persona display_name={quoteattr(display_name)}>\n"
-                    f"以下是 {display_name} 关于自己的说明：\n\n"
+                    f"Here is what {display_name} says about themselves:\n\n"
                     f"{body}\n"
                     "</user_persona>"
                 )
@@ -403,7 +410,7 @@ class ContextRenderer:
         body = (
             format_messages(increment, self.display_map())
             if increment
-            else "（无新消息）"
+            else "(no new messages)"
         )
         blocks: list[str] = [
             f"<room_update name={quoteattr(self.room.name)}>\n{body}\n</room_update>"
@@ -417,17 +424,32 @@ class ContextRenderer:
         return "\n\n".join(blocks) + "\n"
 
     def _speak_instruction_block(self, guest_name: str) -> str:
-        # 末句纠偏 chat vs 交付物：agentao base prompt 把茶客定位成「知识工作执行者」，
-        # 默认产物是「结论/证据/局限」「分步骤交付物」「待办清单」。群聊闲聊轮若照此输出
-        # 会跑偏成长篇正式文档。这里每轮后置纠偏成「角色化短消息」，但**条件化豁免**：
-        # 用户明确要 文档/分析/代码/任务产物，或被显式指派去做事（如 <agent_run_task>
-        # bg run 块要求「一次性写完整产物」）时，仍切回完整交付形态。
+        # P14：英文化 + 精练 + 新增 recall 段落（详见 docs/P14）。承重职责三层：
+        # ① 身份 + chat 纠偏：agentao base prompt 把茶客定位成「知识工作执行者」，默认
+        #    产出「结论/证据/局限」「分步骤交付物」「待办清单」；群聊闲聊轮照此会跑偏成
+        #    长篇文档。这里纠偏成「角色化短消息」，条件化豁免：用户明确要 文档/分析/代码/
+        #    任务产物、或被显式指派（如 <agent_run_task> bg run 要求一次写完整产物）时切回。
+        # ② recall：早期轮次的 tool 结果（文件全文 / 查询输出 / 命令结果）多数仍在
+        #    agent.messages 里，但每轮新上下文 + summary 压缩让 LLM 不主动翻历史、倾向
+        #    「不记得」。显式要求先回顾历史 tool 结果；仅当被截断/缺失才回 source 重读。
+        # ③ 语言锚点：指令英文化后，显式锚定「输出语言随对话（默认中文）」，否则茶客会
+        #    开始用英文回复中文房间（中文指令此前隐性锚定了中文输出）。
         body = (
-            f"（请以「{guest_name}」的身份发言。只说你要说的内容，"
-            f"不要复述别人的话，不要加引号或前缀。\n"
-            f"这是群聊对话：默认用角色化的口语短消息回应，不要套用"
-            f"「结论/证据/局限」「分步骤交付物」「待办清单」等正式产出格式；"
-            f"只有当用户明确要求产出文档 / 分析 / 代码 / 任务产物，"
-            f"或你被显式指派去做事时，才切换到完整的工作交付形态。）"
+            f"(Speak as \"{guest_name}\". Say only what you mean to say — "
+            f"do not repeat others' messages, and do not add quotes or prefixes.\n"
+            f"This is a group chat: respond by default with short, in-character "
+            f"conversational messages. Do not fall back on formal output formats "
+            f"such as \"conclusion / evidence / limitations\", \"step-by-step "
+            f"deliverables\", or \"to-do lists\" unless the user explicitly asks "
+            f"for a document / analysis / code / task deliverable, or you have been "
+            f"explicitly assigned work — only then switch to full deliverable mode.\n"
+            f"Before answering, review your own conversation history. Your earlier "
+            f"turns contain tool-call results — file contents, query results, command "
+            f"output — that the user may now be referring to. Ground your reply in "
+            f"those prior results rather than guessing or assuming you never saw them. "
+            f"If the relevant content appears truncated or missing from history, "
+            f"re-fetch it from its source (e.g. re-read the file under ./share/) before "
+            f"answering.\n"
+            f"Always reply in the same language as the conversation (default: Chinese).)"
         )
         return f"<speak_instruction>\n{body}\n</speak_instruction>"

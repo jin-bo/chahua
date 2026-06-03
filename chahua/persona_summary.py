@@ -44,10 +44,13 @@ _CACHE_SUBPATH = (".chahua", "persona-summaries")
 _GEN_MAX_TOKENS = 80
 # prompt 里的「30 字」是软目标；SUMMARY_MAXLEN=40 是 clamp_summary 的硬兜底 —— 留 10 字
 # 裕度容忍 LLM 略超，超出仍会被截断。
+# P14：指令英文化，但**输出必须保留中文 ≤30 字、结尾不加标点**（摘要进 <room> 花名册）。
 _SYSTEM_PROMPT = (
-    "你在为一个多人聊天室生成「能力花名册」。下面是某位参与者的人设卡。"
-    "请用一句话（中文、不超过 30 字、结尾不加标点）概括 ta 最核心的能力或职责，"
-    "供房间里其他人分工时参考。只输出这一句话本身，不要解释、不要加引号。"
+    "You are generating a capability roster for a multi-person chat room. Below is "
+    "one participant's persona card. In ONE sentence IN CHINESE (≤ 30 Chinese "
+    "characters, no trailing punctuation), summarize their most central capability "
+    "or role, for others in the room to reference when dividing work. Output only "
+    "that one sentence — no explanation, no quotes."
 )
 
 

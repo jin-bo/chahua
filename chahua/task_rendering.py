@@ -58,8 +58,8 @@ def wrap_current_task(task_block: tuple[str, str]) -> str:
 def render_task_header(task: Task) -> tuple[list[str], str]:
     """speak compact 的头两行 + status_display —— 仅 goal 首行（P5.6）。
 
-    输出 ``["标题：...", "目标：<first line>"]``（goal 为空时只输出标题行）+ status
-    枚举显示名。**不含** ``./task/`` 写入指引 —— 那是发言阶段执行语义，调用方
+    输出 ``["Title: ...", "Goal: <first line>"]``（P14 起英文；goal 为空时只输出标题行）
+    + status 枚举显示名。**不含** ``./task/`` 写入指引 —— 那是发言阶段执行语义，调用方
     （``render_task_block(compact=True)``）自己追加。
 
     compact body 受 ≤80 token 预算约束（CLAUDE.md 关键不变量），所以 goal 切首行；
@@ -70,19 +70,19 @@ def render_task_header(task: Task) -> tuple[list[str], str]:
     """
     title = task.title or TASK_UNTITLED
     status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
-    lines = [f"标题：{title}"]
+    lines = [f"Title: {title}"]
     first_line = task.goal.split("\n", 1)[0].strip() if task.goal else ""
     if first_line:
-        lines.append(f"目标：{first_line}")
+        lines.append(f"Goal: {first_line}")
     return lines, status_display
 
 
 def render_scoring_header(task: Task) -> tuple[list[str], str]:
     """scoring 路径的头 N 行 + status_display —— 渲染**完整 goal**（P5.6 修订）。
 
-    输出 ``["标题：...", "目标：", <goal line 1>, <goal line 2>, ...]``（goal 为空时
-    只输出标题行）+ status 枚举显示名。多行 goal 用"目标：\\n<full>"形态保留换行，与
-    full 模式（``render_task_block(compact=False)``）的 goal 渲染口径一致。
+    输出 ``["Title: ...", "Goal:", <goal line 1>, <goal line 2>, ...]``（P14 起英文；
+    goal 为空时只输出标题行）+ status 枚举显示名。多行 goal 用 ``"Goal:\\n<full>"`` 形态
+    保留换行，与 full 模式（``render_task_block(compact=False)``）的 goal 渲染口径一致。
 
     与 :func:`render_task_header` 区别：后者切 goal 首行喂 speak compact（≤80 token 预算），
     本函数喂打分 prompt —— goal 里常写"先 X 再 Y 后 Z"这类角色顺序，砍到首行打分模型
@@ -94,15 +94,15 @@ def render_scoring_header(task: Task) -> tuple[list[str], str]:
     """
     title = task.title or TASK_UNTITLED
     status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
-    lines = [f"标题：{title}"]
+    lines = [f"Title: {title}"]
     if task.goal:
         goal = task.goal.strip()
         if goal:
             if "\n" in goal:
-                lines.append("目标：")
+                lines.append("Goal:")
                 lines.extend(goal.split("\n"))
             else:
-                lines.append(f"目标：{goal}")
+                lines.append(f"Goal: {goal}")
     return lines, status_display
 
 
@@ -121,33 +121,46 @@ def render_task_block(
     """
     if compact:
         lines, status_display = render_task_header(task)
-        # P5.4 + 文案升级：./task/ 是任务工作目录，**读用 read_file('./task/<name>')、
-        # 写用 task_write_artifact(name, content)**。compact 路径每轮喂，文案极简 ——
-        # 软触发"你判断" + 落盘动作 + 边界提醒三句，类型枚举留给 onboarding 的 full
-        # 文案。scoring 路径不追加此行（走 render_task_header 后直接 join）。
-        # **不是普通 write_file**：./task/ 软链解析到 cwd 外，原生 write_file 会被
-        # agentao PathPolicy 拒；专用 task_write_artifact 工具绕开（见 task_tools.py）。
+        # P14：英文化 + 精练。compact 每轮喂，收敛成 2 行祈使。承重语义点：读 read_file /
+        # 写 task_write_artifact / 否定 write_file / 概要+引用。rationale（为什么不能用
+        # write_file：./task/ 软链解析到 cwd 外、被 agentao PathPolicy 拒）移到此注释，
+        # 不进 prompt。scoring 路径不追加此行（走 render_task_header 后直接 join）。
         lines.append(
-            "./task/ 是本任务工作目录（读：./task/<name>；写：用 task_write_artifact "
-            "工具）。你判断本轮输出值得作为任务产物时，调 task_write_artifact(name, content) "
-            "落盘（自动入任务），聊天里只放一句概要 + 文件引用；"
-            "**不要用普通 write_file('./task/<x>')**（会被 PathPolicy 拒）。"
+            "Task workspace ./task/ — read: read_file('./task/<name>'); "
+            "write: task_write_artifact(name, content), NOT write_file (rejected "
+            "by PathPolicy).\n"
+            "When this turn's output is worth keeping as an artifact, call "
+            "task_write_artifact and keep only a one-line summary + file ref in chat."
         )
         return "\n".join(lines), status_display
 
     title = task.title or TASK_UNTITLED
     status_display = TASK_STATUS_DISPLAY.get(task.status, task.status)
-    parts: list[str] = [f"标题：{title}"]
+    parts: list[str] = [f"Title: {title}"]
     if task.owner:
-        parts.append(f"负责人：{task.owner}")
+        parts.append(f"Owner: {task.owner}")
     if task.goal:
-        parts.append(f"目标：\n{task.goal}")
+        parts.append(f"Goal:\n{task.goal}")
 
     if decisions:
         recent = decisions[-_FULL_DECISIONS_CAP:]
         bullets = "\n".join(f"- {d.summary}" for d in recent)
-        parts.append(f"近期决策（最近 {len(recent)} 条）：\n{bullets}")
+        parts.append(f"Recent decisions (last {len(recent)}):\n{bullets}")
 
+    # P14：英文化 + 精练。原 empty / with-artifacts 两分支各自重复「何时落盘 / 命名 /
+    # 为什么 / 否定 write_file」四段；现共用一段祈使核心，artifact 清单仅在非空分支前置。
+    # rationale（聊天流过 transcript 不可索引、落盘才进产物清单；./task/ 软链解析到 cwd
+    # 外、原生 write_file 被 PathPolicy 拒 —— 详见 task_tools.py TaskWriteArtifactTool +
+    # tests/test_task_link_write_path_policy.py）移到此注释，不进 prompt。承重语义点：
+    # 读 read_file / 写 task_write_artifact / 否定 write_file / 命名习惯 / 概要+引用。
+    workspace_guidance = (
+        "## Task workspace ./task/\n"
+        "Read: read_file('./task/<name>'). Write: task_write_artifact(name, "
+        "content) — NOT write_file (rejected by PathPolicy).\n"
+        "Persist any reusable output (reviews, designs, decisions, code, drafts) "
+        "as an artifact; in chat keep a one-line summary + file ref.\n"
+        "Name with role + version, e.g. <you>-review-v2.md."
+    )
     if artifacts:
         head = artifacts[:_FULL_ARTIFACTS_CAP]
         bullets = "\n".join(
@@ -155,47 +168,14 @@ def render_task_block(
             f"{format_artifact_mtime(a['mtime_ms'])})"
             for a in head
         )
-        # P5.4 + 文案升级：./task/ 可读、专用 task_write_artifact 工具写。已经有产物落盘
-        # 时提醒"何时该再落盘 + 命名习惯"——避免茶客把后续报告又只塞回聊天。触发条件用
-        # "你判断"软描述（不给字数硬阈值，让茶客自主判断），类型枚举保留作为锚点。
-        parts.append(
-            f"当前产物（./task/ 读用 read_file('./task/<name>')、"
-            f"写用 task_write_artifact 工具）：\n{bullets}\n\n"
-            "**何时该再落盘**：你判断本轮输出值得作为新的任务产物（典型如评审意见、"
-            "设计方案、决策清单、代码片段、报告草稿等需要跨轮引用 / 后续合并 / 出 PDF "
-            "的结构化内容）时，调 `task_write_artifact(name, content)` 落到 ./task/<name>，"
-            "自动入任务产物清单；聊天发言只保留一句概要 + 文件引用。"
-            "**命名建议**：带角色身份与版本（如 `<你的名字>-评审-v2.md`）。"
-            "**不要用普通 write_file('./task/<x>')**（会被 PathPolicy 拒）；"
-            "写到 cwd / `./share/` 等别处也不算入任务产物。"
-        )
+        parts.append(f"Current artifacts:\n{bullets}\n\n{workspace_guidance}")
     else:
-        # full 模式无 artifact 时给"催落盘"详细版 —— 触发条件 / 落盘示例 / 命名建议 / 为什么
-        # 四段。onboarding 单次注入，token 涨幅可接受；incremental 路径走 compact 不受影响。
-        # 触发用"你判断"软描述，不给字数硬阈值。**写产物走专用 task_write_artifact 工具**：
-        # 原生 write_file('./task/<x>') 会被 agentao PathPolicy 拒（详见 task_tools.py
-        # ``TaskWriteArtifactTool`` 类 docstring + tests/test_task_link_write_path_policy.py）。
-        parts.append(
-            "./task/ 是本任务工作目录（读：read_file('./task/<name>')；"
-            "写：task_write_artifact 工具，当前为空）。\n\n"
-            "**何时该落盘**：你判断本轮输出值得作为任务产物保留时（典型场景：评审意见、"
-            "设计方案、决策清单、代码片段、报告草稿等需要跨轮引用 / 后续合并 / 出 PDF "
-            "的结构化内容），调 `task_write_artifact(name, content)` 把内容写到 ./task/<name>，"
-            "自动入任务产物清单；不要只放在聊天发言里。聊天发言只保留一句概要 + 文件引用"
-            "（例：\"已写入 `./task/水文献-评审.md`，核心问题：Research Gap 不成立 / 引用错位\"）。\n\n"
-            "**命名建议**：带角色身份与版本（如 `<你的名字>-评审.md` / "
-            "`决策清单-v2.md` / `report-final.md`）。\n\n"
-            "**为什么**：聊天发言流过 transcript 不可索引；落盘到 ./task/ 才进任务产物"
-            "清单，供后续合并 / 出 PDF / 跨轮引用。"
-            "**不要用普通 write_file('./task/<x>')**——./task/ 软链解析到 cwd 外，"
-            "agentao PathPolicy 会以 \"refused ... outside project_root\" 拒绝。"
-            "写到 cwd / `./share/` 等别处也不会自动归集进任务产物清单。"
-        )
+        parts.append(f"{workspace_guidance}\n(No artifacts yet.)")
 
     if summary_tail:
         tail = summary_tail[-_FULL_SUMMARY_TAIL_CAP:]
         bullets = "\n\n".join(s.text for s in tail)
-        parts.append(f"任务近期进展：\n{bullets}")
+        parts.append(f"Recent task progress:\n{bullets}")
 
     return "\n\n".join(parts), status_display
 

@@ -95,7 +95,7 @@ def test_propose_delegate_emits_proposal() -> None:
     transport = _FakeTransport(guest_name="C")
     tool = ProposeDelegateTool(transport=transport)
     ack = tool.execute(target="范总", reason="他更熟水文")
-    assert "采纳" in ack
+    assert "after the user accepts" in ack
     assert len(transport.emitted) == 1
     ev_type, data = transport.emitted[0]
     assert ev_type is ChahuaEventType.TASK_PROPOSAL
@@ -119,7 +119,7 @@ def test_propose_review_resolves_latest_message() -> None:
     transport = _FakeTransport(guest_name="C")
     tool = ProposeReviewTool(transport=transport, room=room)
     ack = tool.execute(reviewer="汪小姐", reviewee="范总")
-    assert "采纳" in ack
+    assert "after the user accepts" in ack
     _, data = transport.emitted[0]
     assert data["kind"] == TASK_PROPOSAL_KIND_HANDOFF_REVIEW
     latest = room.latest_message_by_speaker_id("范总")

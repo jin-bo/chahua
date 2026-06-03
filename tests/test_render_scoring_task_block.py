@@ -84,13 +84,12 @@ def test_open_task_returns_title_goal_status_without_task_dir_hint():
     rendered = orch._maybe_render_scoring_task_block("t1")
     assert rendered is not None
     body, status_display = rendered
-    assert "标题：写 README" in body
-    assert "目标：把茶话室文档补齐" in body
-    assert status_display == "未开始"
+    assert "Title: 写 README" in body
+    assert "Goal: 把茶话室文档补齐" in body
+    assert status_display == "not started"
     # 核心回归：scoring 极简块**不含** ./task/ 写入指引（避免发言阶段执行语义污染打分）
     assert "./task/" not in body
-    assert "可读写" not in body
-    assert "自动入任务" not in body
+    assert "task_write_artifact" not in body
 
 
 def test_open_task_scoring_renders_full_goal_multiline():
@@ -104,8 +103,8 @@ def test_open_task_scoring_renders_full_goal_multiline():
     rendered = orch._maybe_render_scoring_task_block("t1")
     assert rendered is not None
     body, _ = rendered
-    # 多行 goal → "目标：\n<line1>\n<line2>\n<line3>" 形态（与 full 模式同口径）
-    assert "目标：" in body
+    # 多行 goal → "Goal:\n<line1>\n<line2>\n<line3>" 形态（与 full 模式同口径）
+    assert "Goal:" in body
     assert "第一行目标" in body
     assert "第二行细节" in body
     assert "第三行更多" in body
@@ -117,9 +116,9 @@ def test_open_task_scoring_renders_single_line_goal_inline():
     rendered = orch._maybe_render_scoring_task_block("t1")
     assert rendered is not None
     body, _ = rendered
-    assert "目标：把茶话室文档补齐" in body
-    # 单行不应触发"目标：\n<goal>"分行
-    assert "目标：\n" not in body
+    assert "Goal: 把茶话室文档补齐" in body
+    # 单行不应触发"Goal:\n<goal>"分行
+    assert "Goal:\n" not in body
 
 
 def test_open_task_empty_goal_skips_goal_line():
@@ -127,8 +126,8 @@ def test_open_task_empty_goal_skips_goal_line():
     rendered = orch._maybe_render_scoring_task_block("t1")
     assert rendered is not None
     body, _ = rendered
-    assert "标题：写 README" in body
-    assert "目标：" not in body
+    assert "Title: 写 README" in body
+    assert "Goal:" not in body
 
 
 # ─── ② parametrize [None, missing, closed] → None ────────────────────────────

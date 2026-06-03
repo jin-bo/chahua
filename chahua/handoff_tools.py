@@ -70,7 +70,7 @@ class _ProposeHandoffBase(Tool):
                 "payload": payload,
             },
         )
-        return "已提议，等用户在 UI 采纳后才会生效。"
+        return "Proposed; takes effect only after the user accepts in the UI."
 
 
 class ProposeDelegateTool(_ProposeHandoffBase):
@@ -83,9 +83,11 @@ class ProposeDelegateTool(_ProposeHandoffBase):
     @property
     def description(self) -> str:
         return (
-            "提议把下一句发言交给某位茶客。提议 ≠ 立刻生效 —— UI 渲染成采纳 / 忽略"
-            "卡片，用户点采纳后才指派。target 传茶客名（房间成员名册见 onboarding）。"
-            "仅在确有必要让特定茶客接话时才提议，别每轮都提。"
+            "Propose handing the next turn to a specific guest. Proposing does NOT "
+            "take effect immediately — the UI renders an accept / dismiss card; only "
+            "after the user accepts is it delegated. Pass target as a guest name "
+            "(roster is in onboarding). Only propose when a specific guest really "
+            "needs to speak next; don't propose every turn."
         )
 
     @property
@@ -93,10 +95,10 @@ class ProposeDelegateTool(_ProposeHandoffBase):
         return {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "被指派发言的茶客名。"},
+                "target": {"type": "string", "description": "Name of the guest to hand the turn to."},
                 "reason": {
                     "type": "string",
-                    "description": "提议理由（可选，会显示在采纳卡片上）。",
+                    "description": "Reason for the proposal (optional, shown on the accept card).",
                 },
             },
             "required": ["target"],
@@ -124,9 +126,11 @@ class ProposeReviewTool(_ProposeHandoffBase):
     @property
     def description(self) -> str:
         return (
-            "提议请某位茶客审阅另一位茶客最近一条发言。提议 ≠ 立刻生效 —— UI 渲染成"
-            "采纳 / 忽略卡片，用户点采纳后才请审。reviewer / reviewee 都传茶客名。"
-            "审的固定是 reviewee 最近一条发言。仅在确有必要复核时才提议。"
+            "Propose asking one guest to review another guest's most recent message. "
+            "Proposing does NOT take effect immediately — the UI renders an accept / "
+            "dismiss card; only after the user accepts is the review requested. Pass "
+            "reviewer / reviewee as guest names. The reviewed message is always "
+            "reviewee's most recent one. Only propose when a re-check is really needed."
         )
 
     @property
@@ -134,10 +138,10 @@ class ProposeReviewTool(_ProposeHandoffBase):
         return {
             "type": "object",
             "properties": {
-                "reviewer": {"type": "string", "description": "审阅者茶客名。"},
+                "reviewer": {"type": "string", "description": "Reviewer guest name."},
                 "reviewee": {
                     "type": "string",
-                    "description": "被审者茶客名（审其最近一条发言）。",
+                    "description": "Reviewee guest name (their most recent message is reviewed).",
                 },
             },
             "required": ["reviewer", "reviewee"],
@@ -149,7 +153,10 @@ class ProposeReviewTool(_ProposeHandoffBase):
         # 审的仍是茶客本意指的那条（docs §5.3）。
         msg = self._room.latest_message_by_speaker_id(reviewee)
         if msg is None:
-            return f"Error: 「{reviewee}」最近没有发言可审，无法提议请审。"
+            return (
+                f"Error: \"{reviewee}\" has no recent message to review; "
+                "cannot propose a review."
+            )
         return self._emit_proposal(
             {
                 "target": reviewer,
@@ -170,9 +177,12 @@ class ProposePanelTool(_ProposeHandoffBase):
     @property
     def description(self) -> str:
         return (
-            "提议拉一场圆桌：多位茶客就当前话题各自表态。提议 ≠ 立刻生效 —— UI 渲染成"
-            "采纳 / 忽略卡片，用户点采纳后才发起。targets 传 ≥2 个茶客名；summarizer "
-            "（可选）传一位负责汇总的茶客名。仅在话题确实需要多方观点时才提议。"
+            "Propose a round-table: several guests each state their view on the "
+            "current topic. Proposing does NOT take effect immediately — the UI "
+            "renders an accept / dismiss card; only after the user accepts is it "
+            "started. Pass targets as ≥2 guest names; summarizer (optional) is one "
+            "guest name to write the synthesis. Only propose when the topic really "
+            "needs multiple perspectives."
         )
 
     @property
@@ -183,11 +193,11 @@ class ProposePanelTool(_ProposeHandoffBase):
                 "targets": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "参与圆桌的茶客名（≥2 位）。",
+                    "description": "Round-table participant guest names (≥2).",
                 },
                 "summarizer": {
                     "type": "string",
-                    "description": "汇总者茶客名（可选）。",
+                    "description": "Summarizer guest name (optional).",
                 },
             },
             "required": ["targets"],

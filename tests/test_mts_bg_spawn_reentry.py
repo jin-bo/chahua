@@ -20,6 +20,7 @@ from typing import Optional
 import pytest
 
 from chahua.agent_run import (
+    AGENT_RUN_ERR_MTS_MANAGER,
     AGENT_RUN_ISSUED_BY_AGENT,
     AGENT_RUN_ISSUED_BY_USER,
     AgentRun,
@@ -606,9 +607,7 @@ async def test_start_agent_run_rejects_target_eq_mts_manager() -> None:
     )
 
     assert run is None
-    assert err is not None
-    assert "MTS 管理者" in err  # 文案命中
-    assert "Alice" in err
+    assert err == AGENT_RUN_ERR_MTS_MANAGER  # P14：源头返无参数原因码（target 参数由消费方本地化时插值）
 
 
 async def test_start_agent_run_allows_target_eq_manager_when_no_mts() -> None:

@@ -26,6 +26,24 @@ AGENT_RUN_ISSUED_BY_USER: IssuedBy = "user"
 AGENT_RUN_ISSUED_BY_AGENT: IssuedBy = "agent"
 
 
+# ── P14: bg-run 拒绝原因码（双语 seam）─────────────────────────────────────────
+# ``_start_agent_run`` 校验失败时返**无参数的原因码**（不再返成形中文句）；两个消费方
+# 各自本地化 —— 所有插值参数（target / task_id / 房间 cap）在两个 render 点都可得：
+#   - ``agent_run_start`` inbound → 中文 NOTICE（用户可见，P14 范围外，保持中文）
+#   - ``spawn_agent_run(s)`` 工具 → 英文 ``Error:``（回灌 LLM，P14 英文化）
+# 码无参数 → 避免脆弱的「中文句再正则回译」，两种语言由构造保证同步（docs/P14「双路 err」）。
+AgentRunError = Literal[
+    "target_absent", "task_not_found", "task_closed",
+    "target_busy", "room_cap", "mts_manager",
+]
+AGENT_RUN_ERR_TARGET_ABSENT: AgentRunError = "target_absent"
+AGENT_RUN_ERR_TASK_NOT_FOUND: AgentRunError = "task_not_found"
+AGENT_RUN_ERR_TASK_CLOSED: AgentRunError = "task_closed"
+AGENT_RUN_ERR_TARGET_BUSY: AgentRunError = "target_busy"
+AGENT_RUN_ERR_ROOM_CAP: AgentRunError = "room_cap"
+AGENT_RUN_ERR_MTS_MANAGER: AgentRunError = "mts_manager"
+
+
 def new_agent_run_id() -> str:
     """``run_<10字节 hex>`` —— 与 :func:`chahua.events.new_message_id` 同长度，扫读易认。"""
     return new_id("run")

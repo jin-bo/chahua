@@ -171,12 +171,13 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 ### context 渲染与 prompt 装配
 
-- **`format_messages` 每条消息走 `<message>` 包裹**。`room.py::format_messages` 单点定义；消息 body 可能含 markdown HR/H2，不包时下一条消息边界难辨。4 个调用点共享。
+- **P14 起系统生成 prompt 全量英文化 + 逐块精练**（含 context / 功能块 / task 渲染 / 工具 description+return / 便宜模型指令）。用户内容不动、输出语言随对话（每轮塑造茶客回复的块带 `Always reply in the same language as the conversation (default: Chinese).` 语言锚点；`_SUMMARY_SYSTEM` / `_SYSTEM_PROMPT` 英文指令但保留中文输出要求）。`_speak_instruction_block` 追加 recall 段落（发言前回顾自身 `agent.messages` 的 tool 结果、截断才回 source 重读）+ 语言锚点，两态共用。**精练承重约束**：只删冗余、不丢承重语义、**不改功能性字面量**（工具名 / 路径 / `Error:` 前缀 / XML 标签名·属性名 / raw status 枚举 / JSON 字段；`<current_task status>` 的 display label 例外、随 `TASK_STATUS_DISPLAY` 英文化）、**MTS `<managed_session>` 5 条指令顺序不变**（守第 ② 条编号引用的不变量）。双路 err：`_start_agent_run` 返无参数原因码、inbound 渲中文 NOTICE / 工具渲英文 `Error:`（见 `docs/INVARIANTS.md` §9.x P14 + `docs/P14-…md`）。
+- **`format_messages` 每条消息走 `<message>` 包裹**。`room.py::format_messages` 单点定义；消息 body 可能含 markdown HR/H2，不包时下一条消息边界难辨。4 个调用点共享。P14 起分隔符语言无关 `{display}: {text}`（原「{display} 说：」）。
 - **喂茶客 context_message：XML 包外层 + Markdown 渲内层**。`_render_onboarding` 6+1 块、`_render_incremental` 4 块，无内容整块省略。`<order_hint>` 与 `<current_task>` 同生共灭（仅 `task_block` 非空才注入）。新块同步加进 `tests/test_render_onboarding_xml.py`。
 - **通道 1 两态注入：onboarding / incremental 都贴 task 块**。两条路径都吃 `task_id`；只 onboarding 注入会让 task 视野在多数短轮失效。
 - **task_id 经形参透传，不在渲染层读 store**。`_run_turn` snapshot `active_task_id` → `_build_context_for(*, task_id)` → `_render_task_block`（纯函数）。closed / 已删 task 调用方判后不注入。
 - **task block 预算：full ≤300 / compact ≤80 token**。compact 路径短路省 IO —— 只 `get_task` 一次。
-- **`./task/` 落盘文案分层：compact 极简 / full 详细**。compact 三句（软触发 + 落盘动作 + 边界提醒）；full 单次喂 onboarding 分四段。触发用「你判断」软描述，不给字数硬阈值。
+- **`./task/` 落盘文案分层：compact 极简 / full 详细**（P14 精练后均英文祈使）。compact 2 行（读 read_file / 写 task_write_artifact + 否定 write_file / 概要+引用）；full 多「持久化类型清单 + 命名示例」。承重语义点：读 `read_file` / 写 `task_write_artifact` / 否定 `write_file` / 命名习惯 / 概要+引用（精练后逐条核对仍在，回归 `tests/test_render_task_block.py`）。
 - **打分 prompt 含极简 `<current_task>` 块，与 speak 不共享 body renderer**。scoring 走 `render_scoring_header`（title + **完整 goal** + status）、speak compact 走 `render_task_header`（goal 首行）。每 pick 周期 1 次 `get_task`，N scorer 共享。
 - **speak 与 scoring 的 order-hint 常量不能合并**。`_SPEAK_ORDER_HINT_BLOCK`（行为指令）与 `_ORDER_HINT_BLOCK`（数字锚点）措辞不同；互换会污染对方阶段。
 

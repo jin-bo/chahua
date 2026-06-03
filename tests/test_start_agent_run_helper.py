@@ -16,7 +16,15 @@ from typing import Any, Optional
 
 import pytest
 
-from chahua.agent_run import AGENT_RUN_ISSUED_BY_AGENT, AGENT_RUN_ISSUED_BY_USER
+from chahua.agent_run import (
+    AGENT_RUN_ERR_ROOM_CAP,
+    AGENT_RUN_ERR_TARGET_ABSENT,
+    AGENT_RUN_ERR_TARGET_BUSY,
+    AGENT_RUN_ERR_TASK_CLOSED,
+    AGENT_RUN_ERR_TASK_NOT_FOUND,
+    AGENT_RUN_ISSUED_BY_AGENT,
+    AGENT_RUN_ISSUED_BY_USER,
+)
 from chahua.events import (
     ChahuaEnvelope,
     ChahuaEventType,
@@ -162,7 +170,7 @@ def test_start_agent_run_rejects_unknown_target() -> None:
         issued_by=AGENT_RUN_ISSUED_BY_USER, source_guest=None,
     )
     assert run is None
-    assert err is not None and "不在场" in err
+    assert err == AGENT_RUN_ERR_TARGET_ABSENT  # P14：源头返无参数原因码
 
 
 def test_start_agent_run_rejects_closed_task() -> None:
@@ -177,7 +185,7 @@ def test_start_agent_run_rejects_closed_task() -> None:
         issued_by=AGENT_RUN_ISSUED_BY_USER, source_guest=None,
     )
     assert run is None
-    assert err is not None and "已关闭" in err
+    assert err == AGENT_RUN_ERR_TASK_CLOSED
 
 
 def test_start_agent_run_rejects_missing_task() -> None:
@@ -188,7 +196,7 @@ def test_start_agent_run_rejects_missing_task() -> None:
         issued_by=AGENT_RUN_ISSUED_BY_USER, source_guest=None,
     )
     assert run is None
-    assert err is not None and "不存在" in err
+    assert err == AGENT_RUN_ERR_TASK_NOT_FOUND
 
 
 def test_start_agent_run_rejects_busy_target() -> None:
@@ -200,7 +208,7 @@ def test_start_agent_run_rejects_busy_target() -> None:
         issued_by=AGENT_RUN_ISSUED_BY_USER, source_guest=None,
     )
     assert run is None
-    assert err is not None and "正忙" in err
+    assert err == AGENT_RUN_ERR_TARGET_BUSY
 
 
 async def _drain(rt: RoomRuntime) -> None:
@@ -233,7 +241,7 @@ async def test_start_agent_run_rejects_at_room_cap() -> None:
         issued_by=AGENT_RUN_ISSUED_BY_USER, source_guest=None,
     )
     assert run is None
-    assert err is not None and "已达上限" in err
+    assert err == AGENT_RUN_ERR_ROOM_CAP
     await _drain(rt)
 
 

@@ -78,7 +78,10 @@ async def test_review_item_drains_and_injects_review_target() -> None:
     assert ctx is not None
     assert "<review_target>" in ctx and "</review_target>" in ctx
     # 被审消息原文走 format_messages 的 <message> 包装。
-    assert "<message>\n汪小姐 说：我觉得方案 A 更稳。\n</message>" in ctx
+    assert "<message>\n汪小姐: 我觉得方案 A 更稳。\n</message>" in ctx
+    # P14：review 指引英文化 + 语言锚点。
+    assert "Give your review" in ctx
+    assert "reply in the same language" in ctx
 
     turn_starts = [e for e in captured if e.type is ChahuaEventType.TURN_START]
     assert turn_starts[0].data["scoring_path"] == SCORING_PATH_HANDOFF_REVIEW

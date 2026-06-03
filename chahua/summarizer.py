@@ -55,10 +55,13 @@ class SummarySpan:
             return None
 
 
+# P14：指令英文化，但**输出必须保留中文**（summary 喂回 <room_summary> 且给用户看）。
 _SUMMARY_SYSTEM = (
-    "你是房间记录员。把下面这段群聊压成 3~5 条要点，每条不超过 30 字。"
-    "保留主语（谁说了什么、谁回应了谁），不复述废话，不评论。"
-    "输出纯文本，每条以 '- ' 开头；不要 markdown 代码块。"
+    "You are the room's note-taker. Compress the group chat below into 3-5 bullet "
+    "points, each at most 30 Chinese characters. Keep the subject (who said what, "
+    "who replied to whom); do not restate filler; do not comment. "
+    "Output the bullets IN CHINESE as plain text, each starting with '- '; no "
+    "markdown code block."
 )
 
 # 当连续失败 → ``_next_eligible_seq`` 至少要再过这么多条才重试；上限封顶防呆。
