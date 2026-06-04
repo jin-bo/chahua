@@ -100,6 +100,7 @@ from .server_inbound_io import (
     IOHandlers,
 )
 from .server_inbound_settings import (
+    INBOUND_SET_LLM_CREDENTIALS,
     INBOUND_UPDATE_ROOM_TOML,
     INBOUND_UPDATE_USER_AVATAR,
     INBOUND_UPDATE_USER_MD,
@@ -1385,6 +1386,8 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_UPDATE_USER_MD: "settings._inbound_update_user_md",
     INBOUND_UPDATE_ROOM_TOML: "settings._inbound_update_room_toml",
     INBOUND_UPDATE_USER_AVATAR: "settings._inbound_update_user_avatar",
+    # P15：desktop 登录态运行期注入 LLM 凭证（前台房专用，只改 os.environ + 热重建）。
+    INBOUND_SET_LLM_CREDENTIALS: "settings._inbound_set_llm_credentials",
     # io slot：persona import / 文件上传 / 房间导出。
     INBOUND_IMPORT_PERSONA_FOLDER: "io._inbound_import_persona_folder",
     INBOUND_IMPORT_PERSONA_GITHUB: "io._inbound_import_persona_github",
