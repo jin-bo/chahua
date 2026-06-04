@@ -14,19 +14,33 @@ _log = logging.getLogger(__name__)
 
 
 def require_str(
-    data: dict, key: str, *, where: str, allow_empty: bool = False
+    data: dict,
+    key: str,
+    *,
+    where: str,
+    allow_empty: bool = False,
+    redact: bool = False,
 ) -> Optional[str]:
     """从入站 payload 取一个 str 字段，校验失败 → WARN + 返回 ``None``。
 
     ``where`` 取 ``INBOUND_*`` 常量值 —— 让 WARN 日志一眼看出是哪条 wire 帧不合法。
     ``allow_empty=True`` 给 ``content`` 这种允许空串的字段（用户清空 USER.md 等）。
+    ``redact=True`` 给 ``api_key`` 等敏感字段：失败日志只写**类型**不写值 —— 默认的
+    ``%r`` 会把收到的值原样进日志（对 raw key 是直接泄漏，见 P15 承重不变量）。
     """
     v = data.get(key)
     if not isinstance(v, str) or (not allow_empty and not v):
-        _log.warning(
-            "ignoring %s: %s 必须是%sstr，收到 %r",
-            where, key, "" if allow_empty else "非空 ", v,
-        )
+        empty_hint = "" if allow_empty else "非空 "
+        if redact:
+            _log.warning(
+                "ignoring %s: %s 必须是%sstr（收到类型 %s）",
+                where, key, empty_hint, type(v).__name__,
+            )
+        else:
+            _log.warning(
+                "ignoring %s: %s 必须是%sstr，收到 %r",
+                where, key, empty_hint, v,
+            )
         return None
     return v
 
