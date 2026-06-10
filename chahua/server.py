@@ -30,6 +30,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, Optional
+from xml.sax.saxutils import quoteattr
 
 from websockets import CloseCode
 from websockets.asyncio.server import ServerConnection, serve
@@ -51,7 +52,7 @@ from .events import (
     NOTICE_LEVEL_ERROR,
     NOTICE_LEVEL_INFO,
 )
-from .image_input import _normalize_share_image_rel
+from .image_input import _normalize_share_image_rel, ext_to_mime
 from .room_runtime import (
     ROUTER_MODE_BACKGROUND,
     ROUTER_MODE_FOREGROUND,
@@ -192,11 +193,16 @@ _TURN_ID_RE = re.compile(r"^turn_[0-9a-f]+$")
 def _attach_files_to_text(text: str, files: object) -> str:
     """把 ``user_message.files`` 列表里的相对路径附到文本末尾。
 
-    每个文件渲染成单独一行 ``<./xxx>`` —— 用户友好可读（保留在 transcript），同时
-    给茶客一个明显的"这里挂了文件，去自己 cwd 下 ``./share/...`` 读"信号。
+    每个文件渲染成单独一行自闭合标签 ``<attachment uri="share/x.png"
+    mimetype="image/png"/>``：``uri`` 用 canonical rel（``share/x.png``，与
+    ``resolve_images`` 的 ``_source`` 同口径），``mimetype`` 仅扩展名命中图白名单
+    :func:`~chahua.image_input.ext_to_mime` 时给出。格式与 agentao（≥0.4.9）视觉降级
+    ``_render_image_reference_fallback`` 逐字一致（两侧同走 ``quoteattr``）——
+    模型拒图后 agentao 注入的降级标签因此与 prompt 里既有标记完全相同，省 token、
+    避免同一文件出现两种引用形态。
 
-    防御：``files`` 不是 list / 元素不是 str → 忽略；空串元素跳过；不允许绝对路径
-    或 ``..`` —— ``share/`` 之外的路径不该被一条用户消息暗中塞进上下文。
+    防御：``files`` 不是 list / 元素不是 str → 忽略；空串元素跳过；不允许绝对路径、
+    反斜杠或 ``..`` —— ``share/`` 之外的路径不该被一条用户消息暗中塞进上下文。
     """
     if not isinstance(files, list):
         return text
@@ -205,13 +211,18 @@ def _attach_files_to_text(text: str, files: object) -> str:
         if not isinstance(f, str):
             continue
         s = f.strip()
-        # 同时拒 `/` 和 `\` —— 后者在 Windows 上也是路径分隔符，``s.split("/")`` 单
-        # 拆 forward slash 会让 ``share\..\boom`` 漏过去。
-        parts = s.replace("\\", "/").split("/")
-        if not s or s.startswith("/") or s.startswith("\\") or ".." in parts:
+        parts = s.split("/")
+        # 反斜杠整体拒（与 ``_normalize_share_image_rel`` 同口径）—— 它在 Windows 上
+        # 也是路径分隔符；且带反斜杠的 rel 在视觉（images_rel 筛图）与下载两头都会被
+        # 拒，放进标记只会产生一个两边都死的引用。
+        if not s or "\\" in s or s.startswith("/") or ".." in parts:
             _log.warning("user_message: 跳过非法文件引用 %r", f)
             continue
-        refs.append(f"<./{s}>")
+        mime = ext_to_mime(parts[-1])
+        attrs = f"uri={quoteattr(s)}"
+        if mime:
+            attrs += f" mimetype={quoteattr(mime)}"
+        refs.append(f"<attachment {attrs}/>")
     if not refs:
         return text
     appendix = "\n".join(refs)

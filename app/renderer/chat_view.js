@@ -360,13 +360,16 @@ function ensureAttachmentsContainer(bubble) {
 // IntersectionObserver 上，仅当 figure 进入视口才触发——防止打开一个 50 张图的历史
 // 房间瞬间发 50 个 download_file purpose=preview 雷暴。``false`` = live emit 路径,
 // 用户视线就在底部，立即拉取。
+// ``opts.pillOnly``：图片也走下载 pill、不内嵌预览 —— 用户消息附件用
+// （attachUserAttachments：用户刚上传的图自己见过，不值得再发 preview 帧拉字节）。
 export function attachArtifactToBubble(bubble, artifact, callbacks, opts = null) {
   if (!bubble || !artifact || !artifact.rel || !artifact.name) return;
   const host = ensureAttachmentsContainer(bubble);
   const dupSel = `[data-${ARTIFACT_REL_DATASET_KEY}="${cssEscape(artifact.rel)}"]`;
   if (host.querySelector(dupSel)) return;
   const lazy = !!(opts && opts.lazy);
-  if (shouldRenderInline(artifact.name)) {
+  const pillOnly = !!(opts && opts.pillOnly);
+  if (!pillOnly && shouldRenderInline(artifact.name)) {
     host.appendChild(buildImageNode(artifact, callbacks, lazy));
   } else {
     host.appendChild(buildDownloadPill(artifact, callbacks));
@@ -459,18 +462,86 @@ function buildDownloadPill(artifact, callbacks) {
   pill.title = `${artifact.name}（点击下载）`;
   const icon = document.createElement("span");
   icon.className = "artifact-pill-icon";
-  icon.textContent = "📄";
+  // 默认路径图片走 buildImageNode 不进这里（恒 📄）；pillOnly 路径图片也走 pill，
+  // 按扩展名换图标。
+  icon.textContent = shouldRenderInline(artifact.name) ? "🖼️" : "📄";
   const name = document.createElement("span");
   name.className = "artifact-pill-name";
   name.textContent = artifact.name;
-  const size = document.createElement("span");
-  size.className = "artifact-pill-size";
-  size.textContent = formatArtifactSize(artifact.size);
-  pill.append(icon, name, size);
+  pill.append(icon, name);
+  // 用户附件路径 size 未知（标记里只有 uri / mimetype）—— 空文本时不挂 span。
+  const sizeText = formatArtifactSize(artifact.size);
+  if (sizeText) {
+    const size = document.createElement("span");
+    size.className = "artifact-pill-size";
+    size.textContent = sizeText;
+    pill.appendChild(size);
+  }
   pill.addEventListener("click", () => {
     if (callbacks?.onRequestDownload) callbacks.onRequestDownload(artifact.rel);
   });
   return pill;
+}
+
+// ── 用户消息附件标记 ────────────────────────────────────────────────────────
+// server 端 _attach_files_to_text 与 renderer 本地 echo 都把上传文件渲成独立一行
+// `<attachment uri="share/x.png" mimetype="image/png"/>` 附在用户文本末尾（与 agentao
+// 视觉降级标签同格式，transcript / prompt 口径不动）。展示层把这些行抽出来变
+// 「文件图标 + 文件名」pill 挂气泡尾，不再以文本形式可见。
+//
+// quoteattr 在值含 `"` 时会改用单引号包裹，两种引号都接；属性值只反转义
+// `&amp; &lt; &gt; &quot;`（rel 经 sanitize，正常不含特殊字符，这里是兜底）。
+const ATTACHMENT_LINE_RE =
+  /^\s*<attachment\s+uri=("[^"]*"|'[^']*')(?:\s+mimetype=("[^"]*"|'[^']*'))?\s*\/>\s*$/;
+
+// 迁移前的旧格式（`<./share/x.png>` 整行）—— 既有 transcript 里仍存在，display 层
+// 向后兼容渲成同样的 pill（不重写 transcript）。无转义（旧 server 端原样拼接）。
+const LEGACY_ATTACHMENT_LINE_RE = /^\s*<\.\/([^<>]+)>\s*$/;
+
+function unescapeXmlAttr(s) {
+  return s
+    .replaceAll("&quot;", '"')
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
+
+// 把用户消息文本拆成「可见正文 + 附件引用列表」。仅整行匹配的标记被抽出（用户手敲
+// 在句中的 `<attachment` 字样原样保留）；解析出空 rel / 空文件名的畸形标记也保留为
+// 文本，宁可丑也不静默吞内容。
+export function parseUserAttachments(text) {
+  const src = String(text ?? "");
+  if (!src.includes("<attachment") && !src.includes("<./")) {
+    return { body: src, refs: [] };
+  }
+  const bodyLines = [];
+  const refs = [];
+  for (const line of src.split("\n")) {
+    let rel = null;
+    const m = ATTACHMENT_LINE_RE.exec(line);
+    if (m) {
+      rel = unescapeXmlAttr(m[1].slice(1, -1));
+    } else {
+      const legacy = LEGACY_ATTACHMENT_LINE_RE.exec(line);
+      if (legacy) rel = legacy[1];
+    }
+    const name = rel ? rel.split("/").pop() : "";
+    if (rel && name) {
+      refs.push({ rel, name });
+    } else {
+      bodyLines.push(line);
+    }
+  }
+  return { body: bodyLines.join("\n"), refs };
+}
+
+// 把 parseUserAttachments 解析出的引用挂到用户气泡尾，走 pill 形态（pillOnly）。
+// 容器 / 按 rel 去重 / 点击下载全部复用 attachArtifactToBubble 单一入口。
+export function attachUserAttachments(bubble, refs, callbacks) {
+  if (!bubble || !Array.isArray(refs)) return;
+  for (const ref of refs) {
+    attachArtifactToBubble(bubble, ref, callbacks, { pillOnly: true });
+  }
 }
 
 // envelope_router 收到 ``file_download{purpose:"preview"}`` 时调，按 rel 把 bytes 填给

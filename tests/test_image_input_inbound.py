@@ -40,9 +40,9 @@ async def test_filters_images_from_files(task_inbound_srv, monkeypatch):
     cap = await _send_and_capture(
         srv, monkeypatch, ["share/a.png", "share/b.txt"],
     )
-    # 文本含两个标记（文本标记是普适视图）。
-    assert "<./share/a.png>" in cap["text"]
-    assert "<./share/b.txt>" in cap["text"]
+    # 文本含两个标记（文本标记是普适视图）；与 agentao 降级标签同格式。
+    assert '<attachment uri="share/a.png" mimetype="image/png"/>' in cap["text"]
+    assert '<attachment uri="share/b.txt"/>' in cap["text"]
     # images_rel 只含图片。
     assert cap["images_rel"] == ("share/a.png",)
 

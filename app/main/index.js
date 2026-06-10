@@ -25,6 +25,9 @@ app.setName("chahua");
 
 const PRELOAD_PATH = path.join(__dirname, "..", "preload", "index.js");
 const RENDERER_HTML = path.join(__dirname, "..", "renderer", "index.html");
+// 应用图标。打包后 Dock/Launchpad 走 .icns（package.json build.mac.icon）；dev 模式下
+// Dock 仍是 Electron 默认，故显式喂 BrowserWindow.icon（mac dev 下用 png 即可）。
+const APP_ICON = path.join(__dirname, "..", "build", "icon.png");
 
 if (!app.requestSingleInstanceLock()) {
   // 第二实例：直接退，不喊出 dock 也不 focus 现有窗 —— P3.1 单房间会话型，等
@@ -65,6 +68,8 @@ async function createWindow(wsUrl) {
     minWidth: 960,
     minHeight: 640,
     title: "茶话室",
+    // dev 才显式喂 icon；packaged 走 bundle/exe 自带图标，且 build/ 不进 asar。
+    ...(app.isPackaged ? {} : { icon: APP_ICON }),
     webPreferences: {
       preload: PRELOAD_PATH,
       contextIsolation: true,
@@ -95,6 +100,15 @@ ipcMain.handle("chahua:pick-folder", async () => {
 });
 
 app.whenReady().then(async () => {
+  // mac dev：Dock 读 app bundle 图标，dev 下没有 bundle → 显式 setIcon 才能看到品牌图标。
+  // 打包后 bundle 自带 .icns 且 build/ 不进 asar（APP_ICON 不存在），故仅 dev 设。
+  if (process.platform === "darwin" && app.dock && !app.isPackaged) {
+    try {
+      app.dock.setIcon(APP_ICON);
+    } catch (e) {
+      console.error("[chahua] dock.setIcon 失败:", e);
+    }
+  }
   const paths = resolvePaths();
   try {
     const copied = await seedUserData(paths);

@@ -423,7 +423,7 @@ class Orchestrator:
 
         ``images_rel``（P13）：本轮触发用户消息携带的图片 rel（canonical ``share/x.png``），
         **只透传进 ``_run_ai_chain``**；pre-drain（``run_pending_handoff``）/ re-drain /
-        dormant MTS kickoff 不接像素 —— 那些路径只看 ``<./share/...>`` 文本标记。纯瞬态
+        dormant MTS kickoff 不接像素 —— 那些路径只看 ``<attachment .../>`` 文本标记。纯瞬态
         形参，turn 内用完即弃，不落 transcript / 不改任何 schema。
         """
         if not text:

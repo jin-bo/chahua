@@ -72,7 +72,7 @@ class AIChainOps:
         last_open_turn_id: Optional[str] = None
         # P13：视觉附图只给 chain 第一个真正发言的 pick 周期（直接回应用户消息那批）。
         # 之后是 AI→AI 接力（「后续 turn」），按不变量「历史图对后续 turn 退回文本引用」
-        # 只看 ``<./share/...>`` 标记、不再重发 base64 —— 省 token、语义上像素只属于用户
+        # 只看 ``<attachment .../>`` 标记、不再重发 base64 —— 省 token、语义上像素只属于用户
         # 那条消息。**本地 flag 而非 ``_consecutive_ai_turns == 0``**：pre-drain 会先
         # bump 共享计数器（单一 cap），用计数器判会误伤「pre-drain 后才回应用户的首发者」。
         first_cycle = True

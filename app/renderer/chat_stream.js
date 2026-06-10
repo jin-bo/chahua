@@ -13,7 +13,9 @@ import {
   attachArtifactToBubble,
   attachCopyButton,
   attachReviewButton,
+  attachUserAttachments,
   isSelectionInside,
+  parseUserAttachments,
   removeStreamingCursor,
   renderGuestText,
   renderMarkdown,
@@ -96,7 +98,12 @@ export function createChatStream({
 
   // 用户行：右对齐气泡 + 头像（无名字 —— 自己看自己 redundant）。镜像茶客布局：
   // 茶客是 [头像][气泡]，用户是 [气泡][头像]。
+  //
+  // 文本里的 `<attachment .../>` 标记行（上传文件引用，本地 echo 与 transcript 同
+  // 格式）不以文本展示 —— 抽出来变「文件图标 + 文件名」pill 挂气泡尾，点击下载。
+  // 复制按钮也只复制可见正文，不带标记。
   function makeUserRow(text, { messageId = null, taskId = null } = {}) {
+    const { body, refs } = parseUserAttachments(text);
     const li = document.createElement("li");
     li.className = "user";
     if (messageId) li.dataset.messageId = messageId;
@@ -106,9 +113,11 @@ export function createChatStream({
     bubble.className = "bubble bubble-user";
     const t = document.createElement("span");
     t.className = "text";
-    t.textContent = text;
+    t.textContent = body;
     bubble.appendChild(t);
-    attachCopyButton(bubble, () => text);
+    attachUserAttachments(bubble, refs, artifactCallbacks);
+    // 复制可见正文；纯附件消息（body 空）退回原始标记文本，否则复制到手的是空串。
+    attachCopyButton(bubble, () => body || text);
     attachReviewButton(bubble, messageId, onRequestReview);
     li.appendChild(bubble);
     li.appendChild(makeUserAvatar("msg-avatar"));

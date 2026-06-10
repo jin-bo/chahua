@@ -12,7 +12,7 @@ import { Inbound } from "./events.js";
 const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
 
 // P13 C3：视觉输入上限（与后端 agentao.media_limits.MAX_IMAGE_BYTES = 20MB 对齐）。
-// 超过此值的图片仍能上传（≤200MB），但茶客模型看不到像素、退回 `<./share/..>` 文本
+// 超过此值的图片仍能上传（≤200MB），但茶客模型看不到像素、退回 `<attachment .../>` 文本
 // 引用 —— pill 上提示一下，避免用户以为大图也被「看见」。
 const VISION_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
@@ -39,6 +39,14 @@ function fileTypeLabel(name) {
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return "FILE";
   return name.slice(dot + 1).toUpperCase();
+}
+
+// 非图 / 缩略图解码失败时的 emoji 方块图标 —— 正常分支与 img.onerror 兜底共用。
+function makePendingFileIcon() {
+  const div = document.createElement("div");
+  div.className = "pending-file-icon";
+  div.textContent = PENDING_FILE_ICON;
+  return div;
 }
 
 // File → 纯 base64 字符串（去掉 data URI 头）。FileReader.readAsDataURL 比手写
@@ -114,11 +122,21 @@ export function createUpload({
         icon = document.createElement("img");
         icon.className = "pending-file-icon pending-file-thumb";
         icon.src = f.thumb;
-        icon.alt = displayName;
+        icon.alt = "";
+        // 解码失败（文件损坏 / 非真图）→ 换回 emoji 方块，别留裂图。顺手 revoke +
+        // 清 f.thumb：renderPills 每次 echo / 移除都整体重建，不清的话同一个坏 blob
+        // 每次重建都再解码失败一遍（大文件耗时 + img→emoji 闪烁）。比对 thumbUrl
+        // 防错杀 —— 同名覆盖路径可能已 revoke 旧 blob 并换上新 thumb。
+        const thumbUrl = f.thumb;
+        icon.addEventListener("error", () => {
+          if (f.thumb === thumbUrl) {
+            URL.revokeObjectURL(thumbUrl);
+            f.thumb = null;
+          }
+          icon.replaceWith(makePendingFileIcon());
+        }, { once: true });
       } else {
-        icon = document.createElement("div");
-        icon.className = "pending-file-icon";
-        icon.textContent = PENDING_FILE_ICON;
+        icon = makePendingFileIcon();
       }
 
       const info = document.createElement("div");
@@ -140,7 +158,7 @@ export function createUpload({
         const warn = document.createElement("span");
         warn.className = "pending-file-vision-warn";
         warn.textContent = "超 20MB · 茶客看文本引用";
-        warn.title = "图片超过视觉模型上限（20MB），茶客将收到 <./share/..> 文本引用而非像素";
+        warn.title = "图片超过视觉模型上限（20MB），茶客将收到 <attachment> 文本引用而非像素";
         info.append(warn);
       }
 
