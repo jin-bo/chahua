@@ -16,8 +16,9 @@
   不写 ``_is_image_unsupported`` 同义物、不维护视觉能力表。
 - **base64 懒读不入库**：bytes 只在 speak 时从 ``share/`` 实路径现读现传，绝不进
   transcript / envelope。
-- **`_source` 直接用 canonical rel**（``share/x.png``）—— 让 agentao 降级文本
-  ``- share/x.png (image/png)`` 与 prompt 里 ``<./share/x.png>`` 标记口径一致。
+- **`_source` 直接用 canonical rel**（``share/x.png``）—— 让 agentao 降级标签
+  ``<attachment uri="share/x.png" mimetype="image/png"/>`` 与 prompt 里
+  ``_attach_files_to_text`` 生成的同格式标记逐字一致。
 - **读盘点必做 symlink 逃逸检查**：段形校验是字符串层防穿越，symlink 逃逸是文件系统层
   防穿越（chahua 的 ``share/`` 本就是软链拼装），两层都要 —— 与 ``download_file`` 同口径
   （``resolve()`` 两侧 + ``relative_to``）。
@@ -47,6 +48,20 @@ _EXT_TO_MIME: dict[str, str] = {
 _SHARE_PREFIX = "share/"
 
 
+def ext_to_mime(filename: str) -> Optional[str]:
+    """按扩展名映射图片 MIME；非白名单扩展 / 空 stem（dotfile）/ 无扩展名 → ``None``。
+
+    「什么算图、配什么 mimetype」的单一来源 —— ``_normalize_share_image_rel`` 筛图、
+    ``resolve_images`` 发图、``server._attach_files_to_text`` 标记 mimetype 三处共用，
+    规则改这里一处即可。``rpartition`` 取最后一个 ``.``：``share/x.png`` 整 rel 或裸
+    文件名都可传（stem 含 ``/`` 不影响判定）。
+    """
+    stem, dot, ext = filename.rpartition(".")
+    if not dot or not stem:
+        return None
+    return _EXT_TO_MIME.get(ext.lower())
+
+
 def _normalize_share_image_rel(rel: object) -> Optional[str]:
     """纯字符串校验：合法的 ``share/<...>.<ext>`` 图片 rel → canonical 形态；否则 ``None``。
 
@@ -55,7 +70,7 @@ def _normalize_share_image_rel(rel: object) -> Optional[str]:
     inbound 筛图（同步接帧上下文）与 ``resolve_images`` 读盘前都复用此校验。
 
     返回的 canonical rel 仍带 ``share/`` 前缀（``share/x.png``）—— ``_source`` 直接用它，
-    与 prompt 里 ``<./share/x.png>`` 标记口径一致。
+    与 prompt 里 ``<attachment uri="share/x.png" .../>`` 标记的 uri 口径一致。
     """
     if not isinstance(rel, str):
         return None
@@ -68,11 +83,10 @@ def _normalize_share_image_rel(rel: object) -> Optional[str]:
     # 每段非空、非 ``.`` / ``..``（``share//x`` / ``share/./x`` / ``share/../x`` 全拒）。
     if any(p in ("", ".", "..") for p in parts):
         return None
-    # 末段必须形如 ``<非空 stem>.<白名单扩展名>``。``rpartition`` 取最后一个 ``.``：
-    # 空 stem（``share/.png`` 这种纯扩展名 dotfile）/ 无扩展名（``share/noext``）/
-    # 非图扩展名（``share/x.txt``）全拒。
-    stem, dot, ext = parts[-1].rpartition(".")
-    if not dot or not stem or ext.lower() not in _EXT_TO_MIME:
+    # 末段必须形如 ``<非空 stem>.<白名单扩展名>``：空 stem（``share/.png`` 这种纯
+    # 扩展名 dotfile）/ 无扩展名（``share/noext``）/ 非图扩展名（``share/x.txt``）
+    # 全拒 —— 规则见 :func:`ext_to_mime`。
+    if ext_to_mime(parts[-1]) is None:
         return None
     return s
 
@@ -134,7 +148,7 @@ def resolve_images(
             # 上传层允许 0 字节文件落 share/。空 ``data`` 会让 agentao 的图片预校验抛
             # ValueError（``_runner.py``：``not data`` → raise），且这不是「模型不支持
             # 视觉」错、走不到 reactive 文本回退 —— 整条 speak 会以 message_end(error)
-            # 收场。当作无效图跳过，退回 ``<./share/...>`` 文本标记（已在 prompt 里）。
+            # 收场。当作无效图跳过，退回 ``<attachment .../>`` 文本标记（已在 prompt 里）。
             _log.warning("resolve_images: 图片 %r 为空文件（0 字节），跳过", rel)
             continue
         if size > MAX_IMAGE_BYTES:
@@ -148,10 +162,10 @@ def resolve_images(
         except OSError:
             _log.warning("resolve_images: 读盘失败，跳过 %r", rel)
             continue
-        ext = norm.rsplit(".", 1)[-1].lower()
+        # normalize 已保证扩展名在白名单内，ext_to_mime 必非 None。
         out.append({
             "data": base64.b64encode(data).decode("ascii"),
-            "mimeType": _EXT_TO_MIME[ext],
+            "mimeType": ext_to_mime(norm),
             "_source": norm,
         })
     return out

@@ -86,7 +86,13 @@ function snippetOf(li) {
   const bubble = li.querySelector(".bubble");
   if (!bubble) return "";
   const text = bubble.querySelector(".text");
-  return (text ? text.textContent : bubble.textContent).trim().replace(/\s+/g, " ");
+  const s = (text ? text.textContent : bubble.textContent).trim().replace(/\s+/g, " ");
+  if (s) return s;
+  // 纯附件用户消息：正文为空、文件以 pill 挂气泡尾 —— 用文件名当 snippet，别显示「(空)」。
+  const names = [...bubble.querySelectorAll(".artifact-pill-name")]
+    .map((n) => n.textContent)
+    .join(", ");
+  return names ? `📎 ${names}` : "";
 }
 
 function collectCandidates(anchorLi) {

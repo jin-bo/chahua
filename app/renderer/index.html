@@ -3,9 +3,11 @@
 <head>
   <meta charset="utf-8">
   <!-- CSP：只允许本地 ws + 同源资源；inline style 给 system font fallback 留口；
-       img-src 多放 data: 给茶客头像 base64 data URI（room_info envelope 嵌入）。 -->
+       img-src 多放 data: 给茶客头像 base64 data URI（room_info envelope 嵌入），
+       blob: 给 composer 图片 pill 缩略图（upload.js URL.createObjectURL，仅来自
+       用户本地选的 File，无远程来源）。 -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
+        content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:">
   <title>茶话室</title>
   <!-- P5.7 拆分：按 feature 8 个文件，**顺序敏感** —— 与原 style.css 行号区间一一对应，
        别重排或插队，否则 cascade 优先级会变（sidebar 的 .popover 被 composer task chip 复用）。 -->
@@ -483,6 +485,13 @@
       </div>
     </div>
     <ul id="messages" aria-live="polite"></ul>
+    <!-- 空房间主视觉：#messages 无消息（:empty）时由 CSS `:has()` 顶到聊天栏居中显示。
+         纯展示、零 JS —— 房间一有历史/新消息，#messages 非空即自动隐藏（display:none
+         同时把它移出无障碍树；可见时读屏正常念 logo alt + tagline，不挂 aria-hidden）。 -->
+    <div id="empty-room-hero">
+      <img src="assets/chahua-logo.png" alt="茶话室" class="empty-room-hero-logo">
+      <div class="empty-room-hero-tagline">和茶客们聊点什么吧</div>
+    </div>
     <div id="splitter-right" class="splitter" data-target="--right-panel-width"
          role="separator" aria-orientation="vertical" tabindex="0"></div>
     <!-- 任务面板：placeholder 留容器与折叠按钮让首屏样式稳定，子 DOM 由

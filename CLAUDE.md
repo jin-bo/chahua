@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.8）
+uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.9）
 uv run chahua                                 # CLI（默认入 rooms/p1-test）
 uv run chahua --room rooms/p3-黄河路
 uv run chahua-server --host 127.0.0.1 --port 7860 --room rooms/p3-黄河路  # 独跑 sidecar
@@ -138,7 +138,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 完整 rationale 见 `docs/INVARIANTS.md` §P13，改不变量两处同步。
 
 - **降级归 agentao，chahua 不复制**。chahua 只把 `images=[{data, mimeType, _source}]` 传进 `arun()`；模型拒图后「换文本引用并重试」由 agentao 完成。不写 `_is_image_unsupported`、不维护 per-provider 视觉能力表 —— 逐茶客 model 各自生效。
-- **视觉附图纯瞬态，base64 懒读不入库**。`images_rel` 是 Python 形参沿当前 turn 透传后即弃，不动 `Message` / transcript / envelope / `schema_version`。bytes 只在 `speak()` 时从 `share/` 现读现传。transcript 只留 `<./share/..>` 文本标记（非视觉茶客 / 打分 / 历史轮次靠它）。debug 可记 `images_rel`（rel-only）不记 bytes。
+- **视觉附图纯瞬态，base64 懒读不入库**。`images_rel` 是 Python 形参沿当前 turn 透传后即弃，不动 `Message` / transcript / envelope / `schema_version`。bytes 只在 `speak()` 时从 `share/` 现读现传。transcript 只留 `<attachment uri="share/.." mimetype=".."/>` 文本标记（与 agentao 降级标签同格式；非视觉茶客 / 打分 / 历史轮次靠它）。debug 可记 `images_rel`（rel-only）不记 bytes。
 - **附图范围 = 本轮触发用户消息，且只进 `_run_ai_chain` 第一周期**。`run_ai_chain` 用本地 `first_cycle` flag（非 `_consecutive_ai_turns==0`，后者被 pre-drain 污染）只给回应用户那批 let_speak；AI 接力 / pre-drain / re-drain / dormant kickoff / handoff / MTS / bg run 一律退文本标记。**Why**：像素只属用户那条消息；省 token、有界可预测。
 - **打分永不吃图**。`scoring.py` 不解析/不附图，图仍是文本标记。
 - **图类型按扩展名白名单 `{png,jpg,jpeg,gif,webp}`，resolve 时映射 MIME**。线协议无 MIME，不扩协议、不嗅探内容。inbound 筛图 + resolve 双点共用 `_normalize_share_image_rel`（要求 `share/` 前缀、段非空/`.`/`..`、stem 非空、无绝对路径/反斜杠）。

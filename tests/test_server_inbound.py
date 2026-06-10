@@ -714,8 +714,9 @@ async def test_user_message_with_files_appends_refs(srv: _SpyServer):
     await srv._inflight_turn_task
     text = srv.run_turn_args[0]
     assert "看下" in text
-    assert "<./share/a.txt>" in text
-    assert "<./share/b.png>" in text
+    # 非图附件无 mimetype 属性；图附件带 —— 与 agentao 降级标签同格式。
+    assert '<attachment uri="share/a.txt"/>' in text
+    assert '<attachment uri="share/b.png" mimetype="image/png"/>' in text
     # P13：文本标记含全部 files，但 images_rel 只含图片子集。
     assert srv.run_turn_images[0] == ("share/b.png",)
 
@@ -728,7 +729,7 @@ async def test_user_message_files_only_no_text(srv: _SpyServer):
     )
     assert srv._inflight_turn_task is not None
     await srv._inflight_turn_task
-    assert srv.run_turn_args == ["<./share/a.txt>"]
+    assert srv.run_turn_args == ['<attachment uri="share/a.txt"/>']
 
 
 async def test_user_message_empty_no_files_dropped(srv: _SpyServer):

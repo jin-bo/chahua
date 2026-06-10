@@ -904,6 +904,19 @@ const commands = createCommands({
   getGuestNames: () => guests.map((g) => g.name),
 });
 
+// 本地 echo 的文件引用标记（与 server 端 _attach_files_to_text 同格式）。不写
+// mimetype —— 解析侧（parseUserAttachments）不读它，echo 只活到下次 room_history
+// 重建（届时换成 server 落 transcript 的权威全文），省一份 ext→MIME 映射拷贝。
+function attachmentTag(rel) {
+  const quote = (v) =>
+    `"${String(v)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")}"`;
+  return `<attachment uri=${quote(rel)}/>`;
+}
+
 composer.addEventListener("submit", (ev) => {
   ev.preventDefault();
   if (!dropdownEl.hidden) {
@@ -931,10 +944,12 @@ composer.addEventListener("submit", (ev) => {
   // 文件不空时即使 text 为空也允许发送 —— 用户拖了文件就是有意图。
   if (!text && !upload.hasPending()) return;
   const files = upload.snapshotRels();
-  // echo 显示：文本 + 文件引用（与 server 端 _attach_files_to_text 同口径），
-  // 让用户在自己气泡里就能看到"我刚发了什么"。
+  // echo 显示：文本 + 文件引用（与 server 端 _attach_files_to_text 同口径：
+  // <attachment uri="share/x.png" mimetype="image/png"/>，mimetype 仅图白名单
+  // 扩展名给出）。标记不以文本可见 —— makeUserRow 把标记行抽出渲成「文件图标 +
+  // 文件名」pill 挂气泡尾，echo 与 history 回放同路径。
   const echoLines = [text];
-  for (const f of files) echoLines.push(`<./${f}>`);
+  for (const f of files) echoLines.push(attachmentTag(f));
   const echo = echoLines.filter(Boolean).join("\n");
   // task_id snapshot at submit —— server 端在 inbound 接帧时按当前 active 打 tag，与
   // 这里 active 通常一致（单客户端串行 inbound + 用户改 active 也走 inbound 排队）。

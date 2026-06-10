@@ -3,6 +3,8 @@ __pycache__/
 *.py[oc]
 build/
 dist/
+# 例外：app/build/ 是 electron-builder buildResources（应用图标 icon.icns / icon.png），需入库
+!app/build/
 wheels/
 *.egg-info
 
