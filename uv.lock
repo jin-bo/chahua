@@ -133,7 +133,7 @@ wheels = [
 
 [[package]]
 name = "chahua"
-version = "0.1.7.dev0"
+version = "0.1.7"
 source = { editable = "." }
 dependencies = [
     { name = "agentao" },
