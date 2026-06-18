@@ -262,6 +262,53 @@
   border-radius: 3px;
 }
 
+/* P10.1 代码高亮主题（highlight.js v11）—— 暖色暗底，配既有 pre 的 #2b2b2b/#e8e3d6 暗色
+   代码块（chat.css:179）。不 vendored 第三方主题 CSS，~15 行 token 着色映射到与正文 #e8e3d6
+   同色温的暖调。**只 scope 在气泡暗底 surface（.bubble .text.markdown）**——任务卡 goal 的
+   pre 是浅底（#f6f3ea，task_panel.css），这套浅色 token 在浅底近乎不可读；goal 代码块经
+   highlightCode 加 hljs span 但无此主题、退回 goal 默认深色字（#444）落浅底，仍可读。 */
+.bubble .text.markdown code.hljs { color: #e8e3d6; }
+.bubble .text.markdown .hljs-comment,
+.bubble .text.markdown .hljs-quote { color: #9b9080; font-style: italic; }
+.bubble .text.markdown .hljs-keyword,
+.bubble .text.markdown .hljs-selector-tag,
+.bubble .text.markdown .hljs-literal,
+.bubble .text.markdown .hljs-meta .hljs-keyword { color: #d59c6b; }
+.bubble .text.markdown .hljs-string,
+.bubble .text.markdown .hljs-regexp,
+.bubble .text.markdown .hljs-addition { color: #a8b88a; }
+.bubble .text.markdown .hljs-number,
+.bubble .text.markdown .hljs-symbol,
+.bubble .text.markdown .hljs-deletion { color: #cc8b76; }
+.bubble .text.markdown .hljs-title,
+.bubble .text.markdown .hljs-title.function_,
+.bubble .text.markdown .hljs-section { color: #e3c08d; }
+.bubble .text.markdown .hljs-built_in,
+.bubble .text.markdown .hljs-type,
+.bubble .text.markdown .hljs-class .hljs-title { color: #9bb3b0; }
+.bubble .text.markdown .hljs-attr,
+.bubble .text.markdown .hljs-attribute,
+.bubble .text.markdown .hljs-variable,
+.bubble .text.markdown .hljs-template-variable { color: #c9b06b; }
+.bubble .text.markdown .hljs-tag,
+.bubble .text.markdown .hljs-name,
+.bubble .text.markdown .hljs-selector-id,
+.bubble .text.markdown .hljs-selector-class { color: #cc8b76; }
+.bubble .text.markdown .hljs-meta,
+.bubble .text.markdown .hljs-comment .hljs-doctag { color: #9b9080; }
+.bubble .text.markdown .hljs-emphasis { font-style: italic; }
+.bubble .text.markdown .hljs-strong { font-weight: 600; }
+
+/* P10.1 数学 / 化学（KaTeX）—— 排版骨架靠 vendored katex.min.css（loadKatex 懒注入 <link>）；
+   这里仅补颜色继承（公式随气泡正文色）+ 宽 display 公式横向溢出滚动，不改 KaTeX 排版。
+   carrier 未渲（KaTeX 加载失败 / 降级）时显示等宽字面 TeX。 */
+.markdown .katex { color: inherit; }
+.markdown .katex-display { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+.markdown span.math-tex:not(.math-done) {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
 /* 「气泡后挂图片 / 下载链」—— task_artifact_added 拿到 originated_message_id 后由
    chat_view.attachArtifactToBubble append 到 .bubble 末尾。图片走懒加载占位 + bytes 回来
    填 <img>；其它扩展走 pill 按钮，点击触发 file_download purpose=download 浏览器下载。
@@ -321,6 +368,18 @@
 .bubble .artifact-pill:hover {
   background: #f0eada;
   border-color: #c9be9b;
+}
+/* 气泡 pill 里的文件类型角标（file_icon.js / composer.css 共用样式）—— 气泡文字 11px，
+   角标缩到一档免把 pill 撑高，折角同比例收窄。 */
+.bubble .artifact-pill .file-ico {
+  width: 17px;
+  height: 20px;
+  font-size: 6.5px;
+  padding-bottom: 2px;
+}
+.bubble .artifact-pill .file-ico::after {
+  border-top-width: 6px;
+  border-left-width: 6px;
 }
 .bubble .artifact-pill-name {
   max-width: 220px;

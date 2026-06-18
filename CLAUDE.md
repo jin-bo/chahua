@@ -269,6 +269,11 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **挂件渲染按 rel 去重**。`attachArtifactToBubble` 按 `[data-rel="..."]` 查重，防 live+history 双触发。
 - **图片预览懒拉、不 eager 内嵌**。`task_artifact_added` 不带 base64；前端渲占位 `<img>` 后发 `download_file purpose=preview`，回包后 `resolveArtifactPreview` 灌字节。SVG 走 pill 下载链不内嵌；白名单 `{png,jpg,jpeg,gif,webp}` 内嵌。
 - **切房 / clear 必清 pending preview**。`renderSidebar` 调 `clearPendingArtifactPreviews()`，否则 `replaceChildren` 后等待中的 `<img>` 已被摘走，preview 字节无处灌。
+- **P10.1 数学/化学走 marked「转义前封箱」+ KaTeX live-DOM 延后渲**。marked 的 CommonMark 反斜杠转义会在 KaTeX 看到 TeX 前吃掉 `\,`/`\\` 等，故用行内扩展（`mathDisplay`/`mathInline`，display 先注册）把整段 `$…$`/`$$…$$` 作单一 token 原样收走 → carrier `<span class="math-tex …">escapeHtml(TeX)</span>`。只认 `$`/`$$`（不认 `\(`/`\[`），`$` 货币歧义以 pandoc 风格正则收窄。
+- **KaTeX 在 DOMPurify 之后、live DOM 渲，只 message_end 调一次，逐公式独立 render**。不塞进 `renderMarkdown` 过 DOMPurify（剥内联 style / MathML）、不在流式 `appendDelta` 渲（半截抛错闪烁）。`KATEX_OPTS` 硬编码 `trust:false` + `throwOnError:false` + `strict:"ignore"`、**不传 `macros`**（`\gdef` 连气泡内都不跨公式泄漏）；产物不再过 DOMPurify、靠 `trust:false` + 钉版 + CSP 兜底。
+- **代码高亮 highlight.js v11 喂转义 textContent、单块单次、跳 mermaid/已高亮/未注册语言**。`highlightCode` 扫 `pre>code[class*="language-"]`，跳 `language-mermaid` / `.hljs` / `getLanguage` 为空（未注册保纯文本不猜）。懒加载 `import("@highlightjs/cdn-assets/es/highlight.min.js")`（自包含浏览器 ESM，**不能用 `highlight.js` 包的 CJS shim**，沙箱渲染进程无 CJS 互操作）。
+- **`enhanceContent` 泛化 `renderMermaidIn` 单钩子**。`= renderMermaidIn + highlightCode + typesetMath`（区域不相交、各自幂等、fire-and-forget），挂原三注入点 `renderGuestText` / `endStreamingMessage` / `task_panel` goal；流式 `appendDelta` 仍不调。
+- **P10.1 纯前端：后端零改、不 bump `schema_version`、CLI 不渲染、CSP 不改**。`katex` 钉版（mermaid 传递依赖提为直接依赖）+ `highlight.js` 新增；现有 CSP 已覆盖动态 import / KaTeX 内联 style / woff2 同源。打包须保 `katex/dist/fonts/`（`katex.min.css` 相对 `url(fonts/…)`）。
 
 ## 测试
 

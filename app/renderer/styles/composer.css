@@ -151,6 +151,56 @@ img.pending-file-thumb {
   object-fit: cover;
   background: #f0ebdc;
 }
+
+/* ── 文件类型角标（composer 待发 pill 与气泡下载 pill 共用，见 file_icon.js）──
+   「页形」(右上折角) + 扩展名文字，按类别上色。比单一 📄 emoji 更能一眼辨类型，
+   且与系统 emoji 字形无关、跨平台稳定。基准尺寸给气泡 pill；composer pill 放大一档。 */
+.file-ico {
+  position: relative;
+  flex-shrink: 0;
+  width: 22px;
+  height: 26px;
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 3px;
+  box-sizing: border-box;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1;
+  color: #fff;
+  background: #6b7a80;
+  border-radius: 3px;
+}
+/* 右上折角 (dog-ear)：深一档的三角，读作「纸页」。 */
+.file-ico::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  border-top: 7px solid rgba(0, 0, 0, 0.22);
+  border-left: 7px solid transparent;
+  border-top-right-radius: 3px;
+}
+.file-ico[data-cat="pdf"]   { background: #c0392b; }
+.file-ico[data-cat="doc"]   { background: #2b5797; }
+.file-ico[data-cat="xls"]   { background: #1e7145; }
+.file-ico[data-cat="ppt"]   { background: #d24726; }
+.file-ico[data-cat="zip"]   { background: #b8860b; }
+.file-ico[data-cat="md"]    { background: #4a7a8c; }
+.file-ico[data-cat="txt"]   { background: #6b7a80; }
+.file-ico[data-cat="code"]  { background: #6a4ca5; }
+.file-ico[data-cat="img"]   { background: #2a9d8f; }
+.file-ico[data-cat="audio"] { background: #b5468a; }
+.file-ico[data-cat="video"] { background: #3f5fb3; }
+.file-ico[data-cat="file"]  { background: #6b7a80; }
+/* composer 待发 pill：放大到与 32px 缩略图同区的视觉重量。 */
+.pending-file .file-ico {
+  width: 26px;
+  height: 32px;
+  font-size: 9px;
+}
 /* 拖拽文件悬停 composer 上方时的高亮（dragenter/over 加 .drag-active）。 */
 #composer.drag-active {
   border-color: #d96749;
@@ -170,13 +220,7 @@ img.pending-file-thumb {
   font-size: 13px;
   color: #333;
 }
-.pending-file-type {
-  font-size: 11px;
-  color: #999;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-/* P13 C3：图片超视觉上限提示 —— 暖橙小字，与 type 行同区但更醒目。 */
+/* P13 C3：图片超视觉上限提示 —— 暖橙小字，醒目区分。 */
 .pending-file-vision-warn {
   font-size: 11px;
   color: #c0512f;

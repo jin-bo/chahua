@@ -24,7 +24,9 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
+    "@highlightjs/cdn-assets": "^11.11.1",
     "dompurify": "^3.4.3",
+    "katex": "^0.16.47",
     "marked": "^18.0.3",
     "mermaid": "^11.15.0"
   },
@@ -51,7 +53,21 @@
       "!node_modules/mermaid/dist/mermaid.min.js",
       "!node_modules/mermaid/dist/mermaid.esm.min.mjs",
       "!node_modules/mermaid/dist/chunks/mermaid.esm.min/**/*",
-      "!node_modules/mermaid/dist/chunks/mermaid.core/**/*"
+      "!node_modules/mermaid/dist/chunks/mermaid.core/**/*",
+      "!node_modules/katex/dist/**/*.map",
+      "!node_modules/katex/dist/katex.js",
+      "!node_modules/katex/dist/katex.min.js",
+      "!node_modules/katex/dist/katex.css",
+      "!node_modules/katex/dist/katex-swap.css",
+      "!node_modules/katex/dist/katex-swap.min.css",
+      "!node_modules/katex/dist/contrib/auto-render*",
+      "!node_modules/katex/dist/contrib/copy-tex*",
+      "!node_modules/katex/dist/contrib/mathtex-script-type*",
+      "!node_modules/katex/dist/contrib/render-a11y-string*",
+      "!node_modules/katex/dist/contrib/mhchem.js",
+      "!node_modules/katex/dist/contrib/mhchem.min.js",
+      "!node_modules/@highlightjs/cdn-assets/**/*",
+      "node_modules/@highlightjs/cdn-assets/es/highlight.min.js"
     ],
     "extraResources": [
       {

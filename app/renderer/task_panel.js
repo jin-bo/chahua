@@ -13,7 +13,7 @@
 // 风格契合 sidebar：色调延续米黄；markdown goal 走 ``renderMarkdown`` 与气泡同一
 // 渲染管线（XSS 由 dompurify 兜底）。
 
-import { renderMarkdown, renderMermaidIn } from "./chat_view.js";
+import { enhanceContent, renderMarkdown } from "./chat_view.js";
 import {
   ArtifactCreatedBy,
   EventType,
@@ -223,7 +223,7 @@ export function createTaskPanel({
       const goal = document.createElement("div");
       goal.className = "task-card-goal markdown";
       goal.innerHTML = renderMarkdown(task.goal);
-      renderMermaidIn(goal);
+      enhanceContent(goal);
       card.appendChild(goal);
     }
 
