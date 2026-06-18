@@ -1,6 +1,6 @@
 {
   "name": "chahua-app",
-  "version": "0.1.7-dev",
+  "version": "0.1.7",
   "private": true,
   "description": "茶话室 桌面壳（P3.1：Electron + chahua-server sidecar）",
   "main": "main/index.js",
