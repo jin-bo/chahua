@@ -7,6 +7,7 @@
 // 调用方把 envelope 的 data 喂给 onServerEcho；模块去重 + 加 pill + setStatus。
 
 import { Inbound } from "./events.js";
+import { fileTypeBadge } from "./file_icon.js";
 
 // 与 server.py 的 _UPLOAD_MAX_BYTES 同步（200MB）。前端早拒省一次 base64 + ws 来回。
 const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
@@ -18,9 +19,6 @@ const VISION_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 const SHARE_PREFIX = "share/";
 
-// pending-file card 左侧色块图标。非图片文件共用一个 emoji；图片走缩略图（见 renderPills）。
-const PENDING_FILE_ICON = "📄";
-
 // P13 C2：与后端 image_input._EXT_TO_MIME / chat_view 预览白名单一致 —— 只对这些扩展名
 // 渲缩略图。SVG 不内嵌（可藏 <script>），与视觉输入白名单同口径。
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
@@ -30,23 +28,6 @@ function isImageName(name) {
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return false;
   return IMAGE_EXTS.has(name.slice(dot + 1).toLowerCase());
-}
-
-// "." 在首位（dotfile，如 .gitignore）当作无扩展名走 fallback，避免把整个文件名当 type
-// 显示出来。
-function fileTypeLabel(name) {
-  if (typeof name !== "string") return "FILE";
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "FILE";
-  return name.slice(dot + 1).toUpperCase();
-}
-
-// 非图 / 缩略图解码失败时的 emoji 方块图标 —— 正常分支与 img.onerror 兜底共用。
-function makePendingFileIcon() {
-  const div = document.createElement("div");
-  div.className = "pending-file-icon";
-  div.textContent = PENDING_FILE_ICON;
-  return div;
 }
 
 // File → 纯 base64 字符串（去掉 data URI 头）。FileReader.readAsDataURL 比手写
@@ -133,10 +114,12 @@ export function createUpload({
             URL.revokeObjectURL(thumbUrl);
             f.thumb = null;
           }
-          icon.replaceWith(makePendingFileIcon());
+          // 缩略图解码失败 → 换回彩色类型角标，别留裂图。
+          icon.replaceWith(fileTypeBadge(displayName));
         }, { once: true });
       } else {
-        icon = makePendingFileIcon();
+        // 非图片：彩色「页形角标」(扩展名 + 按类别上色)，见 file_icon.js。
+        icon = fileTypeBadge(displayName);
       }
 
       const info = document.createElement("div");
@@ -149,10 +132,8 @@ export function createUpload({
       if (f.original && f.original !== landedName) {
         name.title = `已上传为 ${landedName}（原名 ${f.original} 含非法字符被替换）`;
       }
-      const type = document.createElement("span");
-      type.className = "pending-file-type";
-      type.textContent = fileTypeLabel(displayName);
-      info.append(name, type);
+      // 类型不再单列文字 —— 左侧彩色角标已带扩展名（file_icon.js）。
+      info.append(name);
       // P13 C3：超视觉上限的图片 —— pill 上挂一行小提示，茶客看到的是文本引用而非像素。
       if (f.visionOversize) {
         const warn = document.createElement("span");

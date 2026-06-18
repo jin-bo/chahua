@@ -14,12 +14,12 @@ import {
   attachCopyButton,
   attachReviewButton,
   attachUserAttachments,
+  enhanceContent,
   isSelectionInside,
   parseUserAttachments,
   removeStreamingCursor,
   renderGuestText,
   renderMarkdown,
-  renderMermaidIn,
   setStatusTail,
 } from "./chat_view.js";
 
@@ -273,15 +273,15 @@ export function createChatStream({
           if (isSelectionInside(m.textEl)) return;
           document.removeEventListener("selectionchange", finalize);
           m.textEl.innerHTML = renderMarkdown(finalText);
-          // mermaid 异步渲染：只在 message_end 全文到位时调一次（流式 delta 期间禁
-          // 调，半截 mermaid 源会刷错）。
-          renderMermaidIn(m.textEl);
+          // 富渲染（mermaid + 代码高亮 + 数学）：只在 message_end 全文到位时调一次（流式
+          // delta 期间禁调，半截 mermaid / 公式源会刷错）。
+          enhanceContent(m.textEl);
         };
         document.addEventListener("selectionchange", finalize);
         return;
       }
       m.textEl.innerHTML = renderMarkdown(finalText);
-      renderMermaidIn(m.textEl);
+      enhanceContent(m.textEl);
     });
   }
 
