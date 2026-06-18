@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-06-17
+
+详见 [`docs/releases/v0.1.7.md`](docs/releases/v0.1.7.md)。
+
+### Added
+- **P15 桌面登录态自动注入 LLM 凭证（纯 env 热重建）**（2026-06-04，详见 [`docs/P15-桌面登录态自动注入 LLM 配置.md`](docs/P15-桌面登录态自动注入%20LLM%20配置.md)）：让用户在桌面壳里**选模型 / 填 key 即时生效、零重启**。新增 `set_llm_credentials{provider, model, base_url?, api_key}` inbound（前台房专用、严格白名单、未知键 / 缺必需字段 → NOTICE error 丢帧）：只改 `os.environ`（`LLM_PROVIDER` + `<PREFIX>_{MODEL,BASE_URL,API_KEY}`）→ `_cancel_and_drain_all_foreground` + `_replace_session` 内存热重建，**绝不写 toml**（靠房间默认 LLM 两层 fallback 的 `try_from_env()` 接管）。raw key 只入进程内存 environ，**绝不**落盘 / 进 envelope / **进日志**（`api_key` 走 `require_str(redact=True)`、`base_url` 进日志前经 `_redact_base_url` 剥到 `scheme://host` 防 userinfo / `?token=` 泄漏）。改 env 前快照旧值、env 写 + `_replace_session` 包 `try/finally`，失败 / 异常都逐个回滚（全内存无磁盘 IO）+ 保留旧 session。粒度只动「房间默认」锚点（显式 `[room.llm]` / `[scoring]` / `[summary]` / `[[guest]].llm` 钉住、靠 fallback 的 section 随新默认走）。启动期凭证是硬依赖：host 必须 spawn 前把全套 LLM env 注入 child env。含 Codex P2 收敛（base_url 日志脱敏 / `require_str(redact)` 通用校验器泄漏面 / env-unsafe 值 `try/except ValueError` 不炸 ws / 显式 `[room.llm]` 短路热重建但仍现验 env 默认）。
+- **P10.1 聊天富渲染 —— 数学公式 / 化学表达式 / 代码高亮**（2026-06-17，详见 [`docs/P10.1-数学化学代码渲染.md`](docs/P10.1-数学化学代码渲染.md)）：承 P10 mermaid 同骨架（按需懒加载 npm 渲染器 + 硬编码安全配置 + 失败保留源码），把茶客气泡（及任务卡 goal）里的数学公式（`$…$` / `$$…$$`）、化学表达式（mhchem `\ce{…}`，须在分隔符内）、代码块语法高亮在 Electron 渲染进程渲成富呈现。**纯前端、后端零改、不 bump `schema_version`、CLI 不渲染、CSP 不改**。数学/化学走 **marked 行内扩展「转义前封箱」**（`mathDisplay`/`mathInline` 把整段 `$…$` 作单一 token 原样收走，避开 CommonMark 反斜杠转义吃掉内部 `\,`）→ carrier `<span class="math-tex">` → KaTeX 延后在 **DOMPurify 之后**的 live DOM 上**逐公式独立** render（`KATEX_OPTS` 硬编码 `trust:false` + `throwOnError:false` + `strict:"ignore"`、**不传 `macros`**，`\gdef` 连气泡内都不跨公式泄漏）。代码高亮走 highlight.js v11（`@highlightjs/cdn-assets` 自包含浏览器 ESM），扫 `pre>code[class*=language-]` 跳 mermaid / 已高亮 / 未注册语言。`enhanceContent` 把 P10 单一 `renderMermaidIn` 钩子泛化为内容增强编排器（= mermaid + 高亮 + 数学，各自幂等），挂原三注入点；流式 `appendDelta` 仍不调。依赖 `katex`（由 mermaid 传递依赖提为直接依赖钉版 0.16.47）+ `highlight.js`。经一轮 `/code-review --fix`（highlight.js CJS shim 在沙箱渲染进程不可加载 / hljs 暗底主题误染浅底 task goal）。
+- **桌面 UI 资产 —— 用户附件 pill / 文件类型角标 / 空房 hero / app 图标**（2026-06-10 ~ 2026-06-17）：用户上传的附件渲成 pill；新增 `file_icon.js`（`fileTypeBadge`：扩展名彩色「页形角标」按类别上色）取代附件单列类型文字；空房间显示 hero 引导；app 增图标。
+
+### Changed
+- **P14 系统 prompt 全量英文化 + 逐块精练 + 发言前回顾历史**（2026-06-04，详见 [`docs/P14-系统-prompt-英文化与发言前回顾历史.md`](docs/P14-系统-prompt-英文化与发言前回顾历史.md)）：把「系统生成、喂 LLM」的 prompt 文案（context 块 / 功能块 / task 渲染 / 工具 description+return / 便宜模型指令）全量英文化并精练，省 token + 对齐指令。**用户内容不动**（persona / USER.md / 房间 topic·rules / 聊天消息）、输出语言随对话（塑造茶客回复的块统一带 `Always reply in the same language as the conversation (default: Chinese).` 锚点，防英文指令隐性带偏输出语言）。`_speak_instruction_block` 追加 recall 段落（发言前回顾自身 `agent.messages` 的 tool 结果、仅截断才回 source 重读）。精练承重约束：只删冗余、不改功能性字面量（工具名 / 路径 / `Error:` 前缀 / XML 标签名·属性名 / raw status 枚举 / JSON 字段）、MTS `<managed_session>` 5 条指令顺序不变。
+- **附件标记换 `<attachment>` 自闭合格式**（2026-06-10）：用户附件在 transcript / prompt 里的文本标记从 `<./share/..>` 改为 `<attachment uri="share/.." mimetype=".."/>`，与 agentao 视觉降级标签同格式 —— 非视觉茶客 / 打分 / 历史轮次靠它感知附件。
+- **`requires-python` 3.12 → 3.11**（2026-06-17）：扩大可运行环境；代码无 3.12-only 语法，`uv.lock` 重解析补 cp311/pp311 wheel，`uv run --python 3.11 pytest` 1479 passed 验证。
+- **拆 debug 取证读取路径 —— `debug_recorder.py` → `_debug_query.py`**（2026-05-31，提交 `a0c62cd`）：行为保持的纯重构，把 P6 取证的盘上读取 / 索引查询路径抽出独立 helper 模块，公开 import 路径与运行行为不动。
+- **去 persona 与每轮块的指令重复 + `speak_instruction` 纠偏 chat / 交付物**（2026-06-01，提交 `903abae`）：消除 persona 文案与每轮注入块之间的指令重叠，收敛 `<speak_instruction>` 对「闲聊 vs 交付物」的语义指引。
+
 ## [0.1.6] - 2026-05-31
 
 详见 [`docs/releases/v0.1.6.md`](docs/releases/v0.1.6.md)。
