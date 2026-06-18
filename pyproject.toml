@@ -5,7 +5,7 @@ description = "茶话室 —— 多 Agent 群聊桌面 App"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "agentao>=0.4.9",
     "python-dotenv>=1.0",
