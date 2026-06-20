@@ -40,8 +40,10 @@ from chahua.server import (
     INBOUND_UPDATE_GUEST_ISOLATION,
     INBOUND_UPDATE_GUEST_LLM,
     INBOUND_UPDATE_GUEST_PERMISSION,
+    INBOUND_UPDATE_GUEST_TALKATIVENESS,
     INBOUND_UPDATE_ROOM_LLM,
     INBOUND_UPDATE_ROOM_ORCHESTRATOR,
+    INBOUND_UPDATE_ROOM_SCHEDULE_MODE,
     INBOUND_UPDATE_ROOM_TOML,
     INBOUND_UPDATE_USER_AVATAR,
     INBOUND_UPDATE_USER_MD,
@@ -103,6 +105,15 @@ class _SpyAdmin(AdminHandlers):
 
     def _update_room_orchestrator(self, *, overrides, sink):
         self.server.calls.append(("_update_room_orchestrator", {"overrides": overrides}))
+
+    def _update_room_schedule_mode(self, *, mode, sink):
+        self.server.calls.append(("_update_room_schedule_mode", {"mode": mode}))
+
+    def _update_guest_talkativeness(self, *, name, talkativeness, sink):
+        self.server.calls.append((
+            "_update_guest_talkativeness",
+            {"name": name, "talkativeness": talkativeness},
+        ))
 
     def _update_room_llm(self, *, section, spec_dict, sink):
         self.server.calls.append((
@@ -452,6 +463,72 @@ async def test_update_room_orchestrator_empty_overrides_dispatches(srv: _SpyServ
     {"type": INBOUND_UPDATE_ROOM_ORCHESTRATOR, "overrides": "want=0.5"},  # str
 ])
 async def test_update_room_orchestrator_bad_payload(srv: _SpyServer, payload):
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0
+
+
+# ── P16: update_room_schedule_mode / update_guest_talkativeness ────────────
+
+
+async def test_update_room_schedule_mode_ok(srv: _SpyServer):
+    """schedule_mode 轻热替 —— 走 swap_room_config，不 cancel in-flight。"""
+    await srv._handle_inbound(
+        {"type": INBOUND_UPDATE_ROOM_SCHEDULE_MODE, "mode": "manual"}, _sink,
+    )
+    assert srv.cancel_drain_count == 0
+    assert srv.calls == [("_update_room_schedule_mode", {"mode": "manual"})]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_ROOM_SCHEDULE_MODE},                  # 没 mode
+    {"type": INBOUND_UPDATE_ROOM_SCHEDULE_MODE, "mode": None},    # null
+    {"type": INBOUND_UPDATE_ROOM_SCHEDULE_MODE, "mode": 1},       # 非 str
+])
+async def test_update_room_schedule_mode_bad_payload(srv: _SpyServer, payload):
+    """wire 层只挡类型 —— 白名单（manual/scoring）校验在 admin 层（不在路由测覆盖）。"""
+    await srv._handle_inbound(payload, _sink)
+    assert srv.calls == []
+    assert srv.cancel_drain_count == 0
+
+
+async def test_update_guest_talkativeness_ok(srv: _SpyServer):
+    """talkativeness 轻热替 —— 不 cancel、不重建茶客。"""
+    await srv._handle_inbound(
+        {
+            "type": INBOUND_UPDATE_GUEST_TALKATIVENESS,
+            "name": "宝总", "talkativeness": 1.8,
+        },
+        _sink,
+    )
+    assert srv.cancel_drain_count == 0
+    assert srv.calls == [(
+        "_update_guest_talkativeness", {"name": "宝总", "talkativeness": 1.8},
+    )]
+
+
+async def test_update_guest_talkativeness_int_promotes(srv: _SpyServer):
+    """整数 promote 到 float（wire 层）。"""
+    await srv._handle_inbound(
+        {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "name": "宝总", "talkativeness": 2},
+        _sink,
+    )
+    assert srv.calls == [(
+        "_update_guest_talkativeness", {"name": "宝总", "talkativeness": 2.0},
+    )]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "talkativeness": 1.0},        # 没 name
+    {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "name": "宝总"},               # 没 talkativeness
+    {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "name": "宝总", "talkativeness": "x"},   # 非数值
+    {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "name": "宝总", "talkativeness": True},  # bool
+    # NaN / inf —— json.loads 默认收这些 token，wire 层 require_number 必须挡（否则
+    # NaN 漏过下游范围判 → 永久静默茶客 + "nan" 落 toml）。
+    {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "name": "宝总", "talkativeness": float("nan")},
+    {"type": INBOUND_UPDATE_GUEST_TALKATIVENESS, "name": "宝总", "talkativeness": float("inf")},
+])
+async def test_update_guest_talkativeness_bad_payload(srv: _SpyServer, payload):
     await srv._handle_inbound(payload, _sink)
     assert srv.calls == []
     assert srv.cancel_drain_count == 0

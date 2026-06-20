@@ -193,6 +193,10 @@ def emit_room_info(server: "ChahuaServer", sink: EnvelopeSink) -> None:
             "name": gc.name,
             "permission": gc.permission,
             "isolation": gc.isolation,
+            # P16 发言偏置：默认 1.0 也带（前端滑杆要回显）。``None`` 未填 → 1.0。
+            "talkativeness": (
+                gc.talkativeness if gc.talkativeness is not None else 1.0
+            ),
             "workspace_path": str(workspace_path),
             "avatar_data_uri": gc.read_avatar_data_uri(),
             "persona_rel": persona_rel,
@@ -239,6 +243,9 @@ def emit_room_info(server: "ChahuaServer", sink: EnvelopeSink) -> None:
                     server._session.orchestrator.config
                 ),
                 "orchestrator_overrides_keys": sorted(rc.orchestrator_overrides),
+                # P16 房间调度档（``scoring`` / ``manual``）—— room 设置 checkbox 回显。
+                # 取 effective（orchestrator.config）与 ``orchestrator`` 字段同源真理。
+                "schedule_mode": server._session.orchestrator.config.schedule_mode,
                 # 房间级 LLM section：与 guests[].llm 同构。
                 # ``source`` 是 "room" 表示 [scoring]/[summary] 段在 toml 里有写；
                 # "default" 表示该段缺失走的是房间默认。

@@ -28,6 +28,7 @@ from .llm_spec import LLMSpec, build_client
 from .message_artifacts import MessageArtifactRegistry
 from . import persona_summary
 from .orchestrator import Orchestrator, OrchestratorConfig
+from .orchestrator_config import SCHEDULE_MODE_SCORING
 from .persona_assets import discover_assets, persona_relative
 from .room import Room
 from .scoring import IntentScorer
@@ -290,11 +291,26 @@ class RoomSession:
 
         **只适合编排参数 / 用户配置之类的"声明性"字段更新**；茶客增减 / persona 切换 /
         permission 改这些需要重建 ``TeaGuest`` 的，仍走 ``server._replace_session``。
+
+        P16：``schedule_mode`` 经 ``_make_orchestrator_config(..., schedule_mode=)`` 进
+        ``OrchestratorConfig``（无 explicit，照常用 ``new_rc.schedule_mode``）；
+        per-guest ``talkativeness`` 不在 ``OrchestratorConfig`` 里，末尾单独刷
+        ``_GuestEntry.talkativeness`` —— **只更新当前 ``_guests`` 中已存在的 name**，
+        缺失 / 新增茶客不在轻热替职责内（茶客增删改 agent，走 ``_replace_session``）。
         """
         object.__setattr__(self, "room_config", new_rc)
         self.orchestrator.set_config(
-            _make_orchestrator_config(new_rc.orchestrator_overrides)
+            _make_orchestrator_config(
+                new_rc.orchestrator_overrides,
+                schedule_mode=new_rc.schedule_mode,
+            )
         )
+        self.orchestrator.update_talkativeness({
+            gc.name: (
+                gc.talkativeness if gc.talkativeness is not None else 1.0
+            )
+            for gc in new_rc.guests
+        })
 
 
 def _resolve_room_default_spec(room_config: RoomConfig) -> LLMSpec:
@@ -321,18 +337,27 @@ def _resolve_room_default_spec(room_config: RoomConfig) -> LLMSpec:
 
 
 def _make_orchestrator_config(
-    overrides: dict[str, Any], *, explicit: Optional[OrchestratorConfig] = None,
+    overrides: dict[str, Any],
+    *,
+    schedule_mode: str = SCHEDULE_MODE_SCORING,
+    explicit: Optional[OrchestratorConfig] = None,
 ) -> OrchestratorConfig:
-    """显式 SDK 入参优先；其次 patch room.toml [room] 编排字段到默认上；都没有走默认。
+    """显式 SDK 入参优先；其次 patch room.toml [room] 编排字段 + schedule_mode 到默认上。
 
     `build_room_session` 与 `RoomSession.swap_room_config` 共用 —— 单点保证装配期 vs
     热更新期 走同一 OrchestratorConfig 派生口径。
+
+    P16 ``schedule_mode``：经专用形参穿进，**不**混 ``overrides`` 数值表。``explicit``
+    不为 None（SDK 嵌入入参）时**完全优先**、自带 schedule_mode、不被本形参覆盖 ——
+    守 P15 起的"显式 SDK 入参优先"契约。只有无 explicit 的正常 server / CLI 路径才把
+    ``schedule_mode`` 写进 ``OrchestratorConfig``。``swap_room_config`` 无 explicit，
+    传 ``new_rc.schedule_mode``。
     """
     if explicit is not None:
         return explicit
-    if overrides:
-        return dataclasses.replace(OrchestratorConfig(), **overrides)
-    return OrchestratorConfig()
+    fields: dict[str, Any] = dict(overrides)
+    fields["schedule_mode"] = schedule_mode
+    return dataclasses.replace(OrchestratorConfig(), **fields)
 
 
 def discover_rooms(paths: Paths) -> list[dict]:
@@ -468,7 +493,9 @@ def build_room_session(
     guests = [g for g, _ in guest_entries]
 
     effective_orch_config = _make_orchestrator_config(
-        room_config.orchestrator_overrides, explicit=orchestrator_config
+        room_config.orchestrator_overrides,
+        schedule_mode=room_config.schedule_mode,
+        explicit=orchestrator_config,
     )
 
     # P8.2-roster：花名册摘要三级解析 —— 手写 [[guest]].summary（roster-a）→ 中央
@@ -506,8 +533,16 @@ def build_room_session(
         # （后者已 mkdir 兜底）；这里再 helper 一次取 Path 是幂等的。
         share_dir=ensure_room_share_dir(room_config.room_dir),
     )
-    for guest, persona_md in guest_entries:
-        orchestrator.register(guest, persona_md)
+    # P16：register 同步注入 per-guest talkativeness。``room_config.guests`` 与
+    # ``guest_entries`` 同序（都由 _build_guests 按 toml [[guest]] 顺序构造）。
+    # ``is not None`` coalesce —— 显式 0.0（哑茶客）不被 ``or 1.0`` 吞。
+    for gc, (guest, persona_md) in zip(room_config.guests, guest_entries):
+        orchestrator.register(
+            guest, persona_md,
+            talkativeness=(
+                gc.talkativeness if gc.talkativeness is not None else 1.0
+            ),
+        )
 
     # P8.3：给每位茶客的 transport 注入托管会话 propose 拦截 hook（docs §5.1）。
     # 非托管房间 hook 命中即返 False、行为不变；MTS 内管理者的 delegate / panel

@@ -19,6 +19,7 @@ from typing import Any, Optional, Sequence, TypedDict
 from ._persist import write_text_atomic
 from .config import ORCH_FIELD_BOUNDS
 from .llm_spec import LLM_TOML_FIELDS, LLM_TOML_NUMERIC_FIELDS, LLMSpec
+from .orchestrator_config import SCHEDULE_MODE_SCORING
 from .permissions import DEFAULT_MODE
 
 
@@ -37,6 +38,7 @@ class GuestSnapshot(TypedDict, total=False):
     permission: str
     isolation: str
     summary: str  # P8.2-roster-a：一句话能力摘要；缺 / 空 = 不写
+    talkativeness: float  # P16 发言偏置；缺 / 等于默认 1.0 = 不写
     # LLM 四件套（all-or-nothing：写 model 才允许 base_url / api_key_env / temperature，
     # 详见 chahua.llm_spec.LLMSpec.from_toml 校验）。temperature 是 float（非字符串），
     # render 时走 scalar literal —— 见 _render_llm_field。
@@ -54,6 +56,7 @@ class TomlSnapshot(TypedDict, total=False):
     topic: str
     rules: str
     user_md: Optional[str]                       # [room].user_md；None / "" = 不写
+    schedule_mode: str                           # P16 [room].schedule_mode；"scoring"(默认)= 不写
     orchestrator_overrides: dict[str, Any]       # 空 dict = 不写编排字段（P4.0 消费）
     room_llm: Optional[dict]                     # None = 不写 [room.llm]（P4.9）
     scoring: Optional[dict]                      # None = 不写 [scoring]（P4.1）
@@ -64,7 +67,10 @@ class TomlSnapshot(TypedDict, total=False):
 
 # render 时认得的 guest 字段。
 _ALLOWED_GUEST_EMIT: frozenset[str] = (
-    frozenset({"name", "persona", "permission", "isolation", "summary", "extra_mcp_servers"})
+    frozenset({
+        "name", "persona", "permission", "isolation", "summary",
+        "talkativeness", "extra_mcp_servers",
+    })
     | frozenset(LLM_TOML_FIELDS)
 )
 
@@ -195,6 +201,12 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
     if user_md:
         lines.append(f"user_md = {_toml_basic_string(user_md)}")
 
+    # P16 schedule_mode（[room] 标量字符串，非编排数值表）。仅非默认（"scoring"）时写 ——
+    # 默认房间结构化重写不塞噪声，用户写过的 "manual" 经 mutator round-trip 保得住。
+    schedule_mode = snapshot.get("schedule_mode")
+    if schedule_mode and schedule_mode != SCHEDULE_MODE_SCORING:
+        lines.append(f"schedule_mode = {_toml_basic_string(schedule_mode)}")
+
     # 编排参数走 [room] 段，按 ORCH_FIELD_BOUNDS 顺序写出（设计文档 §3 示例的顺序，
     # 用户读 toml 时编排参数总是连成一块好认）。snapshot 只携带用户实际设过的键 ——
     # 没设的不写，保留 OrchestratorConfig() 默认。
@@ -262,6 +274,12 @@ def _render_room_toml(snapshot: TomlSnapshot) -> str:
             lines.append(f"isolation  = {_toml_basic_string(str(g['isolation']))}")
         if g.get("summary"):
             lines.append(f"summary    = {_toml_basic_string(str(g['summary']))}")
+        # P16 talkativeness（snapshot 只在非默认 1.0 时携带，含合法显式 0.0）。
+        # float scalar literal（``_format_toml_scalar`` 走 repr）。
+        if "talkativeness" in g:
+            lines.append(
+                f"talkativeness = {_format_toml_scalar(float(g['talkativeness']))}"
+            )
         for key in LLM_TOML_FIELDS:
             if key in g:
                 lines.append(f"{key:<11}= {_render_llm_field(key, g[key])}")

@@ -23,16 +23,19 @@ context 装配（``_build_context_for`` / ``_maybe_render_scoring_task_block`` /
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import TYPE_CHECKING, Optional
 
 from .debug_recorder import (
     SCORING_PATH_BROADCAST,
+    SCORING_PATH_MANUAL,
     SCORING_PATH_MENTION,
     SCORING_PATH_SCORING,
     PickDebugMeta,
 )
 from .events import EnvelopeSink
 from .mentions import BROADCAST_TOKENS, iter_at_positions, matches_at
+from .orchestrator_config import SCHEDULE_MODE_MANUAL
 from .room import Message
 from .scoring import ScoreKind, ScoreResult
 from .task_rendering import wrap_current_task as _wrap_current_task
@@ -110,6 +113,17 @@ class ScoringOps:
                     threshold=None, scoring_path=SCORING_PATH_MENTION,
                 )
 
+        # P16 manual 档：auto-pick 第 3 档恒空、零打分 LLM 调用。前两档（``@`` /
+        # broadcast）已在上方处理、档无关；handoff / MTS 走 ``run_pending_handoff``
+        # drain loop、不经本函数，故 manual 房 delegate / 圆桌 / 托管会话照常。
+        # recorder 仍记一行（``scoring_path=manual``、``results=[]``），符合"每 pick
+        # 周期一行 turns.jsonl"。``respect_at_mention=False``（AI 接力）也命中这里 ——
+        # manual 下连自发接力都关。
+        if orch.config.schedule_mode == SCHEDULE_MODE_MANUAL:
+            return [], [], {}, PickDebugMeta(
+                threshold=None, scoring_path=SCORING_PATH_MANUAL,
+            )
+
         # 2) 并发打分（冷却中的茶客直接当 0 分，省 LLM 调用；busy 整段不进入两边任一
         # 桶 —— 与 scorables/cooled 是三档分流，bg run 跑完自然回到 scorables 池）
         scorables = [
@@ -148,10 +162,16 @@ class ScoringOps:
                 )
             )
         )
-        results = [r for r, _ in scored]
         prompts_by_guest: dict[str, Optional[str]] = {
             r.guest_name: p for r, p in scored if p is not None
         }
+        # P16 talkativeness 偏置：拿到打分**之后**乘性缩放 + reclamp。effective 驱动
+        # 阈值 / 排名 / envelope ``data.scores``（所见即所排）；base_score 留作取证载体。
+        # 乘性而非加性 —— base=0（话题无关）再高权重仍 0（"爱说话"≠"乱插话"）。只作用
+        # 本批 SCORED 结果；cooled（下方补）是 0 分占位、不偏置。
+        results: list[ScoreResult] = [
+            self._apply_talkativeness(r) for r, _ in scored
+        ]
 
         # 冷却中那些也填进 results 让 UI / recorder 看到"为什么没选他"。
         for name in cooled:
@@ -183,6 +203,27 @@ class ScoringOps:
         not_busy = [r for r in passed if r.guest_name not in current_busy]
         winners = [r.guest_name for r in not_busy[: orch.config.max_speakers_per_pick]]
         return winners, results, prompts_by_guest, debug_meta
+
+    def _apply_talkativeness(self, result: ScoreResult) -> ScoreResult:
+        """P16：对单条 SCORED 结果施加 per-guest talkativeness 乘性偏置 + reclamp [0,1]。
+
+        系数从 ``_GuestEntry.talkativeness`` 读（缺省 1.0）。``base_score`` 记偏置前的
+        原始 LLM 分、``talkativeness`` 记本次系数 —— 两者仅取证载体（实时 ``data.scores``
+        只发 effective ``score``）。1.0 严格 no-op（effective == base）。``gather`` 可能
+        产出 ``ERROR``（LLM 失败降级 0）—— 本守卫把**非 SCORED**（含 ERROR）原样返回、
+        不偏置，只对 SCORED 施加乘性系数。
+        """
+        if result.kind is not ScoreKind.SCORED:
+            return result
+        entry = self.orch._guests.get(result.guest_name)
+        talk = entry.talkativeness if entry is not None else 1.0
+        effective = max(0.0, min(1.0, result.score * talk))
+        return dataclasses.replace(
+            result,
+            score=effective,
+            base_score=result.score,
+            talkativeness=talk,
+        )
 
     async def score_one(
         self,

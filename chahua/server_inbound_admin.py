@@ -19,6 +19,7 @@ from ._server_helpers import (
     check_optional_dict,
     require_bool,
     require_list,
+    require_number,
     require_str,
 )
 from .events import EnvelopeSink, NOTICE_LEVEL_ERROR
@@ -35,9 +36,11 @@ INBOUND_SET_PERSONA_MCP_TRUST = "set_persona_mcp_trust"
 INBOUND_CREATE_ROOM = "create_room"
 INBOUND_DELETE_ROOM = "delete_room"
 INBOUND_UPDATE_ROOM_ORCHESTRATOR = "update_room_orchestrator"
+INBOUND_UPDATE_ROOM_SCHEDULE_MODE = "update_room_schedule_mode"
 INBOUND_UPDATE_ROOM_LLM = "update_room_llm"
 INBOUND_UPDATE_GUEST_LLM = "update_guest_llm"
 INBOUND_UPDATE_GUEST_ISOLATION = "update_guest_isolation"
+INBOUND_UPDATE_GUEST_TALKATIVENESS = "update_guest_talkativeness"
 INBOUND_UPDATE_GUEST_EXTRA_MCP = "update_guest_extra_mcp"
 
 
@@ -191,6 +194,64 @@ class AdminHandlers:
             return
         self.server._session.swap_room_config(new_rc)
         _log.info("update_room_orchestrator: %r", overrides)
+        self.server._emit_room_snapshot(sink)
+
+    def _update_room_schedule_mode(
+        self, *, mode: str, sink: EnvelopeSink
+    ) -> None:
+        """改 ``[room].schedule_mode`` + 轻热替 ``orchestrator.config`` + 重发 snapshot（P16）。
+
+        与 :meth:`_update_room_orchestrator` 同口径走 :meth:`RoomSession.swap_room_config`
+        一次 attribute swap —— schedule_mode 是声明性字段（``Orchestrator`` 热循环 live
+        读 ``self.config.schedule_mode``），不改 cwd / client / agent，**不 cancel
+        in-flight、不 `_replace_session`**，下一轮 pick 当场生效。校验失败回
+        ``admin.update_room_schedule_mode`` 那条路径，磁盘旧 bytes 已回滚、session 不动。
+        """
+        room_dir = self.server._session.room_config.room_dir
+        try:
+            new_rc = admin.update_room_schedule_mode(
+                paths=self.server._paths, room_dir=room_dir, mode=mode
+            )
+        except Exception as e:
+            _log.exception("update_room_schedule_mode: mode=%r 失败", mode)
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"调度模式未生效：{e}"
+            )
+            self.server._emit_room_snapshot(sink)
+            return
+        self.server._session.swap_room_config(new_rc)
+        _log.info("update_room_schedule_mode: %r", mode)
+        self.server._emit_room_snapshot(sink)
+
+    def _update_guest_talkativeness(
+        self, *, name: str, talkativeness: float, sink: EnvelopeSink
+    ) -> None:
+        """改一位茶客的 ``talkativeness`` + 轻热替 + 重发 snapshot（P16）。
+
+        **首个走轻热替的 guest 设置** —— permission / isolation / LLM 改 agent 必重建，
+        talkativeness 不改 cwd / client / agent，只是打分后处理的乘性系数。走
+        :meth:`RoomSession.swap_room_config`（末尾刷新 ``_GuestEntry.talkativeness``）——
+        **不 cancel in-flight、不 `_replace_session`**，下一轮打分读新权重。校验失败回
+        ``admin.update_guest_talkativeness`` 那条路径，磁盘旧 bytes 已回滚、session 不动。
+        """
+        room_dir = self.server._session.room_config.room_dir
+        try:
+            new_rc = admin.update_guest_talkativeness(
+                paths=self.server._paths, room_dir=room_dir,
+                name=name, talkativeness=talkativeness,
+            )
+        except Exception as e:
+            _log.exception(
+                "update_guest_talkativeness: name=%r talkativeness=%r 失败",
+                name, talkativeness,
+            )
+            self.server._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR, text=f"发言权重未生效：{e}"
+            )
+            self.server._emit_room_snapshot(sink)
+            return
+        self.server._session.swap_room_config(new_rc)
+        _log.info("update_guest_talkativeness: %r → %r", name, talkativeness)
         self.server._emit_room_snapshot(sink)
 
     def _update_room_llm(
@@ -473,6 +534,33 @@ class AdminHandlers:
         # 不 cancel inflight —— 编排参数走 swap_room_config 热替 self.config，下一轮
         # 迭代当场生效，无需打断当前发言 / 评分。
         self._update_room_orchestrator(overrides=overrides, sink=sink)
+
+    async def _inbound_update_room_schedule_mode(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        mode = require_str(data, "mode", where=INBOUND_UPDATE_ROOM_SCHEDULE_MODE)
+        if mode is None:
+            return
+        # P16 轻热替：schedule_mode 走 swap_room_config 热替 self.config，不 cancel
+        # in-flight、不 _replace_session。白名单校验在 admin 层。
+        self._update_room_schedule_mode(mode=mode, sink=sink)
+
+    async def _inbound_update_guest_talkativeness(
+        self, data: dict, sink: EnvelopeSink
+    ) -> None:
+        name = require_str(data, "name", where=INBOUND_UPDATE_GUEST_TALKATIVENESS)
+        if name is None:
+            return
+        talkativeness = require_number(
+            data, "talkativeness", where=INBOUND_UPDATE_GUEST_TALKATIVENESS
+        )
+        if talkativeness is None:
+            return
+        # P16 轻热替：talkativeness 不改 agent，走 swap_room_config 刷新 _GuestEntry，
+        # 不 cancel in-flight、不 _replace_session。范围校验在 admin 层。
+        self._update_guest_talkativeness(
+            name=name, talkativeness=talkativeness, sink=sink
+        )
 
     async def _inbound_update_room_llm(
         self, data: dict, sink: EnvelopeSink

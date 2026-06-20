@@ -146,6 +146,33 @@
   gap: 16px;
 }
 .modal-radio-row .modal-radio { padding: 0; }
+/* P16 调度模式 checkbox —— 复用 modal-radio 的横排对齐。 */
+.modal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #444;
+  padding: 3px 0;
+  cursor: pointer;
+}
+/* P16 发言权重滑杆行：range 占满 + 右侧固定宽数字。 */
+.modal-talk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.modal-talk-row input[type="range"] { flex: 1; }
+.modal-talk-row input[type="range"]:disabled { opacity: 0.45; cursor: not-allowed; }
+.modal-talk-value {
+  min-width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: #444;
+}
+/* manual 档下权重空转 —— hint 灰一档提示无效。 */
+.modal-hint-muted { opacity: 0.5; }
 /* LLM 字段块 —— custom radio 选中时才展开，default 时折回（hidden 属性）。 */
 .modal-llm-fields { padding-left: 22px; margin-top: 4px; }
 .modal-llm-fields .modal-field { margin-bottom: 8px; }

@@ -47,7 +47,7 @@ from .events import (
     STATUS_OK,
     now_ms,
 )
-from .scoring import ScoreResult
+from .scoring import ScoreKind, ScoreResult
 
 _log = logging.getLogger(__name__)
 
@@ -62,6 +62,9 @@ SCORING_PATH_MENTION: str = "mention"
 """单 ``@`` 路由（results 中仅命中那位 ``kind="mention"``）。"""
 SCORING_PATH_BROADCAST: str = "broadcast"
 """``@all`` / ``@所有人``（results 中所有 guest 都是 ``kind="mention"``）。"""
+SCORING_PATH_MANUAL: str = "manual"
+"""P16 ``schedule_mode=manual``：auto-pick 第 3 档恒空、零打分。多为空 turn
+（``scoring.results=[]``）但仍按"每 pick 周期一行 turns.jsonl"各记一行。"""
 SCORING_PATH_HANDOFF_DELEGATE: str = "handoff_delegate"
 """P7.1 显式 delegate 指派路径（drain loop 跑队列）。"""
 SCORING_PATH_HANDOFF_REVIEW: str = "handoff_review"
@@ -76,6 +79,7 @@ VALID_SCORING_PATHS: frozenset[str] = frozenset(
         SCORING_PATH_SCORING,
         SCORING_PATH_MENTION,
         SCORING_PATH_BROADCAST,
+        SCORING_PATH_MANUAL,
         SCORING_PATH_HANDOFF_DELEGATE,
         SCORING_PATH_HANDOFF_REVIEW,
         SCORING_PATH_HANDOFF_PANEL,
@@ -312,6 +316,17 @@ class TurnRecorder:
                     "kind": result.kind.value,
                     "raw": result.raw or "",
                 }
+                # P16 取证显式穿透：``score`` 是 effective（已偏置），实时 envelope
+                # ``data.scores`` 也只发 effective。仅 SCORED 且 talkativeness≠1.0
+                # 时补 ``base_score`` + ``talkativeness`` 落 jsonl —— 这才是"看得到
+                # raw×talk"的真正落点（加 dataclass 字段≠取证完成）。talk=1.0 是
+                # no-op（base==score），省略保 entry 精简。
+                if (
+                    result.kind is ScoreKind.SCORED
+                    and result.talkativeness != 1.0
+                ):
+                    entry["base_score"] = result.base_score
+                    entry["talkativeness"] = result.talkativeness
                 prompt_file = self._write_prompt_file(
                     f"prompts/{turn_id}/scoring_{result.guest_name}.txt",
                     prompt or "",

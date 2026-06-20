@@ -121,7 +121,12 @@ function renderSkills(skills) {
   }
 }
 
-function fillForm(g, roomDefaultModel) {
+// P16：talkativeness 缺省视为 1.0（snapshot 总是带值，这里兜底老 envelope）。
+function guestTalkativeness(g) {
+  return typeof g.talkativeness === "number" ? g.talkativeness : 1.0;
+}
+
+function fillForm(g, roomDefaultModel, scheduleMode) {
   $("edit-guest-title").textContent = `设置「${g.name}」`;
   $("edit-guest-persona-hint").textContent = `人格：${g.persona_rel || ""}`;
   $("edit-guest-workspace-hint").textContent = `工作目录：${g.workspace_path || ""}`;
@@ -133,6 +138,16 @@ function fillForm(g, roomDefaultModel) {
 
   setRadio("edit-guest-permission", g.permission || DEFAULT_PERMISSION);
   setRadio("edit-guest-isolation", g.isolation || "room");
+
+  // P16 发言权重滑杆：回显当前值 + 实时数字。manual 档下 auto-pick 不跑，权重空转 →
+  // 置灰（非承重 UX 提示，仍可拖，只是 hint 说明无效）。
+  const slider = $("edit-guest-talkativeness");
+  const out = $("edit-guest-talkativeness-value");
+  slider.value = String(guestTalkativeness(g));
+  out.textContent = Number(slider.value).toFixed(1);
+  const manual = scheduleMode === "manual";
+  slider.disabled = manual;
+  $("edit-guest-talkativeness-hint").classList.toggle("modal-hint-muted", manual);
 
   renderPersonaMcpList(g.persona_mcp_servers || []);
   renderRoomMcpList(g.room_mcp_servers || []);
@@ -167,6 +182,12 @@ function diffPayloads(g) {
     out.push({ type: Inbound.UPDATE_GUEST_ISOLATION, name: g.name, isolation: newIso });
   }
 
+  // P16 发言权重：slider 值 vs 旧值（容差防 0.1 step 浮点抖动）。
+  const newTalk = Number($("edit-guest-talkativeness").value);
+  if (Math.abs(newTalk - guestTalkativeness(g)) > 1e-9) {
+    out.push({ type: Inbound.UPDATE_GUEST_TALKATIVENESS, name: g.name, talkativeness: newTalk });
+  }
+
   const newMcp = readRoomMcpList();
   const oldMcp = g.room_mcp_servers || [];
   if (JSON.stringify(newMcp) !== JSON.stringify(oldMcp)) {
@@ -179,11 +200,16 @@ export function createGuestSettings({ isConnected, send, setStatus }) {
   const modal = $("edit-guest-modal");
   let openedGuest = null;
   let roomDefaultModel = null;
+  let scheduleMode = "scoring";
 
   renderPermissionRow();
   llmSection.bindModeChange();
   $("edit-guest-room-mcp-add").addEventListener("click", () => {
     appendRoomMcpRow($("edit-guest-room-mcp-list"));
+  });
+  // P16 滑杆拖动时实时刷新右侧数字。
+  $("edit-guest-talkativeness").addEventListener("input", (e) => {
+    $("edit-guest-talkativeness-value").textContent = Number(e.target.value).toFixed(1);
   });
 
   $("edit-guest-submit").addEventListener("click", () => {
@@ -210,13 +236,14 @@ export function createGuestSettings({ isConnected, send, setStatus }) {
   });
 
   return {
-    setSnapshot({ roomDefaultLlmModel }) {
+    setSnapshot({ roomDefaultLlmModel, scheduleMode: mode }) {
       roomDefaultModel = roomDefaultLlmModel || null;
+      scheduleMode = mode || "scoring";
     },
     open(g) {
       if (!isConnected()) return;
       openedGuest = g;
-      fillForm(g, roomDefaultModel);
+      fillForm(g, roomDefaultModel, scheduleMode);
       modal.hidden = false;
     },
   };

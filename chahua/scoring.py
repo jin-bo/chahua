@@ -56,9 +56,23 @@ class ScoreResult:
 
     guest_name: str
     score: float
+    """**最终生效**分数。P16 ``scoring`` 档下 = ``clamp(base_score × talkativeness, 0, 1)``；
+    其它 kind / talkativeness=1.0 时 = 原始分。驱动阈值比较 / 排名 / envelope
+    ``data.scores``（所见即所排）。"""
+
     kind: ScoreKind = ScoreKind.SCORED
     raw: str = ""
     """LLM 原始文本（仅 ``kind=SCORED`` 时有值），调试用。"""
+
+    base_score: float = 0.0
+    """P16 talkativeness 偏置**前**的原始 LLM 分（仅 ``kind=SCORED`` 偏置路径有意义；
+    其它 kind 留默认 0.0）。**仅取证载体** —— 不自动序列化：实时 envelope ``data.scores``
+    只发 :attr:`score`（effective），要看 raw×talk 须 ``debug_recorder.record_scoring``
+    显式补 key（P16 不变量"加 dataclass 字段≠取证完成"）。"""
+
+    talkativeness: float = 1.0
+    """P16 本次施加的乘性系数（仅 ``kind=SCORED`` 偏置路径有意义）。与 :attr:`base_score`
+    同为取证载体；前端可据 base×talk 复原排名因果。"""
 
 
 # ── prompt ───────────────────────────────────────────────────────────────────

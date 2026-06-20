@@ -155,6 +155,11 @@ export function createRoomSettings({ isConnected, send, setStatus, openGuestSett
     if (orchestratorChanged(orch.overrides, snapshot.orchestrator, snapshot.orchestrator_overrides_keys)) {
       payloads.push({ type: Inbound.UPDATE_ROOM_ORCHESTRATOR, overrides: orch.overrides });
     }
+    // P16 调度档：checkbox → scoring/manual。轻热替，与编排参数同口径（server 不重装 session）。
+    const newMode = $("edit-room-schedule-manual").checked ? "manual" : "scoring";
+    if (newMode !== (snapshot.schedule_mode || "scoring")) {
+      payloads.push({ type: Inbound.UPDATE_ROOM_SCHEDULE_MODE, mode: newMode });
+    }
     if (scoringSection.changed(scoring.spec, snapshot.scoring_llm)) {
       payloads.push({ type: Inbound.UPDATE_ROOM_LLM, section: "scoring", spec: scoring.spec });
     }
@@ -177,6 +182,7 @@ export function createRoomSettings({ isConnected, send, setStatus, openGuestSett
         `话题：${snapshot.topic || "（无）"}  ·  规则与 name 改动请走"打开 raw room.toml"`;
 
       fillOrchestrator(snapshot.orchestrator, snapshot.orchestrator_overrides_keys);
+      $("edit-room-schedule-manual").checked = snapshot.schedule_mode === "manual";
 
       // 房间默认 LLM 自己的 "default" 模式 = 走 env 推断；label 顺手把 env 当前
       // 解析到的 model 露出来，便于用户判断 env 是否就绪。

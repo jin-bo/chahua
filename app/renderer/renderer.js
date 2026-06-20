@@ -354,6 +354,7 @@ function renderSidebar(roomInfo) {
   });
   guestSettings.setSnapshot({
     roomDefaultLlmModel: roomInfo.room_default_llm?.model || null,
+    scheduleMode: roomInfo.schedule_mode || "scoring",
   });
   roomSettings.setSnapshot(roomInfo);
   sidebar.setUser({
