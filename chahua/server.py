@@ -85,8 +85,10 @@ from .server_inbound_admin import (
     INBOUND_UPDATE_GUEST_ISOLATION,
     INBOUND_UPDATE_GUEST_LLM,
     INBOUND_UPDATE_GUEST_PERMISSION,
+    INBOUND_UPDATE_GUEST_TALKATIVENESS,
     INBOUND_UPDATE_ROOM_LLM,
     INBOUND_UPDATE_ROOM_ORCHESTRATOR,
+    INBOUND_UPDATE_ROOM_SCHEDULE_MODE,
 )
 from .server_inbound_io import (
     INBOUND_CHECK_PERSONA_UPDATES,
@@ -1389,9 +1391,11 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_CREATE_ROOM: "admin._inbound_create_room",
     INBOUND_DELETE_ROOM: "admin._inbound_delete_room",
     INBOUND_UPDATE_ROOM_ORCHESTRATOR: "admin._inbound_update_room_orchestrator",
+    INBOUND_UPDATE_ROOM_SCHEDULE_MODE: "admin._inbound_update_room_schedule_mode",
     INBOUND_UPDATE_ROOM_LLM: "admin._inbound_update_room_llm",
     INBOUND_UPDATE_GUEST_LLM: "admin._inbound_update_guest_llm",
     INBOUND_UPDATE_GUEST_ISOLATION: "admin._inbound_update_guest_isolation",
+    INBOUND_UPDATE_GUEST_TALKATIVENESS: "admin._inbound_update_guest_talkativeness",
     INBOUND_UPDATE_GUEST_EXTRA_MCP: "admin._inbound_update_guest_extra_mcp",
     # settings slot：USER.md / 房间 toml / 用户头像。
     INBOUND_UPDATE_USER_MD: "settings._inbound_update_user_md",

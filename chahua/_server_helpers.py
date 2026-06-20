@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional
 
 _log = logging.getLogger(__name__)
@@ -61,6 +62,24 @@ def require_list(data: dict, key: str, *, where: str) -> Optional[list]:
         _log.warning("ignoring %s: %s 必须是 list，收到 %r", where, key, type(v))
         return None
     return v
+
+
+def require_number(data: dict, key: str, *, where: str) -> Optional[float]:
+    """取数值字段（``int`` / ``float``）并 promote 到 ``float``；非数值 / 缺 → WARN + None。
+
+    ``bool`` 是 ``int`` 子类，显式剔除（``True`` 不该被当 1.0）。``NaN`` / ``±inf`` 也拒
+    —— Python ``json.loads`` 默认收 ``NaN`` / ``Infinity`` token，放进去会污染下游
+    （如 ``score × NaN = NaN`` 让茶客永久静默、``repr(nan)`` 还是合法 TOML 字面量会落盘）。
+    范围 / 业务校验留给下游 mutator —— 本层只挡 wire 类型 + 非有限值。
+    """
+    v = data.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        _log.warning("ignoring %s: %s 必须是数值，收到 %r", where, key, type(v))
+        return None
+    if not math.isfinite(v):
+        _log.warning("ignoring %s: %s 必须是有限数值，收到 %r", where, key, v)
+        return None
+    return float(v)
 
 
 def check_optional_dict(data: dict, key: str, *, where: str) -> bool:

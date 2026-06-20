@@ -177,9 +177,13 @@ export const Inbound = Object.freeze({
   // 结构化 mutator（P4 详细设置 modal 用）。payload 见对应 chahua/server.py
   // _inbound_* —— spec=null 是合法 payload，语义"清整段，回房间默认"。
   UPDATE_ROOM_ORCHESTRATOR: "update_room_orchestrator",
+  // P16 房间调度档（scoring/manual）。轻热替：server swap_room_config，不重装 session。
+  UPDATE_ROOM_SCHEDULE_MODE: "update_room_schedule_mode",
   UPDATE_ROOM_LLM: "update_room_llm",
   UPDATE_GUEST_LLM: "update_guest_llm",
   UPDATE_GUEST_ISOLATION: "update_guest_isolation",
+  // P16 per-guest 发言权重（0–4 乘性偏置）。轻热替：不重建茶客。
+  UPDATE_GUEST_TALKATIVENESS: "update_guest_talkativeness",
   UPDATE_GUEST_EXTRA_MCP: "update_guest_extra_mcp",
   // persona 导入：本地文件夹（main 端 dialog 选目录后传 path）/ GitHub URL。
   // 成功 / 失败都走 NOTICE envelope 回报；前端再用 alert / status 显示。

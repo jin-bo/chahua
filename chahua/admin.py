@@ -49,6 +49,7 @@ from .admin_room import (  # noqa: F401
     delete_room,
     update_room_llm,
     update_room_orchestrator,
+    update_room_schedule_mode,
 )
 # 每位茶客的 mutator。
 from .admin_guest import (  # noqa: F401
@@ -59,6 +60,7 @@ from .admin_guest import (  # noqa: F401
     update_guest_isolation,
     update_guest_llm,
     update_guest_permission,
+    update_guest_talkativeness,
 )
 # USER.md / 头像 / raw room.toml 编辑入口。
 from .admin_user import (  # noqa: F401

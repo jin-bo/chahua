@@ -84,6 +84,11 @@ __all__ = ["Orchestrator", "OrchestratorConfig"]
 class _GuestEntry:
     guest: TeaGuest
     persona_md: str
+    talkativeness: float = 1.0
+    """P16 per-guest 乘性发言偏置（``scoring`` 档 auto-pick 用）。装配期由
+    ``register(*, talkativeness=)`` 注入（已 coalesce 过 ``None``→1.0）；热替由
+    ``update_talkativeness`` 原地刷。1.0=no-op。读点见
+    :meth:`ScoringOps.pick_next_speaker` scoring 子分支。"""
 
 
 # ── 编排器 ───────────────────────────────────────────────────────────────────
@@ -198,13 +203,34 @@ class Orchestrator:
 
     # ── 注册 / 信息 ────────────────────────────────────────────────────
 
-    def register(self, guest: TeaGuest, persona_md: str) -> None:
-        """加入一位茶客。同名重复注册抛错。"""
+    def register(
+        self, guest: TeaGuest, persona_md: str, *, talkativeness: float = 1.0,
+    ) -> None:
+        """加入一位茶客。同名重复注册抛错。
+
+        ``talkativeness``（P16）= per-guest 乘性发言偏置，调用方（``session.py``）已
+        coalesce 过 ``None``→1.0；默认 1.0 让裸构 / 旧测试夹具零改。
+        """
         if guest.name in self._guests:
             raise ValueError(f"茶客 {guest.name!r} 已经注册过")
-        self._guests[guest.name] = _GuestEntry(guest=guest, persona_md=persona_md)
+        self._guests[guest.name] = _GuestEntry(
+            guest=guest, persona_md=persona_md, talkativeness=talkativeness,
+        )
         self.room.add_participant(guest.name)
         self._renderer.invalidate_display_cache()
+
+    def update_talkativeness(self, by_name: dict[str, float]) -> None:
+        """P16 轻热替：刷新已注册茶客的 ``talkativeness``（``swap_room_config`` 末尾调）。
+
+        **只更新当前 ``_guests`` 中已存在的 name** —— 缺失 / 新增茶客不在轻热替职责内
+        （茶客增删改 agent 实例，走 ``server._replace_session`` 重建）。原地改可变
+        ``_GuestEntry`` 字段，不重建 → 茶客 agentao 实例 / 进程内对话窗口 / 记忆全不动，
+        下一轮打分读新权重。
+        """
+        for name, value in by_name.items():
+            entry = self._guests.get(name)
+            if entry is not None:
+                entry.talkativeness = value
 
     def set_config(self, config: OrchestratorConfig) -> None:
         """热替换编排参数 —— 同步更新 Orchestrator 自身 + 内嵌 ContextRenderer 的 ref。

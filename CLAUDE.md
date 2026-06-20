@@ -98,6 +98,18 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **`[[guest.extra_mcp_servers]]` 自动信任，persona sidecar `mcp.json` 走 trust 门**。前者用户手写=意图；后者可能 GitHub 导入任意可执行须 UI 勾选。同名房间级覆盖 persona。
 - **isolation 切换不自动迁移记忆**。`isolation` 决定茶客 cwd；切换后旧路径 `.agentao/memory.db` / `sessions/` 原样保留。
 
+### 发言权重与手动模式（P16）
+
+承重契约；完整 rationale / 反向评审溯源见 `docs/P16-发言权重与手动模式.md`，改不变量两处同步。
+
+- **`schedule_mode` 只换 auto-pick 第 3 档；`@mention` / `@broadcast` 在所有档下字面不变**。前两档是确定性路由（score=1.0），档无关、不打分、不吃 talkativeness。`manual` 档 `pick_next_speaker` 第 3 档恒返 `[]` + 零打分 LLM 调用（增量是成本不是行为，≈ `want_threshold=1.0` 但跳过 N 次打分）。
+- **调度档与 handoff / MTS 正交**。delegate/review/panel/MTS 跑 `run_pending_handoff` drain loop、不经 auto-pick，故 `manual` 房照常工作。
+- **`talkativeness` 仅作用 `scoring` 档 auto-pick 分数：`effective = clamp(base_score × talkativeness, 0, 1)`**。乘性（base=0 再高权重仍 0）；驱动阈值 + 排名 + envelope `data.scores`。**绝不**作用 `@`/broadcast/handoff/MTS/cooldown 门、**绝不**进打分 prompt（`scoring.py` 行为一字不动）。仅 `ScoreKind.SCORED` 被偏置（ERROR/COOLDOWN 原样）。
+- **talkativeness 默认 coalesce：`None`（未填）→`1.0`，`0.0`=合法哑茶客，禁 `or 1.0`**。use 点 `x if x is not None else 1.0`（与 permission/isolation 同坑）。范围 `[0.0,4.0]` + 拒非有限值（NaN/inf）—— TOML 允许 `nan` 字面量，`score×NaN=NaN` 会永久静默茶客且 `repr(nan)` 落盘。MVP 无 manifest 联动（manifest 是硬编码白名单非派生）。
+- **取证靠显式穿透序列化**。`ScoreResult.base_score`/`talkativeness` 仅载体；实时 `data.scores`（`score_to_dict`）只发 effective `score`；`record_scoring` entry 仅 SCORED 且 talk≠1.0 时补 `base_score`/`talkativeness` 两 key。`scoring_path` 增 `manual` 值，加字段/key 均不 bump `schema_version`。
+- **两旋钮走 `swap_room_config` 轻热替，不走 `_replace_session`**。声明性字段、不改 cwd/client/agent → 下一轮 pick 当场生效、不 cancel in-flight、不重建茶客。`schedule_mode` 经 `_make_orchestrator_config(overrides, *, schedule_mode=, explicit=)` 装配——`explicit`（SDK 入参）非空时**完全优先**、不被 `schedule_mode=` 覆盖；**不**经 `orchestrator_overrides` 数值表、**不**在 callsite 无脑 `dataclasses.replace`。talkativeness 经 `Orchestrator.update_talkativeness` 只刷 `_guests` 已存在 name（增删走 `_replace_session`）。
+- **配置闭环必经四点**（同 P6.3 `max_turns` 纪律）：`config.py` 定义+校验 → `session.py` 装配穿参 → `admin_room.py`/`admin_guest.py` mutator + `admin_toml.py` 回写（默认 `scoring`/`1.0` 不写盘，显式 `0.0` 保留）→ 本不变量。漏一点字段被静默吞。M2 UI（room checkbox / guest 0–4 滑杆）走 `update_room_schedule_mode` / `update_guest_talkativeness` inbound（轻热替 handler，**不** cancel/`_replace_session`），回显源是 room snapshot 的 `schedule_mode`（room 顶层）/ `talkativeness`（guest dict）。
+
 ### persona 包 manifest（P12）
 
 - **`persona.toml` 顶层 `schema_version` 必填且唯一合法值=1**。缺/≠1 → `PersonaManifestError`。跨版本兼容唯一锚点；加字段不 bump，破坏性变更才 bump。

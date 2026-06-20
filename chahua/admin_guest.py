@@ -13,6 +13,7 @@ P6.x 重构：从 :mod:`chahua.admin` 抽出。本模块只动 ``[[guest]]`` 数
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Sequence
 
@@ -26,6 +27,8 @@ from .admin_room import (
 from .admin_toml import GuestSnapshot
 from .config import (
     DEFAULT_ISOLATION,
+    TALKATIVENESS_MAX,
+    TALKATIVENESS_MIN,
     VALID_ISOLATION,
     _build_extra_mcp_servers,
     RoomConfig,
@@ -158,6 +161,40 @@ def update_guest_llm(
             cleaned.update(validated)  # type: ignore[typeddict-item]
         return cleaned
 
+    _mutate_guest_in_snapshot(snapshot, name=name, transform=_patch)
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def update_guest_talkativeness(
+    *, paths: Paths, room_dir: Path, name: str, talkativeness: float,
+) -> RoomConfig:
+    """改一位茶客的 ``talkativeness``（P16），返回新的 ``RoomConfig``。
+
+    范围 ``[TALKATIVENESS_MIN, TALKATIVENESS_MAX]`` **写盘前**校验（越界 →
+    :class:`RoomConfigError`，不靠"写盘再 reload 回滚"）。``1.0``（含未显式默认）走
+    "默认值不进 snapshot"约定 —— render 层只在 ``!= 1.0`` 时写盘；``0.0``（哑茶客）是
+    合法显式值，照写。名字不在册 → :class:`ValueError`。
+
+    本函数只动 ``room.toml``；生效靠调用方 ``swap_room_config`` 轻热替刷新
+    ``_GuestEntry.talkativeness``（不重建茶客 —— talkativeness 不改 cwd / client / agent）。
+    """
+    if not math.isfinite(talkativeness):
+        raise RoomConfigError(
+            f"talkativeness={talkativeness!r} 必须是有限数值"
+        )
+    if talkativeness < TALKATIVENESS_MIN or talkativeness > TALKATIVENESS_MAX:
+        raise RoomConfigError(
+            f"talkativeness={talkativeness!r} 越界，要求 "
+            f"[{TALKATIVENESS_MIN}, {TALKATIVENESS_MAX}]"
+        )
+
+    def _patch(g: GuestSnapshot) -> GuestSnapshot:
+        cleaned: GuestSnapshot = {k: v for k, v in g.items() if k != "talkativeness"}  # type: ignore[misc]
+        if talkativeness != 1.0:
+            cleaned["talkativeness"] = talkativeness
+        return cleaned
+
+    snapshot = _read_existing_for_mutate(room_dir, paths)
     _mutate_guest_in_snapshot(snapshot, name=name, transform=_patch)
     return _rewrite_and_validate(room_dir, snapshot, paths)
 

@@ -214,6 +214,15 @@
           </fieldset>
 
           <fieldset class="modal-fieldset">
+            <legend>调度模式</legend>
+            <label class="modal-checkbox">
+              <input id="edit-room-schedule-manual" type="checkbox">
+              <span>手动模式：茶客只在被 <code>@</code> 点名 / <code>@all</code> 时发言</span>
+            </label>
+            <div class="modal-hint">默认（不勾）= 意愿打分自发接话。手动模式关闭自发接话、省每条消息的打分开销；<code>@</code> 提及 / handoff / 托管会话不受影响。</div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
             <legend>编排参数</legend>
             <div class="modal-hint">影响"由谁发言、连续几轮、什么时候等用户"。留空恢复默认。</div>
             <div class="modal-orch-grid">
@@ -361,6 +370,18 @@
           <fieldset class="modal-fieldset">
             <legend>权限</legend>
             <div class="modal-radio-row" id="edit-guest-permission-row"></div>
+          </fieldset>
+
+          <fieldset class="modal-fieldset">
+            <legend>发言权重 <code>talkativeness</code></legend>
+            <div class="modal-talk-row">
+              <input id="edit-guest-talkativeness" type="range" min="0" max="4" step="0.1" value="1">
+              <output id="edit-guest-talkativeness-value" class="modal-talk-value">1.0</output>
+            </div>
+            <div class="modal-hint" id="edit-guest-talkativeness-hint">
+              意愿打分时的乘性偏置：<code>1.0</code> 原样、<code>&lt;1</code> 高冷、<code>&gt;1</code> 爱抢、<code>0</code> 自发时哑。
+              只影响"自发接话"，不影响被 <code>@</code> 点名。手动模式下空转。
+            </div>
           </fieldset>
 
           <fieldset class="modal-fieldset">

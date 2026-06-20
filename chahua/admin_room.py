@@ -38,6 +38,7 @@ from .config import (
     DEBUG_DEFAULT_MAX_TURNS,
     DEFAULT_ISOLATION,
     ORCH_FIELD_BOUNDS,
+    VALID_SCHEDULE_MODES,
     _build_orchestrator_overrides,
     DebugConfig,
     RoomConfig,
@@ -130,6 +131,10 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
             g["isolation"] = gc.isolation
         if gc.summary:
             g["summary"] = gc.summary
+        # P16 talkativeness：默认（None 未填 / 1.0 no-op）不进 snapshot；合法显式 0.0
+        # （哑茶客）≠ 1.0 → 携带，round-trip 保住。
+        if gc.talkativeness is not None and gc.talkativeness != 1.0:
+            g["talkativeness"] = gc.talkativeness
         if gc.llm is not None:
             g.update(_llm_spec_to_dict(gc.llm))
         if gc.extra_mcp_servers:
@@ -140,6 +145,8 @@ def _room_config_to_dict(rc: RoomConfig, paths: Paths) -> TomlSnapshot:
         "topic": rc.topic,
         "rules": rc.rules,
         "user_md": rc.user_md_override,
+        # P16 schedule_mode：render 层只在 != "scoring" 时写盘，这里始终携带值即可。
+        "schedule_mode": rc.schedule_mode,
         "orchestrator_overrides": dict(rc.orchestrator_overrides),
         "room_llm": _llm_spec_to_dict(rc.room_llm) if rc.room_llm else None,
         "scoring": _llm_spec_to_dict(rc.scoring_llm) if rc.scoring_llm else None,
@@ -392,6 +399,27 @@ def update_room_orchestrator(
     validated = _build_orchestrator_overrides(overrides, toml_path=toml_path)
     snapshot = _read_existing_for_mutate(room_dir, paths)
     snapshot["orchestrator_overrides"] = validated
+    return _rewrite_and_validate(room_dir, snapshot, paths)
+
+
+def update_room_schedule_mode(
+    *, paths: Paths, room_dir: Path, mode: str,
+) -> RoomConfig:
+    """改 ``[room].schedule_mode``（P16），返回新的 ``RoomConfig``。
+
+    白名单 :data:`chahua.config.VALID_SCHEDULE_MODES` **写盘前**校验（暂缓的
+    ``round_robin`` / ``pooled`` 也在此被拒）。默认 ``"scoring"`` 走"默认值不进
+    snapshot"约定 —— render 层只在 ``!= "scoring"`` 时写盘，故设默认即清掉那行。
+
+    本函数只动 ``room.toml``；生效靠调用方 ``swap_room_config`` 轻热替
+    （声明性字段、不重建茶客）。
+    """
+    if mode not in VALID_SCHEDULE_MODES:
+        raise RoomConfigError(
+            f"schedule_mode={mode!r} 不在 {sorted(VALID_SCHEDULE_MODES)} 内"
+        )
+    snapshot = _read_existing_for_mutate(room_dir, paths)
+    snapshot["schedule_mode"] = mode
     return _rewrite_and_validate(room_dir, snapshot, paths)
 
 

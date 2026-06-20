@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import base64
+import math
 import tomllib
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -29,6 +30,10 @@ from typing import Any, Iterable, Literal, Optional
 
 from ._paths import Paths, resolve_under
 from .llm_spec import LLM_TOML_FIELDS, LLMSpec
+from .orchestrator_config import (
+    SCHEDULE_MODE_SCORING,
+    VALID_SCHEDULE_MODES,
+)
 from .permissions import DEFAULT_MODE, VALID_MODES, is_valid_mode
 
 
@@ -77,19 +82,31 @@ ORCH_FIELD_BOUNDS: dict[str, tuple[type, float, Optional[float]]] = {
     "onboarding_threshold": (int, 1, None),
 }
 
-# [room] 段允许的键 = 固定四件套 + 编排参数（派生自 ORCH_FIELD_BOUNDS）+ ``llm``
-# 子表（P4.9 起，房间默认 LLM 段，对应 toml 里的 ``[room.llm]`` dotted table）。
-# ``llm`` 是 dict 而非标量，平面 key 校验不限制其内部字段；具体字段走
-# :meth:`LLMSpec.from_toml`。
+# P16 ``[[guest]].talkativeness`` 范围。乘性偏置（``effective = clamp(base × talk, 0, 1)``）；
+# 0=自发时哑、1=原样（默认 / no-op）、>1=爱抢、4 是 sanity 上限防误填（0.0→4.0）。
+# **不进** ORCH_FIELD_BOUNDS —— 那是 [room] 编排数值表，talkativeness 是 per-guest。
+TALKATIVENESS_MIN: float = 0.0
+TALKATIVENESS_MAX: float = 4.0
+DEFAULT_TALKATIVENESS: float = 1.0
+
+# [room] 段允许的键 = 固定四件套 + ``schedule_mode``（P16 调度档）+ 编排参数（派生自
+# ORCH_FIELD_BOUNDS）+ ``llm`` 子表（P4.9 起，房间默认 LLM 段，对应 toml 里的
+# ``[room.llm]`` dotted table）。``llm`` 是 dict 而非标量，平面 key 校验不限制其内部
+# 字段；具体字段走 :meth:`LLMSpec.from_toml`。``schedule_mode`` 是字符串、走专用
+# 白名单校验（:data:`VALID_SCHEDULE_MODES`），**不混进 ORCH_FIELD_BOUNDS 数值表 /
+# orchestrator_overrides**（否则字符串塞进只遍历 ORCH_FIELD_BOUNDS 的
+# ``_build_orchestrator_overrides`` 会"白名单允许但被静默忽略"）。
 _ALLOWED_ROOM_KEYS: frozenset[str] = (
-    frozenset({"name", "topic", "rules", "user_md", "llm"})
+    frozenset({"name", "topic", "rules", "user_md", "llm", "schedule_mode"})
     | frozenset(ORCH_FIELD_BOUNDS)
 )
 # [[guest]] 段允许的键。LLM 四件套（model/base_url/api_key_env/temperature）的具体校验
-# 在 LLMSpec.from_toml；这里只是顶层白名单。
+# 在 LLMSpec.from_toml；这里只是顶层白名单。``talkativeness``（P16）是 per-guest 乘性
+# 发言偏置，范围校验走 :data:`TALKATIVENESS_MIN` / :data:`TALKATIVENESS_MAX`。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
     {
         "name", "persona", "permission", "isolation", "summary",
+        "talkativeness",
         "model", "base_url", "api_key_env", "temperature",
         "extra_mcp_servers",
     }
@@ -176,6 +193,13 @@ class GuestConfig:
     onboarding 的 ``<room>`` 块「在场」行据此渲成带摘要的花名册，让茶客分工时看得见
     别的茶客擅长什么。缺即 ``None``，「在场」行优雅降级为只列名字。"""
 
+    talkativeness: Optional[float] = None
+    """``[[guest]].talkativeness`` —— P16 per-guest 乘性发言偏置（``scoring`` 档 auto-pick
+    专用）。``None`` = **未显式填**（装配 / 热替时 coalesce 到 :data:`DEFAULT_TALKATIVENESS`
+    = 1.0）；``0.0`` = 合法显式（自发时哑茶客）。消费侧严禁 ``x or 1.0``（会把 ``0.0``
+    吞成默认）—— 用 ``x if x is not None else 1.0``，与 permission / isolation 的
+    "禁 ``or DEFAULT_MODE``"同坑。范围 ``[0.0, 4.0]`` 在解析期校验。"""
+
     extra_mcp_servers: Optional[dict[str, dict[str, Any]]] = None
     """房间级 inline MCP servers（``[[guest.extra_mcp_servers]]`` 数组表解析结果）。
 
@@ -240,7 +264,17 @@ class RoomConfig:
     """``[room]`` 段里出现的编排参数（``want_threshold`` / ``max_consecutive_ai_turns`` /
     ``speaker_cooldown_turns`` / ``onboarding_threshold``）。**只装载用户实际写了的键** ——
     没写 = 不在 dict 里；session 装配时 patch 到 :class:`OrchestratorConfig()` 默认上。
-    这样回写 toml 时也只回写用户填的那几个，不会把"默认值"硬塞进文件。"""
+    这样回写 toml 时也只回写用户填的那几个，不会把"默认值"硬塞进文件。
+
+    ``schedule_mode`` **不在这里** —— 它是字符串、走 :attr:`schedule_mode` 专用字段，
+    经 :func:`chahua.session._make_orchestrator_config` 的 ``schedule_mode=`` 形参穿进
+    ``OrchestratorConfig``，不混 orchestrator_overrides 数值表（见该字段 / P16 不变量）。"""
+
+    schedule_mode: str = SCHEDULE_MODE_SCORING
+    """``[room].schedule_mode``（P16）。专用字段，**非** orchestrator_overrides ——
+    解析期已对 :data:`VALID_SCHEDULE_MODES` 严格校验。装配 / 热替经
+    ``_make_orchestrator_config(..., schedule_mode=rc.schedule_mode)`` 写进
+    ``OrchestratorConfig.schedule_mode``；SDK 显式 ``explicit`` 入参完全优先、不被它覆盖。"""
 
     room_llm: Optional[LLMSpec] = None
     """``[room.llm]`` 段解析结果（P4.9 起）；缺 = 走 env 推断
@@ -325,6 +359,10 @@ def _build(
         room_raw, toml_path=toml_path
     )
 
+    schedule_mode = _build_schedule_mode(
+        room_raw.get("schedule_mode"), toml_path=toml_path
+    )
+
     # P4.9：``[room.llm]`` 走 [room] 下的 dotted-table 子表。tomllib 解析后是
     # ``room_raw["llm"] = {...}``；缺即 None，让装配层 fall back 到 env。
     room_llm = _build_room_llm_section(
@@ -351,6 +389,7 @@ def _build(
         guests=guests,
         user_md_override=user_md_override,
         orchestrator_overrides=orchestrator_overrides,
+        schedule_mode=schedule_mode,
         room_llm=room_llm,
         scoring_llm=scoring_llm,
         summary_llm=summary_llm,
@@ -479,6 +518,65 @@ def _build_orchestrator_overrides(
             )
         out[key] = value
     return out
+
+
+def _build_schedule_mode(raw: Any, *, toml_path: Path) -> str:
+    """解析 ``[room].schedule_mode``（P16）。缺 → 默认 ``"scoring"``。
+
+    严格白名单 :data:`VALID_SCHEDULE_MODES`。暂缓的 ``round_robin`` / ``pooled`` 给
+    "暂缓 / 未实现"定向 hint（与拼错区分），其它非法值列允许集。``round_trip`` 这类
+    纯 typo 走"拼错"分支。
+    """
+    if raw is None:
+        return SCHEDULE_MODE_SCORING
+    if not isinstance(raw, str):
+        raise RoomConfigError(
+            f"{toml_path}: [room].schedule_mode 必须是字符串，得到 "
+            f"{type(raw).__name__}"
+        )
+    value = raw.strip()
+    if value in VALID_SCHEDULE_MODES:
+        return value
+    if value in {"round_robin", "pooled"}:
+        raise RoomConfigError(
+            f"{toml_path}: [room].schedule_mode={value!r} 暂未实现（P16 暂缓）。"
+            f"当前支持：{sorted(VALID_SCHEDULE_MODES)}"
+        )
+    raise RoomConfigError(
+        f"{toml_path}: [room].schedule_mode={value!r} 非法（拼写错误？）。"
+        f"允许：{sorted(VALID_SCHEDULE_MODES)}"
+    )
+
+
+def _build_talkativeness(raw: Any, *, label: str, toml_path: Path) -> Optional[float]:
+    """解析 ``[[guest]].talkativeness``（P16）。缺 → ``None``（未显式选，消费侧 coalesce
+    到 1.0）。
+
+    bool 先剔（``True`` 是 int 子类，别被当 1.0）；``int`` 向 ``float`` promote（TOML
+    ``2`` → ``2.0``）；范围 ``[TALKATIVENESS_MIN, TALKATIVENESS_MAX]`` 越界 raise。
+    ``0.0`` 是合法显式值（哑茶客），不被当"缺省"。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise RoomConfigError(
+            f"{toml_path}: {label} talkativeness 必须是数值，得到 "
+            f"{type(raw).__name__}"
+        )
+    value = float(raw)
+    # NaN / ±inf 拒 —— TOML 允许 ``nan`` / ``inf`` 字面量，但放进打分会让
+    # ``score × NaN = NaN``（茶客永久静默）；非有限值不是合法权重。先于范围判
+    # （``nan < MIN`` / ``nan > MAX`` 都是 False 会漏过区间检查）。
+    if not math.isfinite(value):
+        raise RoomConfigError(
+            f"{toml_path}: {label} talkativeness={raw!r} 必须是有限数值"
+        )
+    if value < TALKATIVENESS_MIN or value > TALKATIVENESS_MAX:
+        raise RoomConfigError(
+            f"{toml_path}: {label} talkativeness={raw!r} 越界，要求 "
+            f"[{TALKATIVENESS_MIN}, {TALKATIVENESS_MAX}]"
+        )
+    return value
 
 
 def _build_extra_mcp_servers(
@@ -671,6 +769,12 @@ def _build_guests(
             toml_path=toml_path,
         )
 
+        talkativeness = _build_talkativeness(
+            g.get("talkativeness"),
+            label=f"[[guest]] {name!r}",
+            toml_path=toml_path,
+        )
+
         out.append(
             GuestConfig(
                 name=name,
@@ -680,6 +784,7 @@ def _build_guests(
                 llm=guest_llm,
                 extra_mcp_servers=extra_mcp,
                 summary=summary or None,
+                talkativeness=talkativeness,
             )
         )
 
