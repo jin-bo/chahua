@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-06-19
+
+详见 [`docs/releases/v0.1.8.md`](docs/releases/v0.1.8.md)。
+
+### Added
+- **P16 发言权重与手动模式 —— `talkativeness` + `schedule_mode`**（2026-06-19，详见 [`docs/P16-发言权重与手动模式.md`](docs/P16-发言权重与手动模式.md)）：给意愿打分调度补两个简单旋钮，反向评审后从草线四模式收敛为两件填真空洞的，**均走 `swap_room_config` 轻热替**（下一轮 pick 当场生效、不 cancel in-flight、不重建茶客）。① **`[[guest]].talkativeness`**（默认 `1.0`、范围 `[0.0,4.0]`）：`scoring` 档 auto-pick 的 per-guest 乘性偏置 `effective = clamp(base_score × talkativeness, 0, 1)`——让茶客「主咖」/「高冷」/「自发时哑」，不改人设、确定可调、持久。乘性而非加性（`base=0` 再高权重仍 0，「爱说话」≠「乱插话」）；只影响自发接话，`@`提及 / broadcast / handoff / MTS / cooldown / 打分 prompt **全不动**。② **`[room].schedule_mode ∈ {scoring, manual}`**：`manual` 档 auto-pick 第 3 档**恒空 + 零打分 LLM 调用**，真增量是成本不是行为（≈ `want_threshold=1.0` 但跳过每 pick N 次打分）；`@` / handoff / MTS 照常。**M1 机制闭环**：配置四点闭环 + `schedule_mode` 经 `_make_orchestrator_config(overrides, *, schedule_mode=, explicit=)` 装配（显式 SDK `explicit` 入参完全优先、不混 `orchestrator_overrides`）+ 取证显式穿透（`ScoreResult.base_score`/`talkativeness` 仅载体，`record_scoring` 补 key，实时 `data.scores` 仍 effective-only，`scoring_path` 加 `manual`，不 bump `schema_version`）+ 默认 coalesce 防坑（`x if x is not None else 1.0`、禁 `or 1.0`，范围 `[0,4]` + 拒非有限值 NaN/inf）。**M2 发布面**：room snapshot 加两字段 + `update_room_schedule_mode` / `update_guest_talkativeness` inbound（轻热替 handler，不 `_replace_session`、不 cancel）+ mutator（写盘前校验、默认不写、显式 `0.0` 保留）+ room checkbox + guest 0–4 滑杆。`round_robin` / `pooled` 暂缓。经两轮独立对抗评审收敛（M2 NaN 绕过加固）。1541 测试全过（+62）。
+
 ## [0.1.7] - 2026-06-17
 
 详见 [`docs/releases/v0.1.7.md`](docs/releases/v0.1.7.md)。
