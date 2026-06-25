@@ -91,15 +91,19 @@ def render_managed_session_block(manager: str, budget: int) -> str:
     的等待语义 —— 为保 ``handoff_tools.py`` 零改动不改工具，改由本块纠偏）；
     ③ P11.2：多人并发用 ``spawn_agent_runs`` —— 绕开 budget 做并发分发
     （budget 控制管理者**串行**复查深度；``spawn_*`` 是并行后台调度，两者正交）；
-    ④ **P8.4**：**没有可派的下一步**时（需要再读资料 / 等用户输入 / 卡壳等），
-    **直接讲完当前发言并结束本轮，不要为了维持会话而硬派活**。MTS 会自动等用户
-    下一句话再续 —— 它不会因为你这一轮没派活而结束；⑤ Goal 真正达成时用
-    ``task_propose_status("done")`` 收尾（该提议会给用户确认、不自动生效）。
+    ④ **P8.4 / P8.6**：**没有可派的下一步**时（需要再读资料 / 等用户输入 / 卡壳等），
+    **直接讲完当前发言并结束本轮，不要为了维持会话而硬派活**；MTS 会自动等用户下一句话
+    再续、不因这一轮没派活而结束。**P8.6 防过早放弃**：首次受阻不要 propose blocked ——
+    同一阻塞连续 ≥3 复查回合才可标 blocked（codex `continuation.md` 同款节流）；⑤ **P8.6
+    反目标缩水**：Goal 须逐条核验**全部** task scope 后才算达成（**不得**把目标缩成更易
+    通过的子集），再用 ``task_propose_status("done")`` 收尾（该提议给用户确认、不自动生效）。
 
     **CLAUDE.md MTS 不变量「块第 ② 条作废 propose_* 等待语义」** —— 渲染顺序中
     第 ② 条仍是「忽略 propose_* 工具 ack 的等待语义」；后续若调整顺序需同步
     CLAUDE.md 该不变量的条目编号。**P14 英文化 + 精练后 5 条 bullet 顺序保持不变**
-    （rationale 移本 docstring，bullet 体精简为祈使句）。
+    （rationale 移本 docstring，bullet 体精简为祈使句）。**P8.6**：第 ④ 条加 blocked
+    防过早放弃节流、第 ⑤ 条加反目标缩水审计，**仍是 5 条、顺序不变**——不触发「5 条
+    顺序」不变量的双写要求（CLAUDE.md / `docs/INVARIANTS.md`），故只更新本 docstring。
 
     ``manager`` 走 ``quoteattr`` 转义防 XML 属性注入（与 ``<room>`` 等块同口径）。
     """
@@ -117,9 +121,13 @@ def render_managed_session_block(manager: str, budget: int) -> str:
         "parallelism (panel drains serially).\n"
         "- No next step (need to read more, need user input, stuck)? Just finish your "
         "turn — the session idles and waits for the user; it does NOT end because you "
-        "did not delegate this round.\n"
-        "- Goal met? Call task_propose_status(\"done\") to wrap up (the proposal goes to "
-        "the user for confirmation, not auto-applied) and stop delegating.\n"
+        "did not delegate this round. Do NOT task_propose_status(\"blocked\") on the "
+        "first obstacle — only mark blocked when the SAME blocker has recurred across "
+        "3+ consecutive review rounds; a one-off setback is an idle round, not a blocked goal.\n"
+        "- Goal met only after verifying the FULL task scope requirement-by-requirement "
+        "— do NOT shrink the goal to an easier-to-pass subset just because it is closer "
+        "to done. Only then call task_propose_status(\"done\") to wrap up (the proposal "
+        "goes to the user for confirmation, not auto-applied) and stop delegating.\n"
         f"Budget left: {rounds} review rounds. The session ends on budget exhausted "
         "(budget=0) / task closed / user stop; otherwise a round with no delegation "
         "just idles.\n"

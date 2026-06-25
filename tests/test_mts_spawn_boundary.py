@@ -8,8 +8,8 @@
 - spawn 工具创建的 bg run **不消耗** MTS budget、**不增加** ``_consecutive_ai_turns``
   —— budget 控制管理者**串行**复查深度；``spawn_*`` 是**并行**后台调度，两者正交。
 - spawn 工具创建的 bg run **仍占** ``MAX_AGENT_RUNS_PER_ROOM`` —— 共享同一资源池。
-- ``<managed_session>`` prompt 块第 ④ 条显式告知管理者「需要并发用
-  spawn_agent_runs，不用 propose_panel」。
+- ``<managed_session>`` prompt 块第 ③ 条显式告知管理者「需要并发用
+  spawn_agent_runs，不用 propose_panel」（第 ④ 条是 idle/blocked、第 ⑤ 条是 done）。
 """
 
 from __future__ import annotations
@@ -357,3 +357,42 @@ def test_managed_session_block_allows_dormant_no_force_propose() -> None:
     # 明确告知 MTS 进入待机、不因此结束（"does NOT end" 是 P8.4 语义，正向钉死即可
     # 反推旧 P8.3「没派活就结束」语义不复存在）。
     assert "idles" in block and "does NOT end" in block
+
+
+def test_managed_session_block_has_p86_audits() -> None:
+    """P8.6：``<managed_session>`` 块第 ④ 条加「blocked 防过早放弃」节流、第 ⑤ 条加
+    「反目标缩水」审计 —— 借自 codex ``continuation.md``（见 docs/P8.6）。
+
+    抓特征词钉锁，不依赖整句措辞（P14 精练随时可改）。**仍是 5 条 bullet、顺序不变**
+    —— 故 spawn（第 ③ 条）/ idle（第 ④ 条）既有断言必须同时仍绿（见上两个用例）。"""
+    block = render_managed_session_block("Maya", 4)
+    # 第 ④ 条：blocked 须同一阻塞连续 3+ 复查回合才可标（防一遇阻就撂挑子）。
+    # 钉**完整工具名** task_propose_status("blocked") —— 防 bare propose_status 漏写
+    # task_ 前缀（P14「不改功能性字面量·工具名」不变量；裸 propose_status 是不存在的工具）。
+    assert 'task_propose_status("blocked")' in block
+    assert "first" in block and "3+" in block  # 「首次受阻不标 / 连续 3+ 回合」特征
+    # 第 ⑤ 条：done 前须核验全部 task scope，不得把目标缩成更易过的子集。
+    assert "FULL task scope" in block
+    assert "shrink the goal" in block
+    # 反向保护：anti-shrinking 并进既有「done」bullet，未新增第 6 条 —— done 收尾文案仍在。
+    assert 'task_propose_status("done")' in block
+
+
+def test_managed_session_block_is_exactly_five_bullets_in_order() -> None:
+    """承重不变量回归（INVARIANTS.md §P14「MTS ``<managed_session>`` 块 5 条 bullet
+    顺序不变」/ CLAUDE.md MTS 段）—— INVARIANTS.md 点名本文件作 THE 回归 guard。
+
+    其余 block 用例全是 ``in block`` 子串检查，**捕不到**「拆成第 6 条 / 调换顺序」——
+    一次 P14 精练 split 出第 6 条 / 重排 spawn·idle·done，所有子串仍在、那些用例照绿。
+    本用例显式钉 **bullet 行数 == 5 + 五条特征词的先后次序**，补上这个缺口。"""
+    block = render_managed_session_block("Carol", 5)
+    bullets = [ln for ln in block.splitlines() if ln.startswith("- ")]
+    # 恰好 5 条 —— 多 / 少都是不变量违规（P8.6 两条审计是「并进 ④/⑤」而非加第 6 条）。
+    assert len(bullets) == 5, f"expected 5 bullets, got {len(bullets)}: {bullets}"
+    # 顺序锚点：① delegate ② 忽略 ack ③ spawn ④ idle/blocked ⑤ done —— 各取一个
+    # 不会漂移的特征词，按行序逐条对齐（错位即 break 第 ② / 第 ③ 条锚点引用）。
+    assert "propose_delegate" in bullets[0]
+    assert "awaiting user approval" in bullets[1]  # 第 ② 条「作废 propose_* 等待语义」
+    assert "spawn_agent_runs" in bullets[2]        # 第 ③ 条
+    assert "No next step" in bullets[3]            # 第 ④ 条（idle + P8.6 blocked 节流）
+    assert "task_propose_status(\"done\")" in bullets[4]  # 第 ⑤ 条（P8.6 反目标缩水）
