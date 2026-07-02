@@ -4,4 +4,4 @@ P0 骨架：Room + TeaGuest + USER.md + 单茶客流式 CLI。
 完整设计见 docs/DESIGN.md。
 """
 
-__version__ = "0.1.9"
+__version__ = "0.1.10.dev0"
