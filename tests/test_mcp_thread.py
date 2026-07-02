@@ -21,6 +21,8 @@ class _FakeClient:
         self.connect_loop = None
         self.call_loop = None
         self.disconnected = False
+        self.connect_task = None
+        self.disconnect_task = None
 
     @property
     def transport_type(self):
@@ -33,6 +35,7 @@ class _FakeClient:
     async def connect(self):
         await asyncio.sleep(0)
         self.connect_loop = asyncio.get_running_loop()
+        self.connect_task = asyncio.current_task()
 
     async def call_tool(self, tool_name, arguments):
         await asyncio.sleep(0)
@@ -42,6 +45,7 @@ class _FakeClient:
     async def disconnect(self):
         await asyncio.sleep(0)
         self.disconnected = True
+        self.disconnect_task = asyncio.current_task()
 
 
 async def test_threaded_mcp_manager_works_inside_running_loop(monkeypatch):
@@ -62,6 +66,24 @@ async def test_threaded_mcp_manager_works_inside_running_loop(monkeypatch):
         assert mgr.get_server_status()[0]["trusted"] is True
     finally:
         mgr.disconnect_all()
+
+
+async def test_owner_task_connects_and_disconnects_in_same_task(monkeypatch):
+    """P17：一个 owner task 必须同时进（connect）出（disconnect）client 的
+    ``AsyncExitStack``，否则 streamable-http / SSE 的 anyio task group 会在拆除时
+    抛 "Attempted to exit cancel scope in a different task"。这里钉死「同一 task
+    进出」不变量 —— 回落到「connect 一个 task / disconnect 另一个 task」的旧形状即失败。"""
+    monkeypatch.setattr(mcp_thread, "McpClient", _FakeClient)
+
+    mgr = mcp_thread.ThreadedMcpClientManager({"demo": {"command": "fake"}})
+    mgr.connect_all()
+    client = mgr.get_client("demo")
+    mgr.disconnect_all()
+
+    assert client is not None
+    assert client.disconnected is True
+    assert client.connect_task is not None
+    assert client.connect_task is client.disconnect_task
 
 
 def test_merged_mcp_configs_preserves_file_loaded_and_overlays_persona(

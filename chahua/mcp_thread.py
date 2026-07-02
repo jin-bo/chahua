@@ -31,6 +31,16 @@ class ThreadedMcpClientManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._started = threading.Event()
+        # P17: per-client "owner" task + stop event. One task enters the
+        # client's ``AsyncExitStack`` (connect) AND exits it (disconnect), so
+        # the anyio task groups inside ``streamable_http_client`` / ``sse_client``
+        # see the *same* task at enter and exit. The old shape drove connect and
+        # disconnect as two separate ``run_coroutine_threadsafe`` tasks — that
+        # crosses tasks and raises "Attempted to exit cancel scope in a
+        # different task than it was entered in" on every url-transport
+        # teardown (never hit before because MCP was stdio-only).
+        self._owner_tasks: Dict[str, "asyncio.Task[None]"] = {}
+        self._stop_events: Dict[str, asyncio.Event] = {}
 
     @property
     def clients(self) -> Dict[str, McpClient]:
@@ -48,18 +58,50 @@ class ThreadedMcpClientManager:
         self._run(self._connect_all_async())
 
     async def _connect_all_async(self) -> None:
-        async def _connect_one(name: str, config: Dict[str, Any]) -> None:
+        async def _spawn(name: str, config: Dict[str, Any]) -> None:
             client = McpClient(name, config)
             self._clients[name] = client
-            try:
-                await client.connect()
-            except Exception as e:
-                _log.error("Failed to start MCP server %r: %s", name, e)
+            stop = asyncio.Event()
+            ready = asyncio.Event()
+            self._stop_events[name] = stop
+            self._owner_tasks[name] = asyncio.ensure_future(
+                self._own_client(client, stop, ready)
+            )
+            await ready.wait()  # block until connect settled (connected or errored)
 
         await asyncio.gather(
-            *[_connect_one(name, cfg) for name, cfg in self._configs.items()],
+            *[_spawn(name, cfg) for name, cfg in self._configs.items()],
             return_exceptions=True,
         )
+
+    async def _own_client(
+        self, client: McpClient, stop: asyncio.Event, ready: asyncio.Event
+    ) -> None:
+        """Own one client's connect → serve → disconnect lifecycle in one task.
+
+        Enters the exit stack (``connect``) and later exits it (``disconnect``)
+        from *this same task*, so the streamable-http / SSE anyio task groups are
+        entered and exited consistently. Between the two it just parks on
+        ``stop`` while ``call_tool`` runs on the shared loop against the live
+        session. A failed connect short-circuits straight to teardown.
+        """
+        try:
+            try:
+                await client.connect()
+            except Exception as e:  # mirror the old _connect_one log line
+                _log.error("Failed to start MCP server %r: %s", client.name, e)
+            finally:
+                ready.set()
+            if client.status.value == "connected":
+                await stop.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Same task that entered the exit stack — no cross-task cancel scope.
+            try:
+                await client.disconnect()
+            except Exception as e:  # never let teardown escape the owner task
+                _log.warning("MCP %r disconnect: %s", client.name, e)
 
     def get_client(self, name: str) -> Optional[McpClient]:
         return self._clients.get(name)
@@ -83,8 +125,10 @@ class ThreadedMcpClientManager:
         if self._loop is None:
             return
         try:
-            if self._clients:
-                self._run(self._disconnect_all_async())
+            if self._owner_tasks:
+                # Signal every owner task to stop and wait for each to exit its
+                # own exit stack (same-task disconnect) before killing the loop.
+                self._run(self._shutdown_owners_async())
         finally:
             loop = self._loop
             thread = self._thread
@@ -94,11 +138,16 @@ class ThreadedMcpClientManager:
             self._loop = None
             self._thread = None
             self._started.clear()
+            self._owner_tasks.clear()
+            self._stop_events.clear()
+            self._clients.clear()
 
-    async def _disconnect_all_async(self) -> None:
-        for client in self._clients.values():
-            await client.disconnect()
-        self._clients.clear()
+    async def _shutdown_owners_async(self) -> None:
+        for stop in self._stop_events.values():
+            stop.set()
+        tasks = list(self._owner_tasks.values())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def get_server_status(self) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
