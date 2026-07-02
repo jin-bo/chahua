@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-01
+
+详见 [`docs/releases/v0.1.9.md`](docs/releases/v0.1.9.md)。
+
 ### Added
 - **P8.6 MTS 管理者审计提示 —— 反目标缩水 + blocked 防过早放弃**（2026-06-25，详见 [`docs/P8.6-MTS 管理者审计提示.md`](docs/P8.6-MTS%20管理者审计提示.md)）：给 MTS 管理者的 `<managed_session>` 块补两条借自 codex `/goal` `continuation.md` 的审计提示，治两个自主推进失效：① **反目标缩水**——manager 把 Goal 缩成「最易判完成的子集」就 `task_propose_status("done")`；须逐条核验**全部** task scope 后才算达成。② **blocked 防过早放弃**——manager 一遇阻碍就撂挑子；改为首次受阻不 propose blocked，同一阻塞连续 **3+** 复查回合才可标 blocked。**纯 prompt 增量**：只改 `render_managed_session_block` 第 ④/⑤ 条 bullet 文案 + docstring + 一条渲染断言 + Maya skill 口径，**不动逻辑 / 数据契约 / 工具面 / envelope，不 bump `schema_version`**（P14 块 5 条 bullet 顺序不变）。立项依据见 P8.5 codex `/goal` 机制对照评估。
 - **P17 只读长期记忆 —— 接 GuanLan MCP 作茶客共享记性**（详见 [`docs/P17-只读长期记忆-GuanLan-MCP.md`](docs/P17-只读长期记忆-GuanLan-MCP.md)）：茶客可把 [GuanLan](https://github.com/jin-bo/agentao) wiki 作为**只读**长期记忆经 MCP 召回（`search` / `read_page` / `graph` 等 6 只读工具），补上「跨茶客共享、结构化、可检索」的第三层记忆——正交于会话窗口与茶客私有 `.agentao/memory.db`。**主线 agent-pull**：茶客自调工具，走 persona sidecar `mcp.json` 的裸 `url`（Streamable HTTP）+ trust 门放行，**几乎零 chahua 代码改动**（`mcp.json` passthrough 本就接受 `url`）。**纯只读消费**：不碰 GuanLan 写路径、不破其只读红线，写入策展全在 chahua 外由人工 `guanlan ingest` 完成。召回成本天然有界（打分从不调工具、只在胜出茶客 `speak()` 发生，复用「打分永不吃图/工具」不变量）；召回内容按不可信数据处理（防注入分层 L1–L5：第 1 跳靠 persona 纪律 + KB 信任层，第 2 跳被 transcript 转义 + 打分不可信兜住）。示例茶客 **孙博士**（`examples/personas/孙博士/`，把 GuanLan 当自己的记性、对人只说人话「我想想 / 记不起了」而非「查知识库」）随 repo 走、用户从 git 手工导入，**不打包 / 不 seed**。**运行前提**：需外部 `guanlan mcp --transport http`（默认 `127.0.0.1:8766`）在跑 + trust 放行 + agentao ≥ 0.4.14，缺则优雅退化为无记性茶客。P-mem.3（room.toml `url` 白名单）/ P-mem.4（host-push `<long_term_memory>` 转义块）暂缓。
