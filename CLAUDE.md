@@ -298,6 +298,17 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **`mcp_thread` owner-task：同一 task 进出 exit stack**。每 client 一个常驻 owner task 里 `connect`（进栈）→ park 在 stop event → `disconnect`（出栈），`call_tool` 走共享 loop。**禁**把 connect/disconnect 拆成两个 `run_coroutine_threadsafe` task——`streamable_http_client` 的 anyio task group 要求同 task 进出，跨 task 出栈会抛 cancel-scope 错。回归测钉死。
 - **孙博士示例不打包 / 不 seed**。`examples/personas/孙博士/` 随 repo 走、用户从 git 手工导入；出厂 dmg 不含它、`app/templates/` 不加 persona。**不 bump `schema_version`**（agent-pull 全走 agentao MCP、chahua 无新 inbound/envelope）。
 
+### 消息回溯与历史搜索（P18）
+
+承重契约见 `docs/P18-消息回溯与历史搜索导出.md`，改不变量两处同步。M1（当前房搜索）+ 回溯（撤回未回复末条）已落地；导出过滤 / 全局·正则搜索仍为设计。
+
+- **transcript 主体 append-only，撤回是唯一全量重写入口**。`Room.truncate_last()`（P18 撤回专用）经 `_persist.write_jsonl_atomic`（tmp+rename）整体重写 —— **先写盘后弹内存**（写失败内存不动、与盘一致），比 `append` 的「先改内存后写」更稳。Room 只弹末条、对 user/task 语义无知；谁能撤全由 server 判。summary.jsonl 同获 `write_jsonl_atomic` 全量重写路径（`Summarizer.truncate_after`）。
+- **撤回是 server 权威、免 message_id、无 payload**。inbound `retract_last_user_message` 严格白名单（空 allowed，靠 `check_keys_whitelist` 恒排除 `type`）。**免 id 是承重**：本地 echo 用户气泡落盘前无 message_id，带 id 会让「刚发完立刻撤回」挂不上。
+- **撤回三段硬校验，任一不满足即拒 + NOTICE，不得放宽**：① 房间 idle —— 用 `busy_alive()`（含 inflight ∨ bg run ∨ dormant MTS）**而非 `_inflight_alive()`**（后者按 P11 纪律不含 bg run，会漏放正在产出回复的 bg run，orphan 一条即将到达的茶客回复）；② transcript 末条存在且 `speaker_id == USER_SPEAKER_ID`；③「其后无茶客回复」由②蕴含。
+- **撤回主状态截 transcript，旁路一致收尾、cursor 与各茶客 `agent.messages` 一律不动**。尚无回复前提已保证 cursor / 私有记忆没碰过被撤 seq，顺手 `clear_history` 或回退游标即为 bug。旁路收尾顺序（处理器全程无 `await`，同 tick 原子）：**先 `cancel_pending_summarize()`**（否则在跑的后台摘要跑完会把含被撤文本的陈旧 span append 回盘、绕过 truncate_after）→ `Summarizer.truncate_after`（丢 `end_seq>=seq` span + 复位退避）→ `TaskSummaries.truncate_after`（**遍历 store 全量任务**、不只 `_by_id` 已实例化的，clamp 每个 `considered_until_seq` 到 `seq-1` 并立即 flush —— 跨会话落盘 cursor 也要够到）→ `TurnRecorder.drop_turns_from`（删覆盖 seq 的 turn 行 + `prompts/`）。summary 收尾包 try/except（transcript 已截，盘错不能让 debug 清理 + snapshot 重发被跳过）；末尾 `_emit_room_snapshot` 全量重发让前端重建。
+- **搜索纯只读，不碰任何状态**。inbound `search_room {query, limit?}` → `SEARCH_RESULTS {query, results, truncated}`；当前房、`re.escape`+`re.IGNORECASE` 在**原文**子串匹配（位置无 casefold 偏移）、无索引/分页/正则；query 长度封顶 `_SEARCH_MAX_QUERY_LEN` 兜底巨串；results 只带 `speaker_id`（前端按名册映射）。不写 transcript/cursor/记忆、不挡 inflight。
+- **前端撤回按钮动态挂在唯一「当前可撤回」用户气泡**。`refreshRetractable` 由 messagesEl 的 `childList` MutationObserver + `endStreamingMessage` 末尾显式调（后者补 observer 观不到的「流式气泡转 `.error`」类变更）双触发；跳过 `.sys`/`.error`（失败/取消气泡不进 transcript、不该挡撤回）。跳转 `jumpToMessage` 对 `display:none`（任务筛选隐藏）目标返 false 让调用方兜底提示。
+
 ## 测试
 
 `asyncio_mode = "auto"` —— async 测试不用加 mark。`tests/` ~100 文件 / ~1370 测，覆盖 orchestrator / scoring / handoff / MTS / task / artifact / persona / server inbound / room runtime / P11 bg run。fixture 共享 `tests/conftest.py`（`build_orch` 裸构 Orchestrator / `SpeakingStubGuest` 走真 speak / `task_inbound_srv` 装真房间 + monkeypatch `_run_ai_chain` no-op）。**复现 bug 优先**，先写失败用例再修。全量 `uv run pytest`（~45s），单测 `uv run pytest tests/test_xxx.py -v`。

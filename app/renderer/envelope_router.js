@@ -89,6 +89,8 @@ export function createEnvelopeRouter({
   bgRunBar,
   // P12.6：persona import 控制器，接 PERSONAS_INSTALLED 全量快照重渲「已安装」列表。
   personaImport,
+  // P18：当前房历史搜索面板，接 SEARCH_RESULTS 一次性响应渲染命中列表。
+  searchPanel,
 }) {
   // P9：当前前台房间在 envelope 里的 room_id（= room.name，见 chahua/events.py）。
   // 从 room_info envelope 顶层 room_id 捕获。
@@ -287,6 +289,10 @@ export function createEnvelopeRouter({
         setStatus("ok", `已导出 ${filename}`);
         return;
       }
+      case EventType.SEARCH_RESULTS:
+        // P18：当前房搜索的一次性响应 —— 前台房专属，不进后台白名单。
+        searchPanel.onResults(env.data ?? {});
+        return;
       case EventType.FILE_DOWNLOAD: {
         // 失败路径：NOTICE 已弹过 alert，envelope 仅含 {rel, error, purpose?}。
         // preview 路径上的失败要传给等待中的 <img> 显示 alt 错误；download 路径无副作用。

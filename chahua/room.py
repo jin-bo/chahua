@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
-from ._persist import append_jsonl, read_jsonl_skip_bad
+from ._persist import append_jsonl, read_jsonl_skip_bad, write_jsonl_atomic
 from .events import new_message_id, now_ms
 
 _log = logging.getLogger(__name__)
@@ -214,6 +214,31 @@ class Room:
             # 截断为空文件，下次 append_jsonl 直接写一行。
             with self.transcript_path.open("w", encoding="utf-8"):
                 pass
+
+    def truncate_last(self) -> Optional[Message]:
+        """删掉并返回最后一条消息（含落盘全量重写）；空房间返回 ``None``。
+
+        P18「撤回未回复的最后一条」用 —— transcript 从纯 append 变成「append + 罕见
+        全量重写」。**谁能撤、撤的是不是用户消息、房间是否 idle，全由调用方（server）
+        判定**；:class:`Room` 只负责「弹掉末条 + 原子重写盘」，保持对 user / task 语义
+        无知（同 :meth:`append` 只落原样值）。
+
+        落盘走 :func:`write_jsonl_atomic`（tmp+rename）—— 中途崩溃留完整旧文件而非半截。
+        剩余消息的 ``seq`` 天然仍是 1..N-1 密集连续（只删末条），无需重排。
+
+        **先写盘后弹内存**：写失败（抛 OSError）时内存不动，与盘保持一致 —— 比 append
+        的「先改内存后写」更稳（撤回是罕见重写，不图那点 append hot-path 简洁）。
+        """
+        if not self._messages:
+            return None
+        msg = self._messages[-1]
+        if self.transcript_path is not None:
+            write_jsonl_atomic(
+                self.transcript_path,
+                [m.to_jsonl_dict() for m in self._messages[:-1]],
+            )
+        self._messages.pop()
+        return msg
 
     def messages_since(self, last_seq: int) -> list[Message]:
         """返回 ``seq > last_seq`` 的所有消息。``last_seq=0`` 表示"从头"。"""

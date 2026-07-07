@@ -719,6 +719,59 @@ class TurnRecorder:
                 )
         self._turn_count = 0
 
+    @staticmethod
+    def _turn_covers_seq(row: dict[str, Any], seq: int) -> bool:
+        """一个已落盘 turn 行是否「覆盖 seq 或其后」——由被撤消息触发（``trigger.ref_seq
+        >= seq``）或记录了 seq ≥ 该值的发言（``messages[].seq >= seq``）。撤回是末条、
+        其后无消息，故常态命中的是被撤用户消息触发的那个 no-winner turn。"""
+        trigger = row.get("trigger")
+        if isinstance(trigger, dict):
+            ref = trigger.get("ref_seq")
+            if isinstance(ref, int) and not isinstance(ref, bool) and ref >= seq:
+                return True
+        messages = row.get("messages")
+        if isinstance(messages, list):
+            for m in messages:
+                if isinstance(m, dict):
+                    s = m.get("seq")
+                    if isinstance(s, int) and not isinstance(s, bool) and s >= seq:
+                        return True
+        return False
+
+    def drop_turns_from(self, seq: int) -> None:
+        """P18 撤回 ``seq`` 收尾：删掉「覆盖 seq 或其后」的 turn —— ``turns.jsonl`` 行 +
+        对应 ``prompts/<turn_id>/`` 子目录。
+
+        与 :meth:`rotate_if_needed` 同事务口径（重写 jsonl + 删 prompts 子目录 + 修
+        ``_turn_count``），复用 :meth:`_rewrite_jsonl_dropping` / :meth:`_rm_prompt_subdir`。
+        全程 try/except + WARN，**失败永不阻断房间**（延续「debug IO 失败不阻断」纪律）——
+        撤回是用户主动操作，残留孤儿 turn 顶多让取证多一条已删消息的记录，不影响正确性。
+        """
+        if not self.enabled:
+            return
+        assert self._debug_dir is not None
+        try:
+            if not self._turns_path.is_file():
+                return
+            to_delete: set[str] = set()
+            for row in read_jsonl_skip_bad(self._turns_path):
+                if self._turn_covers_seq(row, seq):
+                    tid = row.get("turn_id")
+                    if isinstance(tid, str):
+                        to_delete.add(tid)
+            if not to_delete:
+                return
+            self._rewrite_jsonl_dropping(to_delete)
+            for turn_id in to_delete:
+                self._rm_prompt_subdir(turn_id)
+            self._turn_count = max(0, self._turn_count - len(to_delete))
+            _log.info(
+                "TurnRecorder.drop_turns_from(seq=%d): dropped %d turn(s)",
+                seq, len(to_delete),
+            )
+        except Exception:
+            _log.warning("TurnRecorder.drop_turns_from failed", exc_info=True)
+
     def discard_turn(self) -> None:
         """**仅供 recorder 自身状态损坏时调** —— 丢 in-flight 不写 jsonl。
 

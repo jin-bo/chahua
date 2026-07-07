@@ -470,6 +470,23 @@ export function attachReviewButton(bubble, messageId, onRequestReview) {
   bubble.appendChild(btn);
 }
 
+// P18「撤回」按钮 —— 只挂用户气泡；**免 message_id**（server 权威、只认 transcript
+// 末条），故本地 echo 气泡也能挂。可见性由 ``<li>`` 上的 ``.retractable`` 类经 CSS 门控
+// （``chat_stream.refreshRetractable`` 单点重算「最后一条非系统气泡是不是用户气泡」）。
+// 点击交给注入的 onRetract —— renderer confirm 后发 retract_last_user_message inbound。
+export function attachRetractButton(bubble, onRetract) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "bubble-retract";
+  btn.title = "撤回这条（仅在还没有茶客接话、且没有回合在进行时可用）";
+  btn.textContent = "撤回";
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    onRetract(btn);
+  });
+  bubble.appendChild(btn);
+}
+
 // 静态文本渲染 + 挂复制按钮。流式路径不走这里 —— 它要自挂闭包版复制按钮才能动态
 // 读 accumulated 缓冲。富渲染（mermaid + 代码高亮 + 数学）附在末尾：history 重放 /
 // appendBubble 全文路径都经此进入，唯一出口；流式终点（endStreamingMessage）另外手动调一次

@@ -8,10 +8,11 @@
 // 滚动锚（stickToBottom）、消息挂上后的 hook（afterAppendMessage：单出口刷 chip /
 // 应用 filter，将来加搜索高亮 / 已读标记等也只动 renderer.js 那一处）。
 
-import { Status } from "./events.js";
+import { Status, USER_SPEAKER_ID } from "./events.js";
 import {
   attachArtifactToBubble,
   attachCopyButton,
+  attachRetractButton,
   attachReviewButton,
   attachUserAttachments,
   enhanceContent,
@@ -23,10 +24,6 @@ import {
   setStatusTail,
 } from "./chat_view.js";
 
-// 与 chahua/user_md.py::USER_SPEAKER_ID 同源；transcript.jsonl 里用户发言的
-// speaker_id 字段值。
-const USER_SPEAKER_ID = "user";
-
 export function createChatStream({
   messagesEl,
   makeAvatar,
@@ -36,6 +33,10 @@ export function createChatStream({
   onRequestReview,
   // 「拍一拍」—— 双击茶客头像触发；调用方按 handoff_delegate 转发。缺省时只渲不挂监听。
   onPatGuest = null,
+  // P18 撤回：注入则给用户气泡挂「撤回」按钮 + 起 MutationObserver 单点重算「最后一条
+  // 非系统气泡是不是用户气泡」（是→显按钮）。缺省（测试 harness）时既不挂按钮也不起
+  // observer。点击回调 onRetract(btn)：renderer confirm 后发 retract_last_user_message。
+  onRetract = null,
   // 「气泡后挂图片 / 下载链」用：调用方注入 `{onRequestPreview(rel), onRequestDownload(rel)}`，
   // 缺省时挂件依然渲染、但点击 / 占位图字节无回路（适合无 ws 测试 harness）。
   artifactCallbacks = null,
@@ -119,6 +120,8 @@ export function createChatStream({
     // 复制可见正文；纯附件消息（body 空）退回原始标记文本，否则复制到手的是空串。
     attachCopyButton(bubble, () => body || text);
     attachReviewButton(bubble, messageId, onRequestReview);
+    // P18 撤回按钮**不**在这里挂 —— 由 refreshRetractable 动态挂到「当前唯一可撤回的
+    // 那条用户气泡」，避免给每条历史用户气泡都挂一个隐藏按钮。
     li.appendChild(bubble);
     li.appendChild(makeUserAvatar("msg-avatar"));
     return li;
@@ -283,6 +286,10 @@ export function createChatStream({
       m.textEl.innerHTML = renderMarkdown(finalText);
       enhanceContent(m.textEl);
     });
+    // 流式收尾若是 error/cancel，本函数只加 .error 类（非 childList 变更）——
+    // MutationObserver 只观 childList、观不到，故这里显式重算：失败/取消的茶客输出不进
+    // transcript，房间回到 idle + 末条仍是用户消息，撤回按钮应重新出现。
+    refreshRetractable();
   }
 
   // 进新房（首次连接 / 换房 / clear_room）时调 —— 仅清 Map，不挂"连接断开"尾。
@@ -361,6 +368,58 @@ export function createChatStream({
       : String(s).replace(/(["\\])/g, "\\$1");
   }
 
+  // P18 搜索跳转：按 message_id 滚到该气泡并短暂高亮。命中返 true；命不中（被 evict /
+  // 切房清掉 / 未落盘）返 false 让调用方兜底提示。复用 attachArtifactByMessageId 的
+  // ``li[data-message-id]`` 查询范式。
+  function jumpToMessage(messageId) {
+    if (!messageId) return false;
+    const li = messagesEl.querySelector(
+      `li[data-message-id="${cssEscapeAttr(messageId)}"]`,
+    );
+    // offsetParent === null ⟺ 自身或祖先 display:none —— 被任务筛选 .filtered-out 隐藏、
+    // 或根本不在 DOM。这类要返 false 让调用方给提示，否则 scrollIntoView 会无声失败
+    // （命中却不滚不亮、也不兜底）。
+    if (!li || li.offsetParent === null) return false;
+    li.scrollIntoView({ block: "center", behavior: "smooth" });
+    li.classList.add("msg-highlight");
+    setTimeout(() => li.classList.remove("msg-highlight"), 1500);
+    return true;
+  }
+
+  // P18 撤回按钮单点重算：DOM 里最后一条「真进 transcript 的」气泡是用户气泡 → 只给它
+  // 挂撤回按钮 + .retractable 类；一旦茶客接话（末条变茶客气泡）或空 → 收起。
+  // MutationObserver 单点覆盖 appendBubble / renderHistory / 流式 / evict 所有改
+  // messagesEl 子节点的路径（childList 无 subtree —— 挂/摘按钮是 bubble 内孙节点变更、
+  // 不回触发本 observer，无死循环）。
+  function refreshRetractable() {
+    if (!onRetract) return;  // 无撤回能力（测试 harness）：不挂按钮、可安全被任意点调用。
+    // 跳过 .sys 系统浮签 + .error 失败/取消气泡 —— 后者的 message_id 不进 transcript，
+    // server 仍允许撤回它之前那条用户消息，故它们不该挡住撤回入口。
+    let li = messagesEl.lastElementChild;
+    while (li && (li.classList.contains("sys") || li.classList.contains("error"))) {
+      li = li.previousElementSibling;
+    }
+    const target = li && li.classList.contains("user") ? li : null;
+    for (const el of messagesEl.querySelectorAll("li.retractable")) {
+      if (el !== target) {
+        el.classList.remove("retractable");
+        el.querySelector(":scope > .bubble > .bubble-retract")?.remove();
+      }
+    }
+    if (target && !target.classList.contains("retractable")) {
+      target.classList.add("retractable");
+      const bubble = target.querySelector(":scope > .bubble");
+      if (bubble && !bubble.querySelector(".bubble-retract")) {
+        attachRetractButton(bubble, onRetract);
+      }
+    }
+  }
+  if (onRetract) {
+    new MutationObserver(refreshRetractable).observe(messagesEl, {
+      childList: true,
+    });
+  }
+
   return {
     appendBubble,
     startStreamingMessage,
@@ -370,5 +429,6 @@ export function createChatStream({
     closeInFlightOnDisconnect,
     renderHistory,
     attachArtifactByMessageId,
+    jumpToMessage,
   };
 }

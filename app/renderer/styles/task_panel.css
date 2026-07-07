@@ -19,7 +19,8 @@
 #task-panel[data-collapsed="1"] #task-panel-body,
 /* 折叠态宽 32px 容不下两枚 22×22 图标 —— 切到调试的按钮一起藏，只留 toggle。
    想看调试？先展开任务面板。 */
-#task-panel[data-collapsed="1"] .task-panel-show-debug { display: none; }
+#task-panel[data-collapsed="1"] .task-panel-show-debug,
+#task-panel[data-collapsed="1"] .task-panel-search { display: none; }
 #task-panel-header {
   display: flex;
   align-items: center;
@@ -31,6 +32,7 @@
    debug_panel.css 不再单独声明，避免两套抽屉各自维护一份。 */
 .task-panel-toggle,
 .task-panel-show-debug,
+.task-panel-search,
 .debug-panel-back,
 .debug-panel-clear {
   width: 22px;
@@ -46,8 +48,11 @@
 }
 .task-panel-toggle:hover,
 .task-panel-show-debug:hover,
+.task-panel-search:hover:not(:disabled),
 .debug-panel-back:hover,
 .debug-panel-clear:hover { background: #fff; color: #333; }
+/* 搜索需连接才能发帧 —— 断连时置灰（同 .task-panel-new 口径）。 */
+.task-panel-search:disabled { color: #cfc8b4; cursor: not-allowed; }
 .task-panel-title {
   font-size: 13px;
   font-weight: 600;
