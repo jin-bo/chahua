@@ -21,7 +21,13 @@ from typing import Mapping, Optional
 from agentao.llm import LLMClient
 
 from ._llm_oneshot import chat_oneshot
-from ._persist import append_jsonl, read_json_or_none, read_jsonl_skip_bad, write_json_atomic
+from ._persist import (
+    append_jsonl,
+    read_json_or_none,
+    read_jsonl_skip_bad,
+    write_json_atomic,
+    write_jsonl_atomic,
+)
 from .room import Message, Room, format_messages
 from .tasks_store import TasksStore
 
@@ -126,6 +132,25 @@ class Summarizer:
         if self._summary_path is not None:
             with self._summary_path.open("w", encoding="utf-8"):
                 pass
+
+    def truncate_after(self, seq: int) -> None:
+        """P18 撤回 ``seq`` 收尾：丢掉覆盖 ``seq`` 的 span（``end_seq >= seq``）并原子
+        重写 ``summary.jsonl``；保留的仍是 ``end_seq < seq`` 的完整前缀。
+
+        **常为 no-op**（末条未回复通常还没被摘要成 span），故只在 span 真变化时才写盘。
+        但退避游标若已越过被撤 seq，必须复位 —— 否则 ``_next_eligible_seq`` 停在已不存在
+        的 seq 之后，让后续摘要被无限推迟。
+        """
+        kept = [s for s in self._summaries if s.end_seq < seq]
+        changed = len(kept) != len(self._summaries)
+        self._summaries = kept
+        if self._next_eligible_seq >= seq:
+            self._next_eligible_seq = 0
+            self._failures = 0
+        if changed and self._summary_path is not None:
+            write_jsonl_atomic(
+                self._summary_path, [s.to_jsonl_dict() for s in kept]
+            )
 
     # ── 主入口 ──────────────────────────────────────────────────────────
 
@@ -276,6 +301,20 @@ class TaskSummarizer(Summarizer):
         self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(self._cursor_path, {_TASK_CURSOR_KEY: self._considered_until_seq})
 
+    def truncate_after(self, seq: int) -> None:
+        """P18 撤回 ``seq`` 收尾（task 级）：先 super 丢覆盖 span + 重写 task summary.jsonl，
+        再把 ``_considered_until_seq`` clamp 回 ``seq-1`` 并**立即** flush cursor。
+
+        Why clamp 且立即 flush：``_collect_block`` 在候选不够一块时会把 cursor 直接推到
+        ``latest``（``summarizer.py`` 内），所以撤回时任何被 kick 过的任务 cursor 都可能
+        停在被撤 seq；不回退则 ``latest <= considered`` 让后续摘要永久跳过。立即落盘防崩溃
+        后盘上仍是被撤 seq（``flush_cursor`` 平时只在 session close 时批量落）。
+        """
+        super().truncate_after(seq)
+        if self._considered_until_seq > seq - 1:
+            self._considered_until_seq = seq - 1
+            self.flush_cursor()
+
     def _collect_block(
         self, room: Room, block_size: int
     ) -> Optional[list[Message]]:
@@ -366,6 +405,21 @@ class TaskSummaries:
                     "task %s flush cursor 失败：%s（下次启动会从旧 cursor 重扫）",
                     s.task_id, e,
                 )
+
+    def truncate_after(self, seq: int) -> None:
+        """P18 撤回 ``seq`` 收尾：**所有任务**的 summarizer 都收尾（丢覆盖 span + clamp
+        cursor），不只 active、也不只本会话已实例化的。
+
+        **为什么遍历 store 而非 ``_by_id``**：``_collect_block`` 在候选不够一块时把任意
+        任务 cursor 推到 latest，且该 cursor 会在 session close 时 flush 到
+        ``summary_cursor.json``。跨会话场景 —— 上个会话把某任务 cursor 推到了（现在要撤的）
+        末条 seq、落了盘；本会话重开后用户「第一件事就是撤回」，此时 ``_by_id`` 还空。
+        只遍历 ``_by_id`` 会漏掉这些任务，让其盘上 cursor 永久停在被撤 seq（下条消息复用
+        该 seq 时被永久跳过摘要）。故用 ``_ensure`` 按 store 全量任务实例化（构造即从盘
+        load cursor）后逐个收尾。
+        """
+        for task in self._tasks_store.list_tasks():
+            self._ensure(task.id).truncate_after(seq)
 
     def get(self, task_id: str) -> Optional[TaskSummarizer]:
         """已装配的 summarizer 句柄 —— 仅给测试 / inspector 用，业务流不取。"""

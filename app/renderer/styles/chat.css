@@ -462,6 +462,45 @@
 .bubble-user .bubble-review { background: rgba(232, 244, 232, 0.92); }
 .bubble-user .bubble-review:hover { background: #fff; }
 
+/* P18「撤回」按钮 —— 只在「当前最后一条用户气泡」（li.retractable）上显示；默认
+   display:none，靠 <li> 的 .retractable 类门控（chat_stream.refreshRetractable 单点
+   重算）。定位在左下角，避开右上复制 / 右下请审。比 review 更主动一点（撤回是
+   高频快操作）：retractable 上常驻半透明、hover 转实。 */
+.bubble-retract {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: inherit;
+  color: #a15;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e0b8c0;
+  border-radius: 3px;
+  cursor: pointer;
+  display: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#messages li.retractable .bubble-retract { display: inline-block; opacity: 0.6; }
+#messages li.retractable .bubble:hover .bubble-retract,
+.bubble-retract:focus { opacity: 1; }
+.bubble-retract:hover { background: #fff; color: #810; }
+.bubble-user .bubble-retract { background: rgba(232, 244, 232, 0.92); }
+.bubble-user .bubble-retract:hover { background: #fff; }
+
+/* P18 搜索跳转命中高亮 —— jumpToMessage 加 .msg-highlight 类、1.5s 后移除。
+   短暂黄底淡出把用户视线引到命中气泡。 */
+@keyframes msg-highlight-flash {
+  from { background: rgba(255, 224, 130, 0.75); }
+  to { background: transparent; }
+}
+#messages li.msg-highlight .bubble {
+  animation: msg-highlight-flash 1.5s ease-out;
+}
+
 /* status tail（[中断] / [出错] / [连接断开]）—— textEl sibling，markdown 之外，
    半透明灰把它从主消息内容里"退一步"。 */
 .bubble .status-tail {

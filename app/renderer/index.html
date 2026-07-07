@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="styles/modal.css">
   <link rel="stylesheet" href="styles/proposal_card.css">
   <link rel="stylesheet" href="styles/debug_panel.css">
+  <link rel="stylesheet" href="styles/search_panel.css">
   <link rel="stylesheet" href="styles/splitter.css">
 </head>
 <body>
@@ -524,6 +525,7 @@
         <button type="button" id="task-panel-toggle" class="task-panel-toggle" title="折叠 / 展开任务面板">▶</button>
         <span class="task-panel-title">任务</span>
         <button type="button" id="task-panel-new" class="task-panel-new" title="新建任务" disabled>+ 新任务</button>
+        <button type="button" id="open-search" class="task-panel-search" title="搜索当前房间聊天记录" disabled>🔍</button>
         <button type="button" id="task-panel-show-debug" class="task-panel-show-debug" title="切到调试面板">🔬</button>
       </div>
       <div id="task-panel-body" class="task-panel-body"></div>
@@ -535,6 +537,18 @@
         <button type="button" id="debug-panel-clear" class="debug-panel-clear" title="清空已记录的轮次">⌫</button>
       </div>
       <div id="debug-panel-body" class="debug-panel-body"></div>
+    </aside>
+    <!-- P18 当前房历史搜索：与 task / debug 互斥占同一右侧槽位。#open-search 打开、
+         ✕ 关闭切回任务面板。输入回车发 search_room，命中列表点行跳转 + 高亮主聊天区。 -->
+    <aside id="search-panel" aria-label="搜索聊天记录" hidden>
+      <div id="search-panel-header">
+        <button type="button" id="search-panel-close" class="search-panel-close" title="关闭搜索">✕</button>
+        <span class="search-panel-title">搜索聊天记录</span>
+      </div>
+      <div id="search-panel-input-row">
+        <input id="search-input" type="search" placeholder="搜索当前房间…（回车）" autocomplete="off">
+      </div>
+      <div id="search-panel-body" class="search-panel-body"></div>
     </aside>
   </div>
   <!-- P7.1 handoff 队列预览小条：handoffQueueState 非空时浮现「下一句：A → B」，

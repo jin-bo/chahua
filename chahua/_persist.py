@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Iterable, Iterator, Mapping
 
 _log = logging.getLogger(__name__)
 
@@ -85,6 +85,23 @@ def write_json_atomic(path: Path, data: object) -> None:
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
+    os.replace(tmp, path)
+
+
+def write_jsonl_atomic(path: Path, records: Iterable[Mapping[str, object]]) -> None:
+    """原子**全量重写**整个 jsonl 文件：写 ``<parent>/.<name>.tmp``（一行一条 JSON）
+    → ``os.replace`` 到 ``<path>``。
+
+    :func:`append_jsonl` 是常态（append-only）；本函数是**罕见全量重写**入口 ——
+    P18 撤回未回复末条 / summary 收尾把内存里保留的 records 整体落盘替换旧文件。
+    读端永远看到完整旧文件或完整新文件、不会读到半截（同 :func:`write_json_atomic`
+    的原子范式）。父目录由调用方保证存在（同 :func:`append_jsonl`，不在 hot path mkdir）。
+    """
+    tmp = _tmp_path(path)
+    with tmp.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False))
+            f.write("\n")
     os.replace(tmp, path)
 
 

@@ -98,6 +98,7 @@ from .server_inbound_io import (
     INBOUND_IMPORT_PERSONA_FOLDER,
     INBOUND_IMPORT_PERSONA_GITHUB,
     INBOUND_LIST_INSTALLED_PERSONAS,
+    INBOUND_SEARCH_ROOM,
     INBOUND_UPDATE_PERSONA,
     INBOUND_UPLOAD_FILE,
     IOHandlers,
@@ -139,6 +140,7 @@ from .server_inbound_handoff import (  # noqa: F401
     INFLIGHT_KIND_USER,
 )
 from .session import RoomSession, build_room_session
+from .user_md import USER_SPEAKER_ID
 
 _log = logging.getLogger(__name__)
 
@@ -163,6 +165,9 @@ INBOUND_USER_MESSAGE = "user_message"
 INBOUND_SWITCH_ROOM = "switch_room"
 INBOUND_CLEAR_ROOM = "clear_room"
 INBOUND_CANCEL = "cancel"
+# P18「撤回未回复的最后一条用户消息」——server 权威、无 payload（免 message_id：
+# 本地 echo 气泡落盘前没有 id）。校验「idle ∧ 末条是 user」通过才截 transcript 末条。
+INBOUND_RETRACT_LAST_USER_MESSAGE = "retract_last_user_message"
 # P6.3.A：调试抽屉点击历史索引行按 turn_id 拉详情。inbound 严格白名单（同 task
 # inbound 口径），turn_id regex 强校验拒穿越（路径片段，``prompts/<turn_id>/*``
 # 后端直接拼字符串）。响应回 TURN_DETAIL envelope。
@@ -1181,6 +1186,70 @@ class ChahuaServer:
         await self._cancel_and_drain_all_foreground()
         self._clear_room(sink)
 
+    async def _inbound_retract_last_user_message(
+        self, data: dict, sink: EnvelopeSink,
+    ) -> None:
+        """P18「撤回未回复的最后一条用户消息」——server 权威、免 message_id、无 payload。
+
+        三段硬校验，任一不满足即拒 + NOTICE（不放宽——这是绕开五态回滚的前提）：
+        ① 房间 idle（无 in-flight turn）；② transcript 末条存在且 ``speaker == user``；
+        ③「其后无茶客回复」由 ②「末条是 user」蕴含（有回复则末条会是茶客气泡）。
+
+        通过后只截 transcript 末条 + 旁路（后台摘要任务 + summary 房间级 + 全部 task
+        summarizer + debug）一致收尾；**cursor 与各茶客 ``agent.messages`` 一律不动**
+        （尚无回复前提已保证它们没碰过被撤 seq，顺手 clear_history 即为 bug）。末尾全量
+        重发 snapshot 让前端重建历史（无那条消息）。本处理器全程无 ``await`` —— 旁路收尾
+        与后台摘要 cancel 在同一事件循环 tick 内原子生效。
+        """
+        # 入站严格：本帧无 payload（server 权威、免 message_id），任何顶层键都是意外 ——
+        # 拒 + NOTICE，与 search_room / task inbound 同口径（不因"字段被忽略"就放松合同）。
+        if not self._reject_unknown_keys(
+            data, frozenset(), where=INBOUND_RETRACT_LAST_USER_MESSAGE, sink=sink,
+        ):
+            return
+        # 「idle」必须涵盖 bg run / dormant MTS —— 它们也会往 transcript 追加茶客回复。
+        # 用 ``busy_alive``（inflight ∨ bg run ∨ MTS）而非 ``_inflight_alive``（后者按
+        # P11 纪律刻意不含 bg run），否则 bg run 在跑时撤回会 orphan 一条即将到达的回复。
+        if self._foreground_runtime.busy_alive():
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text="有回合或后台任务正在进行，先停止再撤回。",
+            )
+            return
+        room = self._session.room
+        last = room.last_message()
+        if last is None or last.speaker_id != USER_SPEAKER_ID:
+            self._emit_notice(
+                sink, level=NOTICE_LEVEL_ERROR,
+                text="没有可撤回的消息（末条不是你发的，或已有人接话）。",
+            )
+            return
+        msg = room.truncate_last()
+        if msg is None:  # 同步路径不该发生；防御性兜底。
+            return
+        orch = self._session.orchestrator
+        # 先 cancel 在跑的后台摘要 —— 否则它跑完会把含被撤文本的陈旧 span 追加回
+        # summary.jsonl，绕过下面的 truncate_after（详见 cancel_pending_summarize）。
+        orch.cancel_pending_summarize()
+        # 旁路收尾 try/except 兜底：transcript 已截断（提交态），summary 重写若遇盘错
+        # 不能让 debug 清理 + snapshot 重发被跳过（否则 UI 卡在已删消息 + 取证悬空）。
+        # drop_turns_from 自身已内部 try/except；snapshot 放 finally 外的常规路径。
+        try:
+            orch.summarizer.truncate_after(msg.seq)
+            if orch.task_summaries is not None:
+                orch.task_summaries.truncate_after(msg.seq)
+        except Exception:
+            _log.warning(
+                "retract: summary 收尾失败 seq=%d（transcript 已截，snapshot 照常重发）",
+                msg.seq, exc_info=True,
+            )
+        self._session.recorder.drop_turns_from(msg.seq)
+        _log.info(
+            "retract_last_user_message: room=%r 撤回 seq=%d",
+            room.name, msg.seq,
+        )
+        self._emit_room_snapshot(sink)
+
     async def _inbound_fetch_turn_detail(
         self, data: dict, sink: EnvelopeSink,
     ) -> None:
@@ -1370,6 +1439,8 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_SWITCH_ROOM: "_inbound_switch_room",
     INBOUND_CLEAR_ROOM: "_inbound_clear_room",
     INBOUND_USER_MESSAGE: "_inbound_user_message",
+    # P18 撤回未回复末条——房间状态 mutation，与 clear_room 同归核心层（非 feature slot）。
+    INBOUND_RETRACT_LAST_USER_MESSAGE: "_inbound_retract_last_user_message",
     INBOUND_FETCH_TURN_DETAIL: "_inbound_fetch_turn_detail",
     INBOUND_LIST_GUEST_CAPS: "_inbound_list_guest_caps",
     # agent_run slot：P11 bg run inbound（与 handoff 平行 —— bg run 不进调度层）。
@@ -1409,6 +1480,8 @@ _INBOUND_ROUTES: dict[str, str] = {
     INBOUND_UPLOAD_FILE: "io._inbound_upload_file",
     INBOUND_EXPORT_ROOM: "io._inbound_export_room",
     INBOUND_DOWNLOAD_FILE: "io._inbound_download_file",
+    # P18 当前房历史搜索（只读）。
+    INBOUND_SEARCH_ROOM: "io._inbound_search_room",
     # P12.6 已安装 persona 管理。
     INBOUND_LIST_INSTALLED_PERSONAS: "io._inbound_list_installed_personas",
     INBOUND_CHECK_PERSONA_UPDATES: "io._inbound_check_persona_updates",

@@ -308,9 +308,7 @@ class Orchestrator:
                 entry.guest.agent.clear_history()
             except Exception:
                 _log.warning("clear_history failed for guest %r", name, exc_info=True)
-        if self._summary_task is not None and not self._summary_task.done():
-            self._summary_task.cancel()
-        self._summary_task = None
+        self.cancel_pending_summarize()
         # P7.1 handoff 队列也属于房间瞬态：用户清房后保留旧指派会让"清空"语义被
         # 破坏（下一句还是 clear 前的 delegate 目标）。与 transcript / cursor /
         # summarizer 同口径。
@@ -738,6 +736,21 @@ class Orchestrator:
         if self._summary_task is not None and not self._summary_task.done():
             return
         self._summary_task = asyncio.create_task(self._summarize_safe())
+
+    def cancel_pending_summarize(self) -> None:
+        """cancel 在跑的后台摘要任务（若有）。``reset_room`` 与 P18 撤回共用。
+
+        **Why 撤回也要 cancel**：``submit_user_message`` append 用户消息后同步
+        ``_kick_summarize()``；若该任务此刻正 await LLM，它快照的 block 含被撤消息文本，
+        跑完会把 ``end_seq == 被撤 seq`` 的陈旧 span append 回 ``summary.jsonl`` ——
+        绕过撤回时的 ``truncate_after`` 让被撤内容在未来 onboarding 里复活。撤回处理器
+        全程无 await，故「先 cancel 再 truncate_after」在同一事件循环 tick 内原子生效：
+        cancel 排定取消、被撤 span 由 truncate_after 清除、任务下次 resume 即
+        ``CancelledError`` 不再 append。cancel 不 await（同 ``_kick_summarize`` 不挡路径）。
+        """
+        if self._summary_task is not None and not self._summary_task.done():
+            self._summary_task.cancel()
+        self._summary_task = None
 
     async def _summarize_safe(self) -> None:
         display = self._display_map()

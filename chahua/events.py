@@ -83,6 +83,11 @@ class ChahuaEventType(str, Enum):
     # Blob + a.download 触发浏览器下载，不写本地盘。仅接受房间内 ``share/`` 或
     # ``tasks/<id>/artifacts/`` 前缀的 rel —— 其它路径直接拒，防止穿越读盘。
     FILE_DOWNLOAD = "file_download"
+    # P18：当前房历史搜索的一次性响应。data 形态 ``{query, results, truncated}``——
+    # ``results`` 是 ``[{message_id, seq, speaker_id, ts_ms, snippet}]``（只带 speaker_id、
+    # 不解析 display_name，前端按名册映射，与 room_history 同口径）；``truncated`` 表示命中
+    # 数超过 limit 被截断。read-only 帧，不挂房间 turn，turn_id / message_id / guest_name 都为 None。
+    SEARCH_RESULTS = "search_results"
     # P5.1 任务房间。事件分工（docs/P5-任务房间.md §4.2）：``TASK_INFO`` 是**权威快照**
     # （ws 连上 / 切房 / active 变化 / 任意 task 状态变更后重发整份），其它四个是 **hint**
     # —— 给前端做 toast / 动画 / 高亮增量项，前端任务状态以最近一次 ``TASK_INFO`` 为准。

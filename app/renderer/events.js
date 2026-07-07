@@ -7,6 +7,10 @@
 // 不要把 renderer 内部 CSS class 的 kind（"user" / "error"）混进来 —— 那是
 // presentation 层概念，跟 envelope status 形似而语义无关。
 
+// 用户发言的稳定 speaker_id —— 镜像 chahua/user_md.py::USER_SPEAKER_ID。transcript /
+// search_results / room_history 里用户消息的 speaker_id 都是它；渲染层据此区分「我」。
+export const USER_SPEAKER_ID = "user";
+
 export const EventType = Object.freeze({
   ROOM_INFO: "room_info",
   ROOM_HISTORY: "room_history",
@@ -27,6 +31,10 @@ export const EventType = Object.freeze({
   // 服务端按前端 download_file inbound 请求把文件读出后回吐：
   // 成功 {rel, name, size, content_b64} / 失败 {rel, error}。前端走 Blob + a.download。
   FILE_DOWNLOAD: "file_download",
+  // P18 当前房历史搜索的一次性响应。data {query, results, truncated}；results 每项
+  // {message_id, seq, speaker_id, ts_ms, snippet}（只带 speaker_id、前端按名册映射
+  // display，与 room_history 同口径）。镜像 chahua/events.py::SEARCH_RESULTS。
+  SEARCH_RESULTS: "search_results",
   // P5.1 任务房间（docs/P5-任务房间.md §4.2）。TASK_INFO 是权威快照：每次任务状态
   // 变更（open / update / decision / artifact）后服务端重发整份 {tasks, active_task_id}，
   // 前端任务状态以最近一次 TASK_INFO 为准。另外四个是 hint —— 给前端做 toast / 动画 /
@@ -162,6 +170,13 @@ export const Inbound = Object.freeze({
   SWITCH_ROOM: "switch_room",
   CLEAR_ROOM: "clear_room",
   CANCEL: "cancel",
+  // P18 当前房历史搜索。payload {query, limit?}；服务端只读扫内存 transcript 后回
+  // SEARCH_RESULTS。镜像 chahua/server_inbound_io.py::INBOUND_SEARCH_ROOM。
+  SEARCH_ROOM: "search_room",
+  // P18 撤回未回复的最后一条用户消息。**无 payload**（server 权威、免 message_id：
+  // 本地 echo 气泡落盘前没有 id）。服务端校验「idle ∧ 末条是 user」通过才截断 +
+  // 重发 room snapshot。镜像 chahua/server.py::INBOUND_RETRACT_LAST_USER_MESSAGE。
+  RETRACT_LAST_USER_MESSAGE: "retract_last_user_message",
   // 茶客 / 房间 增删 —— 镜像 chahua/server.py:INBOUND_*。服务端处理后会重发
   // room_info(+ history)；前端不做乐观更新，等回环。
   ADD_GUEST: "add_guest",

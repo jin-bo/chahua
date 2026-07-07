@@ -50,6 +50,7 @@ import { createConnection } from "./connection.js";
 import { createRoomList } from "./room_list.js";
 import { createTurnState } from "./turn_state.js";
 import { createEnvelopeRouter } from "./envelope_router.js";
+import { createSearchPanel } from "./search_panel.js";
 import { clearPendingArtifactPreviews } from "./chat_view.js";
 
 const statusEl = document.getElementById("status");
@@ -94,6 +95,12 @@ const debugPanelEl = document.getElementById("debug-panel");
 const debugPanelBodyEl = document.getElementById("debug-panel-body");
 const debugPanelBackBtn = document.getElementById("debug-panel-back");
 const debugPanelClearBtn = document.getElementById("debug-panel-clear");
+// P18 搜索抽屉 —— 与 task / debug 互斥占右侧槽位。
+const openSearchBtn = document.getElementById("open-search");
+const searchPanelEl = document.getElementById("search-panel");
+const searchInputEl = document.getElementById("search-input");
+const searchPanelBodyEl = document.getElementById("search-panel-body");
+const searchPanelCloseBtn = document.getElementById("search-panel-close");
 const composerTaskChipEl = document.getElementById("composer-task-chip");
 const handoffQueueBarEl = document.getElementById("handoff-queue-bar");
 const bgRunBarEl = document.getElementById("bg-run-bar");
@@ -177,6 +184,7 @@ function setInputEnabled(enabled) {
   assignHandoffBtn.disabled = !enabled;
   addRoomBtn.disabled = !enabled;
   attachFileBtn.disabled = !enabled;
+  openSearchBtn.disabled = !enabled;
   updateNewTaskBtn();
   // P8.3：「托管」按钮可点性 = connected + 有 active 任务 + 无 MTS（managedSession 自判）。
   managedSession?.refresh();
@@ -243,6 +251,15 @@ function requestReview(messageId, anchorBtn) {
   })));
 }
 
+// P18「撤回」—— 点用户气泡的撤回按钮触发。无 payload（server 权威、只认末条）；
+// server 校验「idle ∧ 末条是 user」通过才截断 + 重发 room snapshot（前端自动重建历史）。
+// confirm 拦一道防误点（destructive-ish：这条会从历史里消失）。
+function requestRetract() {
+  if (!connection.isConnected()) return;
+  if (!window.confirm("撤回这条消息？（撤回后它会从聊天记录里消失）")) return;
+  send({ type: Inbound.RETRACT_LAST_USER_MESSAGE });
+}
+
 // 消息上的任务 chip + filter 视图（P5.2.10）—— 见 ./message_filter.js。filter 状态
 // 全封在模块内，renderer 只通过 afterAppendMessage / exitFilter / onTaskStateChange
 // 三个出口交互。
@@ -282,6 +299,7 @@ const {
   closeInFlightOnDisconnect,
   renderHistory,
   attachArtifactByMessageId,
+  jumpToMessage,
 } = createChatStream({
   messagesEl,
   makeAvatar: sidebar.makeAvatar,
@@ -290,6 +308,7 @@ const {
   afterAppendMessage: messageFilter.afterAppendMessage,
   onRequestReview: requestReview,
   onPatGuest: patGuest,
+  onRetract: requestRetract,
   artifactCallbacks,
 });
 
@@ -319,6 +338,8 @@ function renderSidebar(roomInfo) {
   proposalCard.reset();
   // 调试抽屉只看实时本会话；切房 / 重连 / 清空 → reset 清 turn 记录。
   debugPanel.reset();
+  // P18 搜索抽屉同理：旧房命中的 message_id 不在新房 DOM，清输入 + 结果。
+  searchPanel.reset();
   // handoff 队列是调度层瞬态（不落盘）。只在**真正切房**时清 —— renderSidebar 每条
   // room_info 都跑（含改头像 / 改设置 / 增删茶客等同房刷新），无差别 reset 会在服务端
   // 队列仍在时把预览抹掉，且服务端不会在 room_info 里重发 handoff_enqueued 补救
@@ -730,6 +751,19 @@ const debugPanel = createDebugPanel({
   sendInbound: send,
 });
 
+// P18 搜索抽屉。与 task / debug 互斥占右侧槽位；jumpToMessage 由 chat_stream 提供
+// （命中气泡已在主 DOM，点行直接滚动高亮，不必二次请求后端）。
+const searchPanel = createSearchPanel({
+  panelEl: searchPanelEl,
+  inputEl: searchInputEl,
+  bodyEl: searchPanelBodyEl,
+  closeBtnEl: searchPanelCloseBtn,
+  send,
+  jumpToMessage,
+  isConnected: connection.isConnected,
+  onClose: closeSearchPanel,
+});
+
 // envelope 分派器 —— ws 下行每帧按 type 分发到各 feature 模块（见 ./envelope_router.js）。
 // 在所有被分发到的 feature 模块就绪之后装配；connection.onMessage 经 arrow 推迟引用。
 const envelopeRouter = createEnvelopeRouter({
@@ -751,17 +785,30 @@ const envelopeRouter = createEnvelopeRouter({
   managedSession,
   bgRunBar,
   personaImport,
+  searchPanel,
 });
 
-// task ↔ debug 互斥占槽：``setVisible(bool)`` 让各自模块持有自家 hidden 不变量，
-// renderer 只负责"一开一关"配对。
+// task ↔ debug ↔ search 互斥占槽：``setVisible(bool)`` / ``show()`` / ``hide()`` 让各自
+// 模块持有自家 hidden 不变量，renderer 只负责"一开一关"配对（任一开必关其余两个）。
 taskPanelShowDebugBtn.addEventListener("click", () => {
   taskPanel.setVisible(false);
+  searchPanel.hide();
   debugPanel.show();
 });
 debugPanelBackBtn.addEventListener("click", () => {
   debugPanel.hide();
   taskPanel.setVisible(true);
+});
+// P18：打开搜索 = 关 task + debug、显 search；关搜索 = 回 task。函数声明 hoist，
+// closeSearchPanel 在 createSearchPanel(onClose) 引用时尚未执行、点击时才调，无 TDZ。
+function closeSearchPanel() {
+  searchPanel.hide();
+  taskPanel.setVisible(true);
+}
+openSearchBtn.addEventListener("click", () => {
+  taskPanel.setVisible(false);
+  debugPanel.hide();
+  searchPanel.show();
 });
 
 // 三栏拖拽。左 splitter 改 sidebar 宽度；右 splitter 改 task / debug 抽屉共享宽度。

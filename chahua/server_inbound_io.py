@@ -11,12 +11,13 @@ import asyncio
 import base64
 import binascii
 import logging
+import re
 from pathlib import Path
 from typing import Callable
 
 from . import persona_import
 from ._persist import write_bytes_atomic
-from ._server_helpers import require_str
+from ._server_helpers import check_keys_whitelist, require_str
 from .admin import list_installed_personas, sanitize_fs_name
 from .events import (
     ChahuaEnvelope,
@@ -36,6 +37,8 @@ INBOUND_IMPORT_PERSONA_GITHUB = "import_persona_github"
 INBOUND_UPLOAD_FILE = "upload_file"
 INBOUND_EXPORT_ROOM = "export_room"
 INBOUND_DOWNLOAD_FILE = "download_file"
+# P18 当前房历史搜索（只读、子串、无索引/分页/正则）。
+INBOUND_SEARCH_ROOM = "search_room"
 # P12.6 已安装 persona 管理。
 INBOUND_LIST_INSTALLED_PERSONAS = "list_installed_personas"
 INBOUND_CHECK_PERSONA_UPDATES = "check_persona_updates"
@@ -59,6 +62,28 @@ _DOWNLOAD_MAX_BYTES = _UPLOAD_MAX_BYTES
 # / ``tasks/<id>/task.json`` 等内部元数据。所以 ``_download_file`` 额外强制 ``tasks/``
 # 路径必须是 ``tasks/<id>/artifacts/<name>`` 形 4 段且段[2] == "artifacts"。
 _DOWNLOAD_ALLOWED_PREFIXES = ("share/", "tasks/")
+
+# P18 搜索：命中数上限（同时作缺省与封顶）+ snippet 命中词前后各取的字符半径。
+# 单用户桌面规模线性扫毫秒级，无需索引；上限只防一次拉太多撑爆一帧。
+_SEARCH_MAX_RESULTS = 200
+_SEARCH_SNIPPET_RADIUS = 40
+# query 长度封顶：真实搜索词绝不会到此，纯为兜底 —— 恶意 / 误发的巨串（可达 ws 帧上限
+# ~300MB）不该被 escape+compile 后对每条消息逐一 search，撑爆单事件循环。超长即截断。
+_SEARCH_MAX_QUERY_LEN = 200
+
+
+def _make_search_snippet(text: str, start: int, end: int) -> str:
+    """命中区间 ``[start, end)`` 前后各取 :data:`_SEARCH_SNIPPET_RADIUS` 字符，折叠空白
+    成单行预览，两端截断处补省略号。``start`` / ``end`` 是**原文**位置（``re.IGNORECASE``
+    在原文上匹配得来），不存在 casefold 变长导致的窗口偏移。"""
+    lo = max(0, start - _SEARCH_SNIPPET_RADIUS)
+    hi = min(len(text), end + _SEARCH_SNIPPET_RADIUS)
+    core = " ".join(text[lo:hi].split())
+    if lo > 0:
+        core = "…" + core
+    if hi < len(text):
+        core = core + "…"
+    return core
 
 
 def _mark_row_up_to_date(rows: list[dict], name: str, version) -> None:
@@ -289,6 +314,72 @@ class IOHandlers:
     async def _inbound_export_room(self, data: dict, sink: EnvelopeSink) -> None:
         # read-only：不动 session、不挡 inflight turn。
         self._export_room(sink)
+
+    def _search_room(self, *, query: str, limit: int, sink: EnvelopeSink) -> None:
+        # read-only：线性扫内存 transcript（``Room._messages``），大小写不敏感子串。
+        # 不动 session、不写盘。命中数超 ``limit`` 即停 + 标 truncated。``re.escape`` 把
+        # query 当字面量（无正则元字符、免 ReDoS）；``re.IGNORECASE`` 在**原文**上匹配，
+        # match 位置直接是原文下标 —— snippet 窗口无 casefold 变长偏移。
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        results: list[dict] = []
+        truncated = False
+        for m in self.server._session.room.messages_since(0):
+            mo = pattern.search(m.text)
+            if mo is None:
+                continue
+            if len(results) >= limit:
+                truncated = True
+                break
+            results.append(
+                {
+                    "message_id": m.message_id,
+                    "seq": m.seq,
+                    "speaker_id": m.speaker_id,
+                    "ts_ms": m.ts_ms,
+                    "snippet": _make_search_snippet(m.text, mo.start(), mo.end()),
+                }
+            )
+        sink(
+            ChahuaEnvelope(
+                room_id=self.server._session.room.name,
+                turn_id=None,
+                guest_name=None,
+                message_id=None,
+                type=ChahuaEventType.SEARCH_RESULTS,
+                data={"query": query, "results": results, "truncated": truncated},
+            )
+        )
+        _log.info(
+            "search_room: room=%r q=%r → %d hit%s",
+            self.server._session.room.name, query, len(results),
+            " (truncated)" if truncated else "",
+        )
+
+    async def _inbound_search_room(self, data: dict, sink: EnvelopeSink) -> None:
+        # read-only：不动 session、不挡 inflight turn —— 纯扫内存 transcript。
+        # 入站严格：未知键 → NOTICE error + 丢帧（闭合「入站严格」不变量）。
+        err = check_keys_whitelist(
+            data, frozenset({"query", "limit"}), where=INBOUND_SEARCH_ROOM
+        )
+        if err is not None:
+            self.server._emit_notice(sink, level=NOTICE_LEVEL_ERROR, text=err)
+            return
+        # 空 / 非 str query：require_str 只 WARN、不 emit NOTICE —— 搜索非敏感帧，静默
+        # 早返即可（前端本就 guard 空 query 不发）。
+        query = require_str(data, "query", where=INBOUND_SEARCH_ROOM)
+        if query is None:
+            return
+        query = query[:_SEARCH_MAX_QUERY_LEN]  # 兜底截断巨串，防 escape+compile 撑爆循环。
+        raw_limit = data.get("limit")
+        limit = (
+            raw_limit
+            if isinstance(raw_limit, int)
+            and not isinstance(raw_limit, bool)
+            and raw_limit > 0
+            else _SEARCH_MAX_RESULTS
+        )
+        limit = min(limit, _SEARCH_MAX_RESULTS)  # 封顶，防一次拉太多撑爆一帧。
+        self._search_room(query=query, limit=limit, sink=sink)
 
     def _download_file(
         self, *, rel: str, sink: EnvelopeSink, purpose: str = "download"
