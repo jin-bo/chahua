@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.14）
+uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.18）
 uv run chahua                                 # CLI（默认入 rooms/p1-test）
 uv run chahua --room rooms/p3-黄河路
 uv run chahua-server --host 127.0.0.1 --port 7860 --room rooms/p3-黄河路  # 独跑 sidecar
@@ -46,8 +46,8 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 职责一句话；承重契约见「关键不变量」段，实现细节看代码。
 
-- `session.py` — 房间装配。CLI 与 server 共用 `build_room_session()` / `discover_rooms()` / `load_env_files()`。
-- `config.py` — `room.toml` 解析，白名单严格（未知字段 `RoomConfigError`）。字段：`[room]` / `[room.llm]` / `[scoring]` / `[summary]` / `[[guest]]` / `[[guest.extra_mcp_servers]]`。
+- `session.py` — 房间装配。CLI 与 server 共用 `build_room_session()`。
+- `config.py` — `room.toml` 解析，白名单严格（未知字段 `RoomConfigError`）。
 - `llm_spec.py` — `LLMSpec` 三入口（`from_env` / `try_from_env` / `from_toml`）+ `build_client()`。toml 强制 `model="<provider>/<model>"`，env 允许裸 model。各 section 走自己 spec，缺即 fallback 回房间默认。
 - `guest.py` — `TeaGuest`（包 `agentao.Agentao`）。`speak()` 外层 try/except/finally 保 `message_start`/`message_end` 成对，envelope 与 transcript 共享 message_id。P13 视觉：`speak(images_rel=())` → `resolve_images` → `arun(images=...)`，懒读现传。
 - `image_input.py` — P13 视觉 helper（server inbound 与 guest 共用）。`_normalize_share_image_rel`（纯校验）+ `resolve_images`（IO：normalize → symlink 围栏 → 读 bytes → base64+MIME）。限额 `from agentao.media_limits`。
@@ -68,23 +68,21 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - `persona_summary.py` — persona 能力摘要 LLM 生成 + 内容寻址缓存（`<hash>.json`）。三级解析（手写 `summary` → 缓存 → None）；失败 WARN 不阻断。
 - `debug_recorder.py` — P6 取证落盘。`TurnRecorder` 由 orchestrator / guest / transport_bridge 三处喂。`max_turns=500` rotation 按 turn_id 整组删，`_turn_count` 内存维护永不重测盘。rotation 失败永不阻断房间。
 - `server_room_snapshot.py` — `emit_room_snapshot` 单点装配：`emit_room_info` / `emit_room_history` / `_emit_task_info` / 末尾补 MTS 快照。`turns_index` 严格 `enabled=True` 才挂；`rooms_available` 每房带 `busy=busy_alive()`；P11 加 `background_runs`。
-- `server_entry.py` — `chahua-server` CLI 入口。argparse / 端口分配 / stdin EOF watcher。
-- `admin.py` + `admin_{guest,persona,room,user,toml}.py` — admin 按域拆分：guest / persona（MCP trust / skills / P12.6 `list_installed_personas`）/ room / user / toml（`_render_room_toml` 结构化重写）。
-- `persona_import.py` — 本地 / GitHub 导入 persona 包 + P12.6 provenance 生命周期：`PersonaSource`（`.chahua-source.json`）+ `read_source` / `write_source` / `_content_hash` / `check_persona_update` / `update_persona(force=)`（`_replace_dir_atomic` 原子 swap）/ `delete_persona`。`_GitHubError` 子类 `PersonaImportError` 带 `.code` 分流 404/403。低层拆分：`persona_github.py`（GitHub Contents API 匿名客户端）/ `persona_provenance.py`（provenance 数据形状 + 读写单一来源）。
+- `persona_import.py` — 本地 / GitHub 导入 persona 包 + P12.6 provenance 生命周期。provenance 落 `.chahua-source.json`；`update_persona(force=)` 走 `_replace_dir_atomic` 原子 swap。`_GitHubError` 子类 `PersonaImportError` 带 `.code` 分流 404/403。
 - `persona_assets.py` + `trust.py` — persona sibling `mcp.json` + `skills/` 装载；MCP 走信任门（`persona-trust.json` + UI popover）。skills 软链 + copytree 兜底。
 - `mcp_thread.py` — P17 thread-backed MCP 管理器：agentao 同步 `McpClientManager` 在 ws 事件循环内 `run_until_complete` 会炸，全部 MCP async 工作挪到常驻线程（owner-task 同 task 进出 exit stack，见 P17 不变量）。
-- `persona_manifest.py` — P12 `persona.toml` 解析。`PersonaManifest` frozen dataclass（P12.6 加可选 `version` 纯展示字段）+ 三级严格白名单。两入口共享 `_parse_dict`：`load_persona_manifest`（文件）/ `parse_persona_manifest_bytes`（dry-run）。全失败统一 `PersonaManifestError`。
+- `persona_manifest.py` — P12 `persona.toml` 解析。`PersonaManifest` frozen dataclass（P12.6 加可选 `version` 纯展示字段）+ 三级严格白名单；文件与 dry-run 两入口共享 `_parse_dict`。全失败统一 `PersonaManifestError`。
 - `server.py` + `server_inbound_{admin,task,io,settings,handoff,agent_run}.py` + `_server_helpers.py` — ws 生命周期 / 帧路由 / room snapshot 在 `server.py`；30+ `_inbound_*` 切到 6 个 handler 类（组合非多继承）。`_install_handler_slots(srv)` 是装配唯一真理源；`_INBOUND_ROUTES` 帧 → 属性路径映射在 `server.py` 顶层。**改 `_inbound_*` 先看 slot 归属**。
 - `agent_run.py` + `agent_run_sink.py` + `agent_run_tools.py` — P11 后台 agent run：`AgentRun` frozen dataclass + `BatchMessageSink`（白名单过滤 + `TASK_PROPOSAL` 缓冲到 finally + `run_id` 注入）+ P11.2 茶客侧 `spawn_agent_run(s)` 工具（立即起并发后台 run，区别于等用户采纳的 `propose_*`）。`server.py::_run_agent_background` 是与 `_run_turn` 平行的 bg 执行 wrapper。
-- `handoff.py` — 调度层数据模型。`HandoffItem` frozen dataclass + `HandoffKind` enum (`DELEGATE`/`REVIEW`/`PANEL`) + 常量。本模块是「调度数据形状」单一来源。
-- `room_runtime.py` — P9 多 runtime 注册表。`RoomRuntime` 持运行态（`session` / `_inflight_turn_task` / `_managed_session` / `agent_runs` / `active_guest_names` / `_handoff_queue` 等）+ 谓词（`busy_alive` / `guest_busy` / `guest_in_bg_run` 等）。`_attach_runtime_state(runtime)` 把 `active_guest_names` 与 `_has_pending_mts_bg` 注入 orchestrator —— orch ↔ runtime 严格 1:1。
+- `handoff.py` — 调度层数据模型。本模块是「调度数据形状」单一来源。
+- `room_runtime.py` — P9 多 runtime 注册表。`RoomRuntime` 持运行态 + 谓词（`busy_alive` / `guest_busy` / `guest_in_bg_run`）。`_attach_runtime_state(runtime)` 把 `active_guest_names` 与 `_has_pending_mts_bg` 注入 orchestrator —— orch ↔ runtime 严格 1:1。
 - `message_artifacts.py` — P10 `MessageArtifactRegistry`。per-room 落 `rooms/<id>/message_artifacts.jsonl`，把 artifact rel path 反查回 originating message_id。`reset_room` clear / `/clear task` 不清。
 - `exporter.py` — 房间 transcript → markdown 导出（`export_room` inbound）。服务端拼整段 markdown + 安全文件名，前端 Blob 下载到用户机器，不写房间目录。
 
 ### WebSocket 线协议
 
 - **下行**：每帧一条 JSON = `ChahuaEnvelope.to_dict()`。
-- **上行**：每帧一条 JSON，`type` 见 `_INBOUND_ROUTES`（`user_message` / `cancel` / `switch_room` / `clear_room` / P18 `retract_last_user_message` / `fetch_turn_detail` / `list_guest_caps` / `agent_run_*` + handoff / MTS / task / admin / io（上传下载 / `export_room` / P18 `search_room` / persona 导入 2 帧 + P12.6 管理 4 帧）/ settings（含 P15 `set_llm_credentials`））。未知 `type` WARN 后忽略；非 JSON / 二进制帧 → `close(UNSUPPORTED_DATA)`。`set_llm_credentials` 严格白名单 `{provider, model, base_url?, api_key}`，未知键 NOTICE error 丢帧（敏感帧不静默吞）。
+- **上行**：每帧一条 JSON，`type` 全集见 `server.py` 顶层 `_INBOUND_ROUTES`。未知 `type` WARN 后忽略；非 JSON / 二进制帧 → `close(UNSUPPORTED_DATA)`。`set_llm_credentials` 严格白名单 `{provider, model, base_url?, api_key}`，未知键 NOTICE error 丢帧（敏感帧不静默吞）。
 
 ## 关键不变量
 
@@ -250,13 +248,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 ### 聊天界面渲染（P10）
 
-- **mermaid 只在 message_end 全文到位时渲一次**，流式 delta 期间禁调（半截抛 parse error 闪烁）；失败保留原 `<pre>` + `.mermaid-error`。
-- **mermaid SVG 走手工 sanitize，不能换 DOMPurify**（DOMPurify 强制清空 `<foreignObject>`，mermaid v11 label 会被剥光）；安全靠 mermaid 自带 sanitize + CSP + 手工剥 `on*`/`javascript:` 三层兜底。
-- **挂件按 rel 去重**（防 live+history 双触发）；图片预览懒拉不 eager 内嵌（占位 `<img>` 后发 `download_file purpose=preview` 回包灌字节），SVG 走 pill 不内嵌；**切房 / clear 必 `clearPendingArtifactPreviews()`**（否则等待中的 `<img>` 已被摘走无处灌）。
-- **P10.1 数学/化学走 marked「转义前封箱」+ KaTeX live-DOM 延后渲**：行内扩展把整段 `$…$`/`$$…$$` 作单一 token 收走成 carrier span（否则 CommonMark 反斜杠转义先吃掉 `\,`/`\\`）；只认 `$`/`$$`，货币歧义 pandoc 风格收窄。
-- **KaTeX 在 DOMPurify 之后、只 message_end 调一次、逐公式独立 render**；`trust:false` + `throwOnError:false` + **不传 `macros`**（`\gdef` 不跨公式泄漏）。
-- **highlight.js v11 喂转义 textContent、单块单次、跳 mermaid/已高亮/未注册语言**；懒加载走 `@highlightjs/cdn-assets` ESM（**不能用 `highlight.js` 包的 CJS shim**，沙箱渲染进程无 CJS 互操作）。
-- **`enhanceContent` = mermaid + highlight + math 单钩子**（各自幂等），挂 `renderGuestText` / `endStreamingMessage` / `task_panel` goal 三注入点；流式 `appendDelta` 不调。P10.1 纯前端零后端改、不 bump `schema_version`、CSP 不改；打包须保 `katex/dist/fonts/`。
+见 `app/CLAUDE.md`（动 `app/` 下文件时自动加载）。
 
 ### 只读长期记忆（GuanLan MCP，P17）
 
@@ -281,4 +273,4 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 ## 测试
 
-`asyncio_mode = "auto"` —— async 测试不用加 mark。`tests/` ~120 文件 / ~1380 测，覆盖 orchestrator / scoring / handoff / MTS / task / artifact / persona / server inbound / room runtime / P11 bg run。fixture 共享 `tests/conftest.py`（`build_orch` 裸构 Orchestrator / `SpeakingStubGuest` 走真 speak / `task_inbound_srv` 装真房间 + monkeypatch `_run_ai_chain` no-op）。**复现 bug 优先**，先写失败用例再修。全量 `uv run pytest`（~45s），单测 `uv run pytest tests/test_xxx.py -v`。
+fixture 共享 `tests/conftest.py`（`build_orch` 裸构 Orchestrator / `SpeakingStubGuest` 走真 speak / `task_inbound_srv` 装真房间 + monkeypatch `_run_ai_chain` no-op）。**复现 bug 优先**，先写失败用例再修。

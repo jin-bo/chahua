@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-07-30
+
+详见 [`docs/releases/v0.1.10.md`](docs/releases/v0.1.10.md)。
+
+### Added
+- **P18 消息回溯（撤回未回复末条）+ 当前房历史搜索**（详见 [`docs/P18-消息回溯与历史搜索导出.md`](docs/P18-消息回溯与历史搜索导出.md)）：对齐「豆包式」长期陪伴的两个体验缺口，按**成本天差地别**分两半落地。**① 当前房搜索（M1，纯读）**——只读 `search_room` inbound → `SEARCH_RESULTS` envelope，`re.escape` + `IGNORECASE` 原文子串匹配、query 长度封顶、results 只带 `speaker_id`；命中列表点击滚动并高亮到那条消息；入口 🔍 在右侧任务面板 header（挨着 🔬 调试）。**不碰任何状态、不挡 inflight**。**② 回溯（撤回未回复的末条用户消息）**——`retract_last_user_message` inbound：**server 权威、免 `message_id`、无 payload**（严格空白名单）；三段硬校验（房间 idle 用 `busy_alive()` 而非 `_inflight_alive()`，故 bg run / dormant MTS 也算忙 ∧ transcript 末条存在且是 user ∧「其后无茶客回复」由前者蕴含）。**只截 transcript 主体，cursor 与各茶客 `agent.messages` 一律不动**；旁路同 tick 原子收尾（先 `cancel_pending_summarize()` → `Summarizer.truncate_after` → 遍历 store 全量任务的 `TaskSummaries.truncate_after` → `TurnRecorder.drop_turns_from`），末尾重发整份 room snapshot。**transcript 主体仍 append-only，`Room.truncate_last()` 是唯一全量重写入口**（`write_jsonl_atomic` tmp+rename，先写盘后弹内存）。前端撤回按钮由 MutationObserver + `endStreamingMessage` 双触发，动态挂在唯一「当前可撤回」的用户气泡上。承重不变量同步进 `CLAUDE.md` +  [`docs/INVARIANTS.md`](docs/INVARIANTS.md) §9.x。测试 +24（全量 1568 绿）。
+
+### Changed
+- **示例茶客孙博士：召回更像回忆、不像查资料**（纯 prompt 文本）：重写「关于你的记性」段，顶住两股把茶客推向 reference-lookup 的系统力（MCP 工具动词 `search` / `read_page` + 每轮 `speak_instruction` 的「review tool results / re-fetch from source」）。四条纪律：**无声地想**（禁「我查一下」这类工具前旁白，多步召回只呈现最终结果）/ **化整为言**（抖掉 `read_page` 返回的标题、`[[链接]]`、日期骨架，用人话追述）/ **信心梯度**（记得清→笃定、记得糊→自然含糊、全空→「没印象」即止）/ **禁词扩充**（加「资料」「没找到」）+ 3 组 ✗/✓ 范例钉住语域。未动 `persona.toml` / `mcp.json` / 防注入 L3。
+- **依赖 agentao `0.4.14 → 0.4.18`**：四个上游版本全是加固/修正，chahua 侧零代码改动、1568 测试全过。① `0.4.15` 会话与文件完整性——`Ctrl+C` 打断的 turn 不再让后续每轮 400（orphan `tool_calls` 回填占位结果）、`write_file` 改 tmp+rename 原子替换（不再截断即毁原文件）、无回答的 turn 被分类而非当答案发、secret 扫描器挪上实时路径。② `0.4.16` 边界加固——ACP 客户端首审（终端转义清洗 / 输出上限 / 孙进程回收）、`web_search` 撞 captcha 不再静默报「无结果」、MCP 请求带 `agentao-mcp/<version>` UA。③ `0.4.17` SDK 兼容——上游 `mcp` 2.0.0（2026-07-28 破坏性重写线上模型）会让 `0.4.16` 的**全部 MCP 路径**在新装环境上炸，`0.4.18` 同时支持 mcp 1.x / 2.x 并把依赖收敛到 `>=1.26.0,<3`。④ `0.4.18` `web_fetch` 重建（crawl4ai → Playwright + SSRF 加固）并改 `AsyncToolBase`；`Agentao.arun` 改用专属线程池、不再占用事件循环默认 executor。
+- **MCP SDK `mcp 1.27.1 → 2.0.0`**（`uv lock --upgrade-package mcp`，仍在 agentao 的 `>=1.26.0,<3` 内）：**动机是消偏斜**——`app/scripts/build-python-bundle.js` 走 `pip install`、不读 `uv.lock`，桌面包本就会现场解析到 2.x，开发环境停在 1.x 会让「我这儿能跑」与「用户装的包」跑在不同大版本上。chahua 侧**零代码改动**：全仓唯一直接触 SDK 的地方是 `chahua/mcp_thread.py` 的 `from mcp.types import Tool`，**只作类型标注、不读字段**，2.0 的 camelCase→snake_case 重命名（`inputSchema`→`input_schema` 等）碰不到；真正每轮重建 schema 的是 agentao，`0.4.17` 起用 `_compat` 探针按装好的 SDK 分流。**端到端实测**（真 `guanlan mcp --transport http`，guanlan 0.1.18 / 服务端 mcp 2.0.0）：客户端 1.27.1 与 2.0.0 两侧各跑一遍均 6 工具全列 / schema 全取到 / `search` 往返 / 干净拆除；协商出的线上协议修订**两侧同为 `2025-11-25`**，故 lock 变更不改线协议行为——**原因在客户端而非服务端**：mcp 2.0 把协议分成两个纪元（`HANDSHAKE_PROTOCOL_VERSIONS` 至 `2025-11-25` / `MODERN_PROTOCOL_VERSIONS` 仅 `2026-07-28`，后者只经带 `_meta["io.modelcontextprotocol/protocolVersion"]` 信封的无握手路径可达），连接纪元由客户端第一帧一次性锁定；agentao 的 `McpClient` 显式走 `ClientSession.initialize()`（`agentao/mcp/client.py`），而 `initialize` 提议的恒是 `LATEST_HANDSHAKE_VERSION`，故 chahua 永远落在握手纪元。实测 GuanLan 服务端 `server/discover` 自述 `['2026-07-28']`、modern 纪元开着，是我们这侧没去取。
+- **茶客子进程不再继承 agentao 的 provider 凭证**（随 agentao `0.4.15`）：shell / **stdio 型 MCP** / ACP 子进程从被擦洗的环境启动（12 个 `HARNESS_ENV_KEYS` + `LLM_PROVIDER` 隐含的那把 key），被注入的 `run_shell_command("env")` 再偷不到东西。**对 chahua 的影响面**：若某个 stdio MCP server 原先靠继承 `*_API_KEY` 工作，现在会拿到 401，需在该 server 的 `env` 块显式声明（`{"env": {"XX_API_KEY": "${XX_API_KEY}"}}`，擦洗之后才应用）或设 `AGENTAO_SCRUB_CHILD_ENV=0` 全进程恢复继承。P17 GuanLan 走 url 型 Streamable HTTP（不是子进程）**不受影响**；P15 桌面登录态注入仍只活在本进程 environ，语义不变。
+- **`CLAUDE.md` 瘦身 + 修正漂移，MTS / P11 全文下沉 `docs/INVARIANTS.md`**：「关键不变量」段只留「规则 + 关键 why」，完整 rationale / P-版本溯源 / 回归测试指引沉到 [`docs/INVARIANTS.md`](docs/INVARIANTS.md)（改不变量两处同步）；模块分工表逐条精练到「一句话职责」，顺手修掉若干条与代码已漂移的描述。新增 `app/CLAUDE.md`（动 `app/` 下文件时自动加载）承接 P10 聊天界面渲染的前端契约。纯文档，无行为改动。
+
 ## [0.1.9] - 2026-07-01
 
 详见 [`docs/releases/v0.1.9.md`](docs/releases/v0.1.9.md)。

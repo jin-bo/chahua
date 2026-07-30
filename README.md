@@ -10,7 +10,7 @@
 ## Quick Start
 
 ```bash
-# 1. python 依赖（uv 按 pyproject.toml 从 PyPI 拉 agentao ≥0.4.6）
+# 1. python 依赖（uv 按 pyproject.toml 从 PyPI 拉 agentao ≥0.4.18）
 uv sync
 
 # 2. LLM 凭据（任何 OpenAI-兼容 API 都行）
