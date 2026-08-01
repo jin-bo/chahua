@@ -136,6 +136,67 @@ def render_managed_session_block(manager: str, budget: int) -> str:
     )
 
 
+def render_managed_session_wrapup_block(manager: str) -> str:
+    """P8.7：MTS 预算耗尽时**最后一次管理者复查**的 ``<managed_session_wrapup>`` 块。
+
+    纯函数、与 :func:`render_managed_session_block` **互斥二选一**（同一回合只注入其中
+    之一，`_build_winner_blocks` 是 if/else）—— 两块不能共存：``<managed_session>``
+    第 ① 条逐字要求「复查后直接 propose_delegate / propose_panel」，与收尾指令正面冲突。
+    走**独立块**也正是本阶段不触碰「``<managed_session>`` 5 条 bullet 顺序不变」不变量
+    （P14 / CLAUDE.md / ``docs/INVARIANTS.md``）的原因。
+
+    **不新增回合**：MTS 的最后一次管理者复查本来就跑在 ``budget == 0`` 上
+    （worker 回合先 ``budget -= 1`` 再入队复查，见
+    ``_orchestrator_managed_session.py::advance_after_turn``），它天然是终局回合 ——
+    本块只是把那一轮的 prompt 换掉（docs/P8.7 §2）。
+
+    措辞要点：**「先复查刚交付的东西、再收尾」** 是必须的（这一轮同时也是最后一次复查
+    回合，写成纯汇总会让管理者忽略 worker 刚交付的产物）；反目标缩水口径承 P8.6 第 ⑤
+    条（``FULL task scope``）；语言锚点按 P14 保留。承重语义点（回归只钉这几条、不钉
+    整句）：``FINAL turn`` / ``do NOT delegate`` / ``FULL task scope`` / 语言锚点。
+
+    **替换掉 ``<managed_session>`` 就得把仍适用的语义带过来**（P8.7 复审）——
+    本块**不是** ``<managed_session>`` 的子集，逐条交代它与被替换 bullet 的对应：
+
+    - **禁派活覆盖三条通道**（对 ① / ③）：``propose_delegate`` / ``propose_panel``
+      这一轮被 ``intercept_task_proposal`` 吞掉（说明「不渲卡」是为了配合第 ② 条），
+      ``spawn_agent_run`` / ``spawn_agent_runs`` **不经 TASK_PROPOSAL、代码层拦不住**
+      —— 只能在 prompt 里明写禁止，否则管理者会按 ``<managed_session>`` 第 ③ 条学到的
+      「并发走 spawn、且不吃 budget」在收尾轮起一个活过 MTS 的后台 run。
+    - **不许让用户去点不存在的采纳卡**（对 ②）：``propose_*`` 工具 ack 恒是「已提议、
+      等用户采纳」，收尾轮既被 swallow 就没有卡 —— 不纠偏则收尾发言会写成「我已提议
+      交给 X，请点采纳」，而 UI 里根本没有那张卡。
+    - **``task_propose_status`` 的两个方向都要给**（对 ④ / ⑤）：本块问「还剩什么 /
+      有无 blocker」，若只留 ⑤ 的**前置审计**（``FULL task scope``）而丢掉**动作**
+      （``task_propose_status("done")``），恰好在最可能完工的一轮没人告诉管理者怎么收；
+      同时须显式说明「预算到点 ≠ done、也 ≠ blocked」，否则 ④ 的「防过早 blocked」节流
+      在这一轮消失（status 提议不在 swallow 白名单内，会真渲卡、用户一采纳就落库）。
+
+    ``manager`` 走 ``quoteattr`` 转义防 XML 属性注入（茶客名是用户可配自由文本，与
+    ``render_managed_session_block`` / ``<room>`` 等块同口径）。
+    """
+    return (
+        f"<managed_session_wrapup manager={quoteattr(manager)}>\n"
+        "The review budget for this managed session is exhausted — this is your FINAL turn.\n"
+        "Review what the workers just delivered, then wrap up. Do NOT start new "
+        "substantive work, do NOT delegate, and do NOT start background runs — "
+        "propose_delegate / propose_panel / spawn_agent_run / spawn_agent_runs are all "
+        "off-limits this turn. A propose_delegate / propose_panel here is dropped "
+        "outright and produces NO approval card, so do NOT tell the user to approve "
+        "anything.\n"
+        "Summarize for the user: what was accomplished toward the task goal; what "
+        "remains, verified against the FULL task scope (do NOT report a shrunken goal "
+        "as met); any blockers; and one concrete next step.\n"
+        "Only if the FULL scope is met, call task_propose_status(\"done\") to close the "
+        "task (the proposal goes to the user for confirmation, not auto-applied). "
+        "Running out of budget is NOT itself grounds for \"done\" or for "
+        "task_propose_status(\"blocked\") — if the goal is unmet, say so in the summary "
+        "and leave the task status unchanged.\n"
+        "Always reply in the same language as the conversation (default: Chinese).\n"
+        "</managed_session_wrapup>"
+    )
+
+
 class ContextRenderer:
     """房间状态 → 喂茶客 LLM 的 user message 字符串。
 

@@ -328,6 +328,20 @@ class ManagedSessionOps:
             TASK_PROPOSAL_KIND_HANDOFF_PANEL,
         ):
             return False
+        # P8.7：收尾轮（budget 已耗尽的最后一次管理者复查）的派活提议**吞掉**——
+        # 这一轮跑完 advance_after_turn 即 BUDGET_EXHAUSTED → end_managed_session
+        # 清队列，入队的项本就跑不成（净效果与现状相同，只少一次队列快照抖动）。
+        #
+        # **不降级渲采纳卡**：卡会在收尾消息还在流式生成时就出现，用户点采纳 →
+        # handoff_delegate inbound append 进当前 drain 队列 → 收尾轮结束时
+        # end_managed_session 清队列 → 用户已点采纳、handoff 却静默消失。收尾 prompt
+        # 已要求管理者给出「一个明确下一步」，用户要继续推进有正常入口（@ / 手动
+        # handoff / 重开托管），不需要一张注定被清掉的卡（docs/P8.7 §3.3）。
+        if ms.budget <= 0:
+            _log.warning(
+                "MTS 预算已耗尽，收尾轮的 %r 提议不入队（%s）", ms.manager_guest, kind,
+            )
+            return True
         # P8.4.11（Codex round 5 P2）：自指派提早拦下 —— ``_handoff_item_from_proposal``
         # 的 delegate 路径用全集 busy 校验，``let_speak`` 已把 manager 标 busy →
         # ``target == manager`` 落 busy 集走 ``return None`` → 本入口 ``item is None``
