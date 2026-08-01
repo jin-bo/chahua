@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Added
+- **P8.7 MTS 预算收尾轮 —— 最后一次管理者复查转收尾模式**（2026-08-01，详见 [`docs/P8.7-MTS 预算收尾轮.md`](docs/P8.7-MTS%20预算收尾轮.md)）：托管会话因 `budget_exhausted` 终结时，用户能拿到一份交接（做完了什么 / 还剩什么 / 卡在哪 / 一个明确下一步），而不是「托管中 · 剩余 N 轮」那条 bar 悄无声息地消失。**不新增任何回合**——MTS 的最后一次管理者复查本来就跑在 `budget == 0` 上（worker 回合先 `budget -= 1` 再入队复查），它天然是终局回合，只需把那一轮注入的 `<managed_session>` **换成**收尾块，管理者回合总数与改前逐字一致。三处改动：① `context_renderer.py` 新增 `render_managed_session_wrapup_block(manager)`（`quoteattr` 转义，`render_managed_session_block` 零改动）；② `_orchestrator_handoff_drain.py::_build_winner_blocks` 在既有 MTS 管理者档内按 `ms.budget <= 0` 二选一；③ `_orchestrator_managed_session.py::intercept_task_proposal` 对 `budget <= 0` 的 delegate / panel 提议**拦截并吞掉**（不入队、不渲注定被清掉的采纳卡）。**替换非追加**：`<managed_session>` 第 ① 条逐字是「复查后直接 `propose_delegate` / `propose_panel`」，与收尾指令正面冲突；走独立块也正是**不触碰「5 条 bullet 顺序不变」不变量**的原因。收尾块**自带**被替换 bullet 里仍适用的语义（禁 `spawn_agent_run(s)` 通道 / 不许提示用户去点不存在的采纳卡 / `task_propose_status("done")` 的动作 / 「预算到点 ≠ done ≠ blocked」）——其中 spawn 尤其要紧：它不经 `TASK_PROPOSAL`、swallow 拦不住，只能靠 prompt。**swallow 的位置承重**：必须留在 kind 白名单之后，它不读 `kind`，上提会静默吞掉管理者的 `task_propose_status("done")`。**不加状态字段、不动调度 / 队列 / cap / `stop_reason()`、不新增 stop reason / envelope、不改 wire 与前端、不 bump `schema_version`**；只给 `budget_exhausted` 收尾（`user_stopped` / `user_cancel` / `task_closed` / `cap_reached` 都不给——「停」就是停）。承重不变量同步进 `CLAUDE.md` + [`docs/INVARIANTS.md`](docs/INVARIANTS.md)。测试 +4，**既有断言零改动**（全量 1575 绿）。立项依据见 [`docs/P8.5-codex-goal 机制对照与借鉴.md`](docs/P8.5-codex-goal%20机制对照与借鉴.md) §4.5 + §6 建议 5；三轮评审取舍（v1 过度设计「插入额外回合」→ v2 简化 → v3 多 agent 复审补回被替换语义）记在 P8.7 §8。
+
+### Changed
+- **`docs/P8.5-codex-goal 机制对照与借鉴.md` 结论更新**：§3 对照表「撞 budget → 恰好一轮 wrap-up turn」一行由「ChaHua 无收尾轮」改判**持平**（形态不同：agentao `/goal` 插一轮，MTS 复用既有终局轮）；§4.5 / §6 建议 5 标注「已落地 → P8.7」。纯文档。
+
 ## [0.1.10] - 2026-07-30
 
 详见 [`docs/releases/v0.1.10.md`](docs/releases/v0.1.10.md)。
