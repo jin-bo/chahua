@@ -16,6 +16,7 @@ from chahua.events import (
     TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
     TASK_PROPOSAL_KIND_HANDOFF_PANEL,
     TASK_PROPOSAL_KIND_HANDOFF_REVIEW,
+    TASK_PROPOSAL_KIND_STATUS,
     ChahuaEnvelope,
     ChahuaEventType,
 )
@@ -71,8 +72,11 @@ class _MtsManagerGuest(SpeakingStubGuest):
         super().__init__(name, room)
         self._orch_box = orch_box
         self._proposals = list(proposals)
+        # P8.7：逐管理者回合留档 context —— 用于断言最后一轮拿到的是收尾块。
+        self.contexts: list[str] = []
 
     async def speak(self, ctx, *, turn_id, sink, cancellation_token=None, task_id=None, images_rel=()):
+        self.contexts.append(ctx)
         msg = await super().speak(
             ctx, turn_id=turn_id, sink=sink, task_id=task_id,
         )
@@ -496,6 +500,99 @@ async def test_budget_one_runs_one_worker_then_exhausted() -> None:
     assert ended[0].data["reason"] == "budget_exhausted"
     assert len(orch._handoff_queue) == 0
     assert orch.managed_session is None
+
+
+async def test_budget_exhausted_last_review_gets_wrapup_block() -> None:
+    """P8.7：预算耗尽路径下，**最后一次管理者复查**拿到 ``<managed_session_wrapup>``
+    收尾块 —— 且**不新增任何回合**（docs/P8.7 §2 / §6.1）。
+
+    与 ``test_budget_one_runs_one_worker_then_exhausted`` 同一条流程，这里额外钉：
+    ① HANDOFF_CONSUMED 的 target 序列与现状**逐字相同**（管理者回合数不增）；
+    ② 两个管理者回合分别拿到「正常块 / 收尾块」，两块不共存。
+    """
+    orch, _ = _build("Maya", "Wei", "Lin")
+    cap = await _run_mts(orch, manager="Maya", budget=1, proposals=["Wei", "Lin"])
+    mgr = orch._guests["Maya"].guest  # type: ignore[attr-defined]
+
+    consumed = [e for e in cap if e.type is ChahuaEventType.HANDOFF_CONSUMED]
+    targets = [e.data["item"]["target"] for e in consumed]
+    # kickoff（Maya）→ worker（Wei）→ 复查（Maya）。收尾轮就是这第 3 个回合，
+    # 不多不少 —— P8.7 只换 prompt，不插回合。
+    assert targets == ["Maya", "Wei", "Maya"]
+
+    assert len(mgr.contexts) == 2
+    # 第 1 个管理者回合（budget=1）：正常块。注意 ``"<managed_session"`` 是
+    # ``"<managed_session_wrapup"`` 的前缀，判定必须带属性分隔的空格。
+    assert "<managed_session " in mgr.contexts[0]
+    assert "<managed_session_wrapup" not in mgr.contexts[0]
+    # 第 2 个（复查，budget=0）：收尾块，且正常块不共存。
+    assert "<managed_session_wrapup" in mgr.contexts[1]
+    assert "<managed_session " not in mgr.contexts[1]
+    assert "FINAL turn" in mgr.contexts[1]
+
+    ended = [e for e in cap if e.type is ChahuaEventType.MANAGED_SESSION_ENDED]
+    assert len(ended) == 1
+    assert ended[0].data["reason"] == "budget_exhausted"
+    assert len(orch._handoff_queue) == 0
+    assert orch.managed_session is None
+
+
+@pytest.mark.parametrize(
+    "kind, payload",
+    [
+        (TASK_PROPOSAL_KIND_HANDOFF_DELEGATE, {"target": "Wei"}),
+        (TASK_PROPOSAL_KIND_HANDOFF_PANEL, {"targets": ["Wei", "Lin"]}),
+    ],
+)
+def test_proposal_swallowed_at_zero_budget(kind, payload) -> None:
+    """P8.7 §3.3：收尾轮（``budget <= 0``）管理者的 delegate / panel 提议**吞掉** ——
+    不入队、不下发 ``TASK_PROPOSAL`` 采纳卡。
+
+    净效果与现状相同（入队的项本就会被 ``end_managed_session`` 清掉），差别是不再有
+    一次注定被清的队列快照抖动、也不会渲出一张用户点了就丢的采纳卡。
+    """
+    orch, _ = _build("Maya", "Wei", "Lin")
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=0,
+    )
+    captured: list[ChahuaEnvelope] = []
+    env = ChahuaEnvelope(
+        room_id="t", turn_id="x", guest_name="Maya", message_id=None,
+        type=ChahuaEventType.TASK_PROPOSAL,
+        data={"proposer": "Maya", "kind": kind, "payload": payload},
+    )
+    assert orch._intercept_task_proposal(env, captured.append) is True
+    assert len(orch._handoff_queue) == 0
+    assert not any(e.type is ChahuaEventType.TASK_PROPOSAL for e in captured)
+    assert captured == []
+
+
+@pytest.mark.parametrize("kind", [
+    TASK_PROPOSAL_KIND_DECISION,
+    TASK_PROPOSAL_KIND_HANDOFF_REVIEW,
+    TASK_PROPOSAL_KIND_STATUS,
+])
+def test_zero_budget_swallow_stays_below_kind_whitelist(kind) -> None:
+    """P8.7 复审：**守卫顺序承重** —— `budget <= 0` swallow 必须留在 kind 白名单
+    **之后**，只吞 delegate / panel。
+
+    swallow 本身不读 `kind`，把它上提到白名单之前看着像无害简化，实则会让收尾轮的
+    `task_propose_status("done")` / review / decision 提议一并返 `True` ——
+    管理者宣布任务完成、却没有任何采纳卡，任务静默停在原状态。这三类在
+    `budget == 0` 下仍须返 `False` 照常渲卡（review / decision / status 从来不由
+    MTS 自动入队，见 `test_intercept_review_and_decision_not_auto_enqueued`）。
+    """
+    orch, _ = _build("Maya", "Wei")
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=0,
+    )
+    env = ChahuaEnvelope(
+        room_id="t", turn_id="x", guest_name="Maya", message_id=None,
+        type=ChahuaEventType.TASK_PROPOSAL,
+        data={"proposer": "Maya", "kind": kind, "payload": {}},
+    )
+    assert orch._intercept_task_proposal(env, lambda _e: None) is False
+    assert len(orch._handoff_queue) == 0
 
 
 async def test_cap_reached_ends_session() -> None:

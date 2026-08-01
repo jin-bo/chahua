@@ -20,15 +20,21 @@ from typing import Optional
 import pytest
 
 from chahua.agent_run import AGENT_RUN_ERR_ROOM_CAP, AGENT_RUN_ISSUED_BY_AGENT
-from chahua.context_renderer import render_managed_session_block
+from chahua.context_renderer import (
+    render_managed_session_block,
+    render_managed_session_wrapup_block,
+)
 from chahua.events import (
     ChahuaEnvelope,
     ChahuaEventType,
     NOOP_SINK,
     TASK_PROPOSAL_KIND_HANDOFF_DELEGATE,
 )
+from chahua.handoff import HandoffItem, HandoffKind, ManagedSession
 from chahua.room_runtime import RoomEventRouter, RoomRuntime
 from chahua.server import ChahuaServer, _install_handler_slots
+
+from conftest import build_orch
 
 
 # ── 复用 helper 测试夹具 ──────────────────────────────────────────────────────
@@ -396,3 +402,54 @@ def test_managed_session_block_is_exactly_five_bullets_in_order() -> None:
     assert "spawn_agent_runs" in bullets[2]        # 第 ③ 条
     assert "No next step" in bullets[3]            # 第 ④ 条（idle + P8.6 blocked 节流）
     assert "task_propose_status(\"done\")" in bullets[4]  # 第 ⑤ 条（P8.6 反目标缩水）
+
+
+def test_managed_session_block_switches_at_zero_budget() -> None:
+    """P8.7：``_build_winner_blocks`` 的 MTS 管理者档按 ``ms.budget`` 二选一 ——
+    ``> 0`` 给 ``<managed_session>``、``== 0`` 给 ``<managed_session_wrapup>``，
+    **两块互斥不共存**（docs/P8.7 §3.2 / §6.2）。
+
+    连带钉收尾块的承重语义点（只钉这几条、不钉整句，P14 精练随时可改措辞）+
+    ``manager`` 的 ``quoteattr`` 转义。"""
+    orch = build_orch("Maya", "Wei")
+    orch._managed_session = ManagedSession(
+        task_id="t1", manager_guest="Maya", budget=2,
+    )
+    item = HandoffItem(kind=HandoffKind.DELEGATE, target="Maya")
+
+    # budget > 0 → 正常块（现状不变）。
+    assert orch._build_winner_blocks(item, ["Maya"]) == [
+        [render_managed_session_block("Maya", 2)]
+    ]
+    # budget == 0（终局回合）→ 收尾块，且**替换**不追加。
+    orch._managed_session.budget = 0
+    blocks = orch._build_winner_blocks(item, ["Maya"])
+    assert blocks == [[render_managed_session_wrapup_block("Maya")]]
+    wrapup = blocks[0][0]
+    # 互斥：收尾块里没有 <managed_session ...>（注意前者是后者的前缀，判定带空格）。
+    assert "<managed_session " not in wrapup
+    assert "<managed_session_wrapup" in wrapup and "</managed_session_wrapup>" in wrapup
+    # 承重语义点：终局声明 / 禁派活 / 反目标缩水 / 语言锚点（P14）。
+    assert "FINAL turn" in wrapup
+    assert "do NOT delegate" in wrapup
+    assert "FULL task scope" in wrapup
+    assert "reply in the same language" in wrapup
+    # P8.7 复审：本块**替换**了 <managed_session>，仍适用的语义必须自带一份 ——
+    # 漏任一条都会在收尾轮留下一个被替换掉的旧 bullet 的空洞。
+    # ① 禁派活覆盖 spawn 通道（对旧第 ③ 条）—— spawn 不经 TASK_PROPOSAL、代码层拦不住。
+    assert "spawn_agent_runs" in wrapup
+    # ② 不许让用户去点不存在的采纳卡（对旧第 ② 条「作废 propose_* 等待语义」）。
+    assert "NO approval card" in wrapup
+    # ③ done 的**动作**，不只前置审计（对旧第 ⑤ 条）。
+    assert 'task_propose_status("done")' in wrapup
+    # ④ 预算到点 ≠ done、≠ blocked（对旧第 ④ 条防过早 blocked 节流）。
+    assert 'task_propose_status("blocked")' in wrapup
+    assert "Running out of budget is NOT" in wrapup
+
+    # quoteattr 转义：茶客名是用户可配自由文本，含 " / < 不得破坏 XML 属性边界
+    # （引号冲突时 quoteattr 换单引号包裹，尖括号走实体）。
+    escaped = render_managed_session_wrapup_block('Ma"ya<x>')
+    assert escaped.startswith(
+        "<managed_session_wrapup manager='Ma\"ya&lt;x&gt;'>"
+    )
+    assert "<x>" not in escaped  # 未转义时会破 XML 结构的原样尖括号

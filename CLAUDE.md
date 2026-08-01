@@ -224,7 +224,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **proposal intercept：MTS 内只自动入队管理者的 delegate / panel 提议**（`_intercept_task_proposal` 拦 envelope 不下发前端）；summarizer 校验用 `busy - {manager}` 放行「workers 讨论我汇总」（P8.4.9）；**自指派 early swallow（P8.4.11）**：`target == manager` 调下游前直接吞。
 - **dormant 期 task 状态变更经 `check_after_task_change(sink)` 主动收尾**（4 个 task inbound 末尾调一次）。
 - **结束 MTS 必清 `_handoff_queue`**；`handoff_clear` / `cancel` 中途介入一并结束（`user_cancel`）。
-- **管理者回合注入 `<managed_session>` 临时块**（worker 回合 / 非 MTS delegate 无块）；`managed_session_*` 是 hint 型事件不进 transcript、不 bump `schema_version`；budget 计管理者复查回合（kickoff 不耗），`max_consecutive_ai_turns` 是硬护栏；前端 dormant 子态由三源派生不发新 envelope。
+- **管理者回合注入 `<managed_session>` 临时块**（worker 回合 / 非 MTS delegate 无块）；**P8.7 例外：`budget <= 0` 的终局管理者回合改注入 `<managed_session_wrapup>` 收尾块**（`_build_winner_blocks` 二选一，**替换非追加**；同轮 delegate / panel 提议被 `intercept_task_proposal` swallow）。`managed_session_*` 是 hint 型事件不进 transcript、不 bump `schema_version`；budget 计管理者复查回合（kickoff 不耗），`max_consecutive_ai_turns` 是硬护栏；前端 dormant 子态由三源派生不发新 envelope。
 
 ### 后台 Agent（P11，bg run / 并行执行）
 

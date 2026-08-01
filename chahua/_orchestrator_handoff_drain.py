@@ -45,7 +45,10 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from ._orchestrator_consts import _PANEL_SUMMARY_BLOCK, _REVIEW_INSTRUCTION
-from .context_renderer import render_managed_session_block
+from .context_renderer import (
+    render_managed_session_block,
+    render_managed_session_wrapup_block,
+)
 from .debug_recorder import (
     SCORING_PATH_HANDOFF_DELEGATE,
     SCORING_PATH_HANDOFF_PANEL,
@@ -355,6 +358,13 @@ class HandoffDrainOps:
             and item.target == ms.manager_guest
             and winners == [ms.manager_guest]
         ):
+            # P8.7：budget 已耗尽的管理者回合 = 终局回合 → 换收尾块（**替换不追加**：
+            # <managed_session> 第 ① 条「直接 propose_delegate」与收尾指令正面冲突）。
+            # 安全性由既有代码保证：管理者回合跑完 advance_after_turn 第一件事就是
+            # stop_reason()，budget <= 0 直接 BUDGET_EXHAUSTED → end_managed_session，
+            # 故跑起来的 budget<=0 管理者回合必是最后一轮（docs/P8.7 §2）。
+            if ms.budget <= 0:
+                return [[render_managed_session_wrapup_block(ms.manager_guest)]]
             return [[render_managed_session_block(ms.manager_guest, ms.budget)]]
         return [None]
 
