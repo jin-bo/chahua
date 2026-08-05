@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <!-- 与 index.html:10 逐字同一份 CSP（P10.2 §4.5：本相位不改 CSP，这里是验证项） -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:">
+  <link rel="stylesheet" href="../../renderer/styles/base.css">
+  <link rel="stylesheet" href="../../renderer/styles/sidebar.css">
+  <link rel="stylesheet" href="../../renderer/styles/chat.css">
+  <title>flint smoke</title>
+</head>
+<body>
+  <!-- 复刻真实聊天行结构：#messages 是滚动容器（observer 的 root），li.msg 是 flex 行，
+       头像 + 气泡；气泡默认 shrink-to-fit —— 「量到的是 JSON 文本宽还是栏宽」全靠这个结构才验得出来。 -->
+  <ul id="messages">
+    <li class="msg">
+      <div class="msg-avatar" style="background:#ccc"></div>
+      <div class="bubble bubble-guest"><div class="text markdown" id="host"></div></div>
+    </li>
+  </ul>
+  <script type="module" src="smoke.js"></script>
+</body>
+</html>

@@ -7,6 +7,7 @@ import { ScoreKind } from "./events.js";
 import { fileTypeBadge } from "./file_icon.js";
 import { marked } from "../node_modules/marked/lib/marked.esm.js";
 import DOMPurify from "../node_modules/dompurify/dist/purify.es.mjs";
+import { enhanceFlint } from "./flint_chart.js";
 
 // gfm 开 GitHub 风格扩展（表格 / 删除线 / 任务列表）；breaks 让单换行 = <br>，
 // 符合聊天里"按 Enter 换行"的直觉（LLM 输出也常用单换行分句）。
@@ -274,10 +275,12 @@ export function typesetMath(container) {
 
 // ── P10.1 代码高亮（highlight.js v11，懒加载）───────────────────────────────────────
 //
-// 载体 pre>code.language-X 与 mermaid 同契约（marked fenced_code emit）。唯三差异：跳
-// language-mermaid（归 mermaid）、跳 .hljs（v11 重复高亮告警 unescaped HTML）、跳未注册语言
-// （保字面、不猜不报错）。highlight.js v11 读 .textContent（已转义源、反转义为代码文本）、产物
-// 仅 <span class="hljs-*">转义文本</span>，移除 HTML 透传 → 输入不当 HTML。
+// 载体 pre>code.language-X 与 mermaid 同契约（marked fenced_code emit）。唯四差异：跳
+// language-mermaid（归 mermaid）、跳 language-flint（P10.2 归 flint_chart.js —— hljs.getLanguage
+// ("flint") 本就为空、行为等价，但显式跳过让「谁负责这个块」在代码里一眼可见）、跳 .hljs（v11
+// 重复高亮告警 unescaped HTML）、跳未注册语言（保字面、不猜不报错）。highlight.js v11 读
+// .textContent（已转义源、反转义为代码文本）、产物仅 <span class="hljs-*">转义文本</span>，
+// 移除 HTML 透传 → 输入不当 HTML。
 //
 // **必须用 @highlightjs/cdn-assets 的自包含浏览器 ESM 包**（es/highlight.min.js，~124KB、全语言）：
 // highlight.js npm 包的 es/* 只是把 CJS lib/* 重导出的 shim（import 自 ../lib/common.js），而本
@@ -299,7 +302,10 @@ function loadHljs() {
 export function highlightCode(container) {
   if (!container) return;
   const blocks = [...container.querySelectorAll('pre > code[class*="language-"]')].filter(
-    (c) => !c.classList.contains("language-mermaid") && !c.classList.contains("hljs"),
+    (c) =>
+      !c.classList.contains("language-mermaid") &&
+      !c.classList.contains("language-flint") &&  // P10.2：归 flint_chart.js
+      !c.classList.contains("hljs"),
   );
   if (blocks.length === 0) return;  // 早退：无可高亮块零加载（懒）
   loadHljs().then((hljs) => {
@@ -320,15 +326,19 @@ export function highlightCode(container) {
 
 // ── P10.1 内容增强编排器 ─────────────────────────────────────────────────────────────
 //
-// 把 P10 的单一 renderMermaidIn 钩子泛化为编排器：mermaid + 代码高亮 + 数学排版顺序调用。
-// 三者区域不相交（代码在 pre>code、数学在 span.math-tex、mermaid 在 language-mermaid）、各自
-// 幂等可重入、均 fire-and-forget。四处注入点（renderGuestText / endStreamingMessage 两路径 /
-// task_panel goal）把原 renderMermaidIn(x) 替换为 enhanceContent(x)。流式 delta 路径仍不调。
+// 把 P10 的单一 renderMermaidIn 钩子泛化为编排器：mermaid + 代码高亮 + 数学排版 + flint 图表
+// 顺序调用。四者区域不相交（代码在 pre>code、数学在 span.math-tex、mermaid 在 language-mermaid、
+// flint 在 language-flint）、各自幂等可重入、均 fire-and-forget。
+//
+// **注入点是三处不是四处**：renderGuestText / endStreamingMessage 两路径。`task_panel.js` 的 goal
+// 那处调用**不可达**（onPatchTask 恒非空 ⇒ goal 永远走 plaintext contenteditable 分支），
+// 见 docs/P10.2 §2.1 与 app/CLAUDE.md。流式 delta 路径仍不调。
 export function enhanceContent(container) {
   if (!container) return;
   renderMermaidIn(container);  // P10：```mermaid → SVG（不动）
   highlightCode(container);    // P10.1：```X → 高亮
   typesetMath(container);      // P10.1：$…$（含其内 \ce{}）→ 排版
+  enhanceFlint(container);     // P10.2：```flint → 图表（视口门内懒编译）
 }
 
 // 流式重渲 innerHTML 会把节点全换一遍，用户正在做的拖选 / Cmd+C copy 会瞬间被擦。

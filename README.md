@@ -60,6 +60,32 @@ transcript / cursor / summary 持久化保留。
 - sidebar：切换房间 / 加茶客 / 导入 persona（本地目录或 GitHub）；点茶客头像设权限、勾选信任其 MCP。
 - **双击房间名** 弹「更改房间配置（直接编辑 room.toml）/ 清空聊天」；**双击用户头像或显示名** 弹「编辑配置（USER.md）/ 换头像（PNG / JPG / WebP / GIF）」。
 
+## 气泡里能渲什么（桌面壳）
+
+茶客回复走 `marked → DOMPurify` 渲成 markdown，其上叠四类内容渲染。四者**区域不相交、各自独立懒加载**
+——一条纯文本消息一个渲染器都不会拉起来。
+
+| 写什么 | 渲成什么 | 渲染器 |
+|---|---|---|
+| ` ```mermaid ` 围栏块 | 流程图 / 时序图 / 甘特图（SVG） | mermaid v11（P10） |
+| `$…$` / `$$…$$` | 数学公式；其内 `\ce{…}` / `\pu{…}` 是化学式 | KaTeX + mhchem（P10.1） |
+| ` ```python ` 等带语言围栏块 | 语法高亮 | highlight.js v11（P10.1） |
+| ` ```flint ` 围栏块 | 数据图表（柱 / 线 / 散点 / 饼 / 热力…共 37 种） | flint + ECharts（P10.2） |
+
+几条共同的姿态：
+
+- **只在整条消息到齐后渲一次**，流式打字期间显示源码 —— 半截的 mermaid / 公式 / JSON 必然解析失败刷屏。
+- **渲染失败一律保留源码 + 挂一条错误提示**，永不留白。图表的提示分三档（渲染失败 / 数据过大 /
+  数据被截断），因为修法完全不同。
+- **全部在本机渲**，离线可用、零 CDN；渲染只发生在界面里，`transcript.jsonl` 与导出的 markdown
+  始终是原样源码。CLI（`uv run chahua`）不渲染，回字面文本。
+- **用户自己发的消息不过 markdown**（保留原样换行），故上述四类只在茶客气泡里生效。
+
+数据图表那一类多一句：flint 是 2026 年的新规格语言，**模型不会自发写**，得给茶客配一份作者侧 skill
+（`examples/personas/Maya/skills/flint-chart-author/`，装法见
+[`examples/personas/README.md`](examples/personas/README.md)）。图的数据整段内联在那个块里 ——
+它是**取数那一刻的快照**，不会自己刷新，渲染端也永不联网取数。
+
 ## 数据位置（本地明文，无云端，无加密）
 
 详见 `docs/DESIGN.md` §3.7。
