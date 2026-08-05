@@ -52,6 +52,7 @@ import { createTurnState } from "./turn_state.js";
 import { createEnvelopeRouter } from "./envelope_router.js";
 import { createSearchPanel } from "./search_panel.js";
 import { clearPendingArtifactPreviews } from "./chat_view.js";
+import { resetFlintCharts } from "./flint_chart.js";
 
 const statusEl = document.getElementById("status");
 const messagesEl = document.getElementById("messages");
@@ -330,6 +331,11 @@ function renderSidebar(roomInfo) {
   // 「气泡后挂图片 / 下载链」预览 pending：messagesEl 被 replaceChildren 后，等图节点
   // 不再 isConnected，preview 字节回包来了也无处灌；不清的话 Map 持续涨。
   clearPendingArtifactPreviews();
+  // P10.2 卸载钩子（不是注入点）：flint + ECharts 是唯一有状态渲染器，实例挂在 ECharts 自己的
+  // 全局注册表上，messagesEl.replaceChildren() 只让 <figure> 脱树、不 dispose 就是每条 room_info
+  // 泄漏 N 个实例。flint_chart.js 内部的 sweep 兜不住「切到空房 / 只有用户消息的房」——
+  // 用户气泡走 textContent、不经 enhanceContent，那条路上 sweep 一次都不会跑。
+  resetFlintCharts();
   // 切房 / 重连 / 清空 → filter 视图无意义，强 exit 让新房间从全量视角起步。
   messageFilter.exitFilter();
   messagesEl.replaceChildren();

@@ -13,7 +13,8 @@
     "build:mac:arm64": "npm run build:python && electron-builder --mac --arm64",
     "build:mac:x64": "npm run build:python && electron-builder --mac --x64",
     "build:win": "npm run build:python && electron-builder --win",
-    "build:dir": "npm run build:python && electron-builder --dir"
+    "build:dir": "npm run build:python && electron-builder --dir",
+    "smoke:flint": "electron scripts/flint-smoke/main.js"
   },
   "engines": {
     "node": ">=18.17",
@@ -26,6 +27,8 @@
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.11.1",
     "dompurify": "^3.4.3",
+    "echarts": "6.1.0",
+    "flint-chart": "0.4.1",
     "katex": "^0.16.47",
     "marked": "^18.0.3",
     "mermaid": "^11.15.0"
@@ -48,6 +51,7 @@
       "!python-bundle/**/*",
       "!scripts/**/*",
       "!dist/**/*",
+      "!renderer/**/*.test.mjs",
       "!node_modules/mermaid/dist/**/*.map",
       "!node_modules/mermaid/dist/mermaid.js",
       "!node_modules/mermaid/dist/mermaid.min.js",
@@ -67,7 +71,13 @@
       "!node_modules/katex/dist/contrib/mhchem.js",
       "!node_modules/katex/dist/contrib/mhchem.min.js",
       "!node_modules/@highlightjs/cdn-assets/**/*",
-      "node_modules/@highlightjs/cdn-assets/es/highlight.min.js"
+      "node_modules/@highlightjs/cdn-assets/es/highlight.min.js",
+      "!node_modules/echarts/**/*",
+      "node_modules/echarts/dist/echarts.esm.min.js",
+      "!node_modules/flint-chart/**/*",
+      "node_modules/flint-chart/dist/echarts/index.js",
+      "!node_modules/zrender/**/*",
+      "!node_modules/tslib/**/*"
     ],
     "extraResources": [
       {

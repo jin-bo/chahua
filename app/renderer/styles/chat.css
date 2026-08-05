@@ -262,6 +262,56 @@
   border-radius: 3px;
 }
 
+/* P10.2 flint 图表渲染产物 —— `<pre><code class="language-flint">` 被 flint_chart.js
+   replaceWith 为 `<figure class="flint-rendered">`（内含 ECharts 的 SVG）。姿态对齐上面的
+   .mermaid-rendered：米底 + 居中 + overflow-x 兜底。
+   **真正让图落进气泡的不是这里的 max-width，而是渲染前的 assembleFitted**（决策P10.2-5）：
+   ECharts 把 <svg> 以 position:absolute 放进固定尺寸容器 div，绝对定位元素的 max-width:100%
+   相对那个 div 算、咬不住它。这条只在「渲染后又缩了窗口 / 拖了分栏」时配合 overflow-x 兜底。
+   硬地板客观存在（Pie Chart 恒 ≥ 280px），故**横向滚动是常规分支不是异常分支**。 */
+.bubble .text.markdown .flint-rendered {
+  margin: 0.5em 0;
+  padding: 8px;
+  background: #fafaf5;
+  border: 1px solid #e0d8c4;
+  border-radius: 6px;
+  text-align: center;
+  overflow-x: auto;
+}
+.bubble .text.markdown .flint-rendered svg {
+  max-width: 100%;
+  height: auto;
+  display: inline-block;
+}
+/* 图表气泡放宽（决策P10.2-4）：气泡 75% 是为「聊天消息」调的，一张图不是一句话。放宽 17% 在
+   375px 气泡上多出约 64px，正好是「带图例的线图能不能保住 160px 绘图区」的分水岭。
+   **class 由 JS 在量宽之前加**，不用 CSS :has(.flint-rendered)——后者要等渲完才生效，
+   尺寸已按旧宽定死、白丢 17%。不放宽到 100%：气泡还要留出头像与尾巴的视觉呼吸。
+
+   **flex-grow:1 是承重的**（评审修）：`.bubble` 是 `#messages li.msg`（display:flex）里的
+   flex item 且默认不 grow，天然 shrink-to-fit —— 一条只含 ```flint 块的消息，气泡实际宽度由
+   `<pre>` 里最长那行 JSON 决定（实测约 350–400px），哪怕栏里空着 750px。只写 max-width 的话
+   它就只是个上限、从不把气泡撑开，于是 columnWidth 量到的是「JSON 文本有多宽」而不是
+   「栏里还剩多宽」，图被按半个栏宽编译，决策P10.2-4 那 17% 放宽等于没做。 */
+.bubble.has-flint { max-width: 92%; flex-grow: 1; }
+/* 失败保留源码 + 徽标（三档文案由 JS 写进 data-flint-error，CSS content 只当文本、无 innerHTML）。
+   三档不可合并：修法完全不同——「数据过大」要减行数，「数据被截断」要减类别数。 */
+.bubble .text.markdown pre.flint-error {
+  border: 1px solid #c66;
+  position: relative;
+}
+.bubble .text.markdown pre.flint-error::before {
+  content: attr(data-flint-error);
+  display: block;
+  margin-bottom: 6px;
+  padding: 2px 6px;
+  background: rgba(204, 102, 102, 0.15);
+  color: #c66;
+  font-size: 11px;
+  font-family: inherit;
+  border-radius: 3px;
+}
+
 /* P10.1 代码高亮主题（highlight.js v11）—— 暖色暗底，配既有 pre 的 #2b2b2b/#e8e3d6 暗色
    代码块（chat.css:179）。不 vendored 第三方主题 CSS，~15 行 token 着色映射到与正文 #e8e3d6
    同色温的暖调。**只 scope 在气泡暗底 surface（.bubble .text.markdown）**——任务卡 goal 的

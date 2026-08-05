@@ -246,9 +246,9 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **`/tools` `/skills` 走单一共享投影 `TeaGuest.describe_capabilities()`**。WebSocket `_inbound_list_guest_caps` 与 CLI `_print_guest_caps` 共调。tools/skills 是 `__init__` 一次注册的静态集合。查茶客实例必经 `Orchestrator.get_guest(name)`（活字典），不读 `RoomSession.guests`（boot 快照）。
 - **能力花名册：装配期一次性解析的不可变快照**。`build_room_session` 解析 `roster: dict[guest→summary]` 三级，传给 Orchestrator → ContextRenderer。运行期增删茶客整体重建 session，故不做运行期增量更新。只进 onboarding `<room>` 块「在场」行，**不进**每轮 `<room_update>`。后台生成的新摘要下次重建 session 才生效。
 
-### 聊天界面渲染（P10）
+### 聊天界面渲染（P10 / P10.1 / P10.2）
 
-见 `app/CLAUDE.md`（动 `app/` 下文件时自动加载）。
+见 `app/CLAUDE.md`（动 `app/` 下文件时自动加载）——两节：「聊天界面渲染（P10）」（mermaid / 图片预览 / 数学·化学 / 代码高亮）与「flint 数据图表渲染（P10.2）」（```flint 块 → ECharts SVG，含按气泡宽重编译与实例生命周期两条茶话室独有机制）。
 
 ### 只读长期记忆（GuanLan MCP，P17）
 
