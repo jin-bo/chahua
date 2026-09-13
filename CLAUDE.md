@@ -257,6 +257,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **纯只读消费，chahua 不碰 GuanLan 写路径**。写入策展全在 chahua 外（人工 `guanlan ingest`）；是第三层记忆，正交于会话窗口与茶客私有 `.agentao/memory.db`。
 - **主线 agent-pull：persona `mcp.json` 裸 `url`（agentao ≥0.4.14 默认按 Streamable HTTP 连）+ trust 门**；`[[guest.extra_mcp_servers]]` 白名单仍 stdio-only。
 - **召回成本靠现有不变量有界**：只在胜出茶客 `speak()` 发生，打分从不调工具。
+- **read-only 茶客调 MCP 需 server `trust` + 工具 `readOnlyHint` 两半齐**（agentao `is_read_only`）。`trust` 由 chahua 对过了信任门的 persona server 默认补上（`_merged_mcp_configs`），`readOnlyHint` 只能 server 自报——缺注解被拦成 `denied by permission engine`，茶客照常流畅作答但从没读到库；验收看调试抽屉工具调用 `ok` 不看「调了」。
 - **召回内容按不可信数据处理**。MCP result 原样回 `agent.messages`、chahua 不包裹转义——第 1 跳靠 persona 纪律 + 挂记忆茶客 `permission="read-only"` 兜炸半径；第 2 跳已被 `format_messages` 转义 + 打分不可信兜住。
 - **`mcp_thread` owner-task：同一 task 进出 exit stack**，**禁**拆成两个 `run_coroutine_threadsafe` task（anyio task group 跨 task 出栈抛 cancel-scope 错，回归测钉死）。孙博士示例不打包 / 不 seed，不 bump `schema_version`。
 

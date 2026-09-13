@@ -102,11 +102,12 @@ GuanLan wiki 内容源自 `raw/` 外部资料，`read_page`/`search` 返回**原
 
 ### 6.1 运行前提（UX 依赖披露）
 
-孙博士的「记性」**不是自带的**，要三件事到位才工作，缺任一则他优雅退化成无记性茶客。这条**必须写进 release note / 首次使用引导**，否则用户「导入了却不回想」会以为坏了：
+孙博士的「记性」**不是自带的**，要四件事到位才工作，缺任一则他优雅退化成无记性茶客。这条**必须写进 release note / 首次使用引导**，否则用户「导入了却不回想」会以为坏了：
 
 1. **外部 GuanLan 服务在跑**：`guanlan -C <kb> mcp --transport http`（默认 `127.0.0.1:8766`）且 KB 有内容；服务没起 → 工具连不上，孙博士只会「一时想不起」。
 2. **trust 放行**：导入后其 `mcp.json` 走信任门，需用户在 App 里勾一次（未放行 → 无记性、日志有提示）。
 3. **agentao ≥ 0.4.14**（v0.1.9 已带）。
+4. **GuanLan 工具带 `ToolAnnotations` 只读声明**（GuanLan CHANGELOG「未发布 · 修复」起）。agentao read-only 模式只放行 **server `trust` 且工具 `readOnlyHint=true`、非 destructive** 的 MCP 工具（`agentao/mcp/tool.py::is_read_only`）。`trust` 这半由 chahua 满足——过了信任门的 persona server 在 `_merged_mcp_configs` 默认补 `trust: True`（`guest.py`，`test_mcp_thread.py` 钉住）；`readOnlyHint` 那半只能由 server 自报。旧版 GuanLan 无注解 → read-only 孙博士**每次** `search` 都被拦成 `denied by permission engine`（P6 调试抽屉工具调用可见），**不报错、不崩**，他照样按人设流畅作答——答的却是模型自身印象，最难察觉。验收 ② 必须看调试抽屉里工具调用是 `ok` 而非 `cancelled`，不能只看「调了」。
 
 **分发 = git 手工导入**：孙博士随 repo 走，**不打包进 dmg、不 seed**；用户按需在 App 里从 git 导入 persona 包。
 
