@@ -1,12 +1,19 @@
 """Thread-backed MCP manager for embedded async hosts.
 
-``agentao`` currently exposes a synchronous ``McpClientManager`` whose bridge
-calls ``loop.run_until_complete``.  That works from a plain CLI thread, but
-fails when ``Agentao`` is constructed inside chahua's websocket event loop.
+Written against agentao 0.4.x, whose synchronous ``McpClientManager`` bridged
+with ``loop.run_until_complete`` — fine from a plain CLI thread, fatal when
+``Agentao`` is constructed inside chahua's websocket event loop.
 
 This adapter keeps the same small manager surface used by
 ``agentao.tooling.register_mcp_tools`` while running all MCP async work on a
 dedicated background loop.
+
+P19 (agentao 0.5.x): upstream's manager now runs its own loop thread and
+``McpClient`` owns its connection in an internal task (``_own_connection``), so
+our owner task wraps theirs. Kept deliberately for this upgrade — behaviour
+under the double owner is pinned by the real-client tests in
+``tests/test_mcp_thread.py``; retiring this module is tracked in
+``docs/P19-Agentao-0.5.3-升级计划.md`` §5.
 """
 
 from __future__ import annotations

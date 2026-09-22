@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sys
 
 from chahua import mcp_thread
 from chahua.guest import _merged_mcp_configs
@@ -84,6 +86,84 @@ async def test_owner_task_connects_and_disconnects_in_same_task(monkeypatch):
     assert client.disconnected is True
     assert client.connect_task is not None
     assert client.connect_task is client.disconnect_task
+
+
+
+# ---------------------------------------------------------------------------
+# P19：真实 ``McpClient`` + 本地 stdio server。上面两条用 ``_FakeClient``，替身不会
+# 跟着上游演进；agentao 0.5.x 起 ``McpClient`` 自己也起 owner task
+# （``_own_connection``），于是 shim 的 owner task 套着上游的 owner task。下面三条
+# 钉死双层 owner 下 shim 的可观察行为。
+# ---------------------------------------------------------------------------
+
+_STDIO_SERVER_SRC = """
+from mcp.server.mcpserver import MCPServer
+
+srv = MCPServer("p19-demo")
+
+
+@srv.tool()
+def echo(text: str) -> str:
+    return f"echo:{text}"
+
+
+if __name__ == "__main__":
+    srv.run("stdio")
+"""
+
+
+def _stdio_config(tmp_path):
+    script = tmp_path / "mcp_echo_server.py"
+    script.write_text(_STDIO_SERVER_SRC, encoding="utf-8")
+    return {"command": sys.executable, "args": [str(script)]}
+
+
+async def test_real_client_connect_call_inside_running_loop(tmp_path):
+    """ws 事件循环内（本测试自身就在 running loop 里）连接 + 调用真实 client。"""
+    mgr = mcp_thread.ThreadedMcpClientManager({"demo": _stdio_config(tmp_path)})
+    try:
+        mgr.connect_all()
+        status = mgr.get_server_status()[0]
+        assert status["status"] == "connected", status
+        assert [(n, t.name) for n, t in mgr.get_all_tools()] == [("demo", "echo")]
+        assert mgr.call_tool("demo", "echo", {"text": "hi"}) == "echo:hi"
+    finally:
+        mgr.disconnect_all()
+
+
+async def test_real_client_disconnect_all_is_clean(tmp_path, caplog):
+    """关停不挂死、不留线程、不抛 cancel-scope 错（P17 不变量在双层 owner 下仍成立）。"""
+    mgr = mcp_thread.ThreadedMcpClientManager({"demo": _stdio_config(tmp_path)})
+    mgr.connect_all()
+    assert mgr.get_server_status()[0]["status"] == "connected"
+    thread = mgr._thread
+    assert thread is not None and thread.is_alive()
+
+    with caplog.at_level(logging.WARNING):
+        mgr.disconnect_all()
+
+    assert "cancel scope" not in caplog.text
+    # 盯本 manager 自己的线程，不按名字扫全进程（别的用例漏关的同名线程会误伤）
+    assert not thread.is_alive()
+    assert mgr.clients == {}
+    mgr.disconnect_all()  # 幂等
+
+
+async def test_real_client_connect_failure_reports_error_and_tears_down():
+    mgr = mcp_thread.ThreadedMcpClientManager(
+        {"bad": {"command": "/nonexistent/p19-no-such-binary"}}
+    )
+    thread = None
+    try:
+        mgr.connect_all()  # 失败不得抛、不得挂住 ready
+        thread = mgr._thread
+        status = mgr.get_server_status()[0]
+        assert status["status"] != "connected"
+        assert status["error"]
+        assert mgr.get_all_tools() == []
+    finally:
+        mgr.disconnect_all()
+    assert thread is not None and not thread.is_alive()
 
 
 def test_merged_mcp_configs_preserves_file_loaded_and_overlays_persona(
