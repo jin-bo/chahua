@@ -1,6 +1,6 @@
 # P19：Agentao 0.4.18 → 0.5.3 升级计划
 
-核验日期：2026-09-21。状态：阶段 A–C 与 macOS 自动化回归已执行（见 §6 执行记录）；真实 LLM / 桌面 GUI / Windows 验收待做。
+核验日期：2026-09-21。状态：已合入 main（PR #54，2026-09-22）；阶段 A–D 在 macOS 上全部执行，含真实 LLM 与桌面 GUI 验收（§6 / §6.1）。仅 Windows 原生构建与 HTTP/SSE MCP 未验。
 
 目标是让 CLI、WebSocket sidecar 和桌面安装包统一使用 Agentao 0.5.3，保持现有房间、权限、调度及持久化契约。建议直接以 0.5.3 为交付版本；0.4.27 仅作为上游推荐的弃用诊断中间站。
 
@@ -131,13 +131,25 @@
 | C bundle 验收（macOS） | `FORCE=1` 重建成功；bundle 内 `agentao` 0.5.3 = 锁定版本；`pip check` 无冲突；体积 158–159M；缓存三态验证：无变化→跳过 / 改脚本→重建 / 改 chahua 源码→重建 |
 | C bundle sidecar 启动 | 用 bundle 内 python + `app/templates` seed 的用户目录：0.6s 打出 ready 信号；stdin EOF 后 exit 0，无遗留进程 |
 
+### 6.1 真实 LLM 与桌面 GUI 验收（2026-09-22，merge 后，macOS arm64）
+
+LLM：Gemini `gemini-2.5-flash`（OpenAI 兼容端点，env 默认 LLM，三段 `source=default`）。房间 `p3-黄河路`（模板 seed 的用户目录），探针走 WebSocket，与桌面壳同一路径。
+
+| 场景 | python | 结果 |
+|---|---|---|
+| `@宝总` 提问 | dev venv | 宝总确定性路由回答 → 范总打分过阈接话；2 start / 2 end 成对；13.7s；sidecar EOF 后 exit 0 |
+| `@汪小姐` 用 `read_file` 读 `share/今日菜单.txt` | **bundle 内 python** | `tool_start=1`，回复含文件真实内容；6.6s；exit 0 |
+| Electron dev 壳（`CHAHUA_USER_DATA` 指向上述目录） | dev（`uv run chahua-server`） | 0.1–0.5s 连上 sidecar；历史回放 8→9 条气泡（含上两轮）；`@范总` 发消息 → 流式回复入气泡；两次启动第二次回放第一次的回复；关窗无残留 sidecar / Electron 进程；transcript 落盘 |
+| `npm run smoke:flint` | — | 21/21 PASS |
+
+覆盖到的计划 D 表项：CLI/sidecar 实测行的默认 LLM、流式文本、读工具；桌面实测行的全新用户目录（模板 seed）、历史回放、退出重启。清历史走 `clear_room` 单测（含 `agent.clear_history()`），未在 GUI 点。
+
 **未执行 / 待验收**（不得视为已通过）：
 
-- 真实 LLM 请求（CLI / sidecar 实测行：默认 LLM、显式 section、附图、长对话压缩）。
-- 桌面 GUI 实测（`npm run dev` / 安装包：历史回放、清历史、MCP 连接、退出重启）、`npm run smoke:flint`。
-- HTTP/SSE 传输的 MCP（本次只实测了 stdio；GuanLan 需真实 server）。
-- 旧 `.agentao` 数据副本兼容试跑。
-- Windows 原生构建与验收；`electron-builder` 出 dmg。
-- `CHAHUA_AGENTAO_SOURCE` 联调路径只过了语法检查，未实跑。
+- **Windows 原生构建与验收**：本机 macOS，无 Windows 主机 / wine；`build-python-bundle.js` 用 `uv python install` 拉 `process.platform` 原生 python，Windows bundle 只能在 Windows 上产。
+- HTTP/SSE 传输的 MCP（stdio 已实测；GuanLan 需真实 server）；MCP 连接的 GUI 信任门。
+- 显式 LLM section、附图（P13）、长对话压缩、`electron-builder` 出 dmg、旧 `.agentao` 数据副本试跑、`CHAHUA_AGENTAO_SOURCE` 联调路径实跑。
+
+**探针踩到的两点（非回归，记下省下次时间）**：`chahua-server --port 0` 的 ready 行打的是请求值 `:0` 不是实际端口，探针须自己挑空闲端口；本机 shell 有代理 env，`websockets.connect` 连 127.0.0.1 也走代理（HTTP 503），需 `proxy=None`——与 `test_agentao_contract.py` 设 `NO_PROXY` 同源。
 
 **顺带观察（既有现象，非本次回归，未处理）**：sidecar 收到 stdin EOF 后优雅退出耗时约 1.7–4.8s（0.4.27 与 0.5.3 同量级），经常超过 `sidecar.js` 的 2s grace，实际落到 force-kill 兜底。
