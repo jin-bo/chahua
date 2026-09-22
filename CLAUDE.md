@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.4.18）
+uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.5.3,<0.6）
 uv run chahua                                 # CLI（默认入 rooms/p1-test）
 uv run chahua --room rooms/p3-黄河路
 uv run chahua-server --host 127.0.0.1 --port 7860 --room rooms/p3-黄河路  # 独跑 sidecar
@@ -21,7 +21,7 @@ uv run pytest                                 # 全量测试（~45s）
 uv run pytest tests/test_xxx.py -v            # 单测
 cd app && npm run dev                         # Electron dev（首次需 npm install）
 cd app && npm run build:python && npm run build:mac  # 打包 → dist/茶话室-<ver>-mac-arm64.dmg
-FORCE=1 npm run build:python                  # 强制清重建 python-bundle
+FORCE=1 npm run build:python                  # 强制清重建 python-bundle（P19 起 bundle 按 uv.lock 装 + 构建指纹自动失效，平时无需 FORCE）
 ```
 
 `pyproject.toml` 设 `asyncio_mode = "auto"` —— async 测试无需 `@pytest.mark.asyncio`。
@@ -70,7 +70,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - `server_room_snapshot.py` — `emit_room_snapshot` 单点装配：`emit_room_info` / `emit_room_history` / `_emit_task_info` / 末尾补 MTS 快照。`turns_index` 严格 `enabled=True` 才挂；`rooms_available` 每房带 `busy=busy_alive()`；P11 加 `background_runs`。
 - `persona_import.py` — 本地 / GitHub 导入 persona 包 + P12.6 provenance 生命周期。provenance 落 `.chahua-source.json`；`update_persona(force=)` 走 `_replace_dir_atomic` 原子 swap。`_GitHubError` 子类 `PersonaImportError` 带 `.code` 分流 404/403。
 - `persona_assets.py` + `trust.py` — persona sibling `mcp.json` + `skills/` 装载；MCP 走信任门（`persona-trust.json` + UI popover）。skills 软链 + copytree 兜底。
-- `mcp_thread.py` — P17 thread-backed MCP 管理器：agentao 同步 `McpClientManager` 在 ws 事件循环内 `run_until_complete` 会炸，全部 MCP async 工作挪到常驻线程（owner-task 同 task 进出 exit stack，见 P17 不变量）。
+- `mcp_thread.py` — P17 thread-backed MCP 管理器：agentao 0.4.x 同步 `McpClientManager` 在 ws 事件循环内 `run_until_complete` 会炸，全部 MCP async 工作挪到常驻线程（owner-task 同 task 进出 exit stack，见 P17 不变量）。agentao 0.5.x 上游已自带 loop 线程 + client 内 owner task，本 shim 暂留（双层 owner 行为由 `test_mcp_thread.py` 真 client 用例钉住），退役见 P19 §5。
 - `persona_manifest.py` — P12 `persona.toml` 解析。`PersonaManifest` frozen dataclass（P12.6 加可选 `version` 纯展示字段）+ 三级严格白名单；文件与 dry-run 两入口共享 `_parse_dict`。全失败统一 `PersonaManifestError`。
 - `server.py` + `server_inbound_{admin,task,io,settings,handoff,agent_run}.py` + `_server_helpers.py` — ws 生命周期 / 帧路由 / room snapshot 在 `server.py`；30+ `_inbound_*` 切到 6 个 handler 类（组合非多继承）。`_install_handler_slots(srv)` 是装配唯一真理源；`_INBOUND_ROUTES` 帧 → 属性路径映射在 `server.py` 顶层。**改 `_inbound_*` 先看 slot 归属**。
 - `agent_run.py` + `agent_run_sink.py` + `agent_run_tools.py` — P11 后台 agent run：`AgentRun` frozen dataclass + `BatchMessageSink`（白名单过滤 + `TASK_PROPOSAL` 缓冲到 finally + `run_id` 注入）+ P11.2 茶客侧 `spawn_agent_run(s)` 工具（立即起并发后台 run，区别于等用户采纳的 `propose_*`）。`server.py::_run_agent_background` 是与 `_run_turn` 平行的 bg 执行 wrapper。
