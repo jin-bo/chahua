@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-09-22
+
+详见 [`docs/releases/v0.1.12.md`](docs/releases/v0.1.12.md)。
+
+### Changed
+- **P19 Agentao 0.4.18 → 0.5.3 升级 + 安装包构建来源可信**（2026-09-22，详见 [`docs/P19-Agentao-0.5.3-升级计划.md`](docs/P19-Agentao-0.5.3-升级计划.md)）：**地基版，无用户可见新功能**，生产代码零功能改动（唯一改动是 `mcp_thread.py` 的模块说明），不动运行期行为 / wire / `schema_version` / 数据格式。**① 安装包依赖只认 `uv.lock`**——P19 之前 `build-python-bundle.js` 把同级 `../agentao` **源码**非 editable 装进 bundle，而 `uv.lock` / dev venv / 全部测试跑 PyPI 发布版，两者必然偏斜（v0.1.11 实测：dmg 内 `0.4.20.dev0`，测试跑 `0.4.18`，且发布说明注明「一贯如此」——**历次安装包里的 agentao 从未被任何一条测试覆盖过**）。改成 `uv export --locked` + `pip install --require-hashes`，chahua 自身 `uv build --wheel` 后 `--no-deps` 装，不给 pip 第二次自由解析的机会；正式构建不再读 `../agentao`，本地联调须显式 `CHAHUA_AGENTAO_SOURCE=` opt-in（进指纹 + manifest 记 commit/dirty）。**② 构建指纹取代「可执行文件存在即跳过」**——旧判据要求每版手动 `FORCE=1`，漏一次就把上一版的 python 打进 dmg；新指纹覆盖锁文件 / chahua 构建输入 / python 版本 / OS·架构 / 构建脚本自身 / agentao 来源，`bundle-manifest.json` 只在 `pip check` + 版本断言 + sidecar 启动全过后才写，半截产物永不命中缓存；删旧 bundle 前先 `uv lock --check`（否则锁不一致时旧包已删、新包装不出来，连回退都没有）。**③ 出包门 `npm run check:bundle`**——三条机械校验挡在 `electron-builder` 之前：联调源码不得发布 ∧ agentao 版本 == 锁定版 ∧ bundle 内 chahua 版本与 `app/package.json` 同版（`-dev` ↔ `.dev0` 归一化，只去一半后缀也拦）；挂 `build:mac{,:arm64,:x64}` / `build:win`，`build:dir` 不挡。**④ 新增两层「真实依赖」契约测试**——此前 speak 与 MCP 路径全用替身（`agent.arun` 是 `AsyncMock`、MCP 是 `_FakeClient`），替身不跟着 agentao 演进，接口漂移照样全绿；补真 `Agentao` + 本地假 OpenAI SSE 端点（流式往返 message 成对 / 工具轮 `TOOL_START`·`TOOL_COMPLETE` 与结果回灌 / read-only 拦 `write_file`）与真 `McpClient` + 本地 stdio server（ws 循环内连接调用 / 关停无残留线程无 cancel-scope 错 / 连接失败路径），两者在 0.4.27 与 0.5.3 下均通过。**验收**：基线 0.4.18 1576 绿 → 0.4.27 `-W error::DeprecationWarning` 1576 绿无弃用命中 → 0.5.3 全量 1582 绿；真实 LLM（Gemini，dev venv 与 bundle 内 python 各一轮，含 `read_file` 工具轮）；Electron 桌面壳（连接 / 历史回放 / 发消息流式回复 / 退出无残留）；`smoke:flint` 21/21；117 MB 真实用户数据副本（28 个 `memory.db`、13 个导入 persona）跑通，无数据迁移需求。**上游两条 MCP 修复（0.4.24「一次回复里两个 MCP 调用丢一个」/「断开时记 cancel scope 错」）chahua 早已免疫**——正是 P17 `mcp_thread.py` 在本仓侧做过的事；上游原生实现后该 shim 成退役候选（P19 §5），本版按改动面最小保留。承重契约落 [`docs/INVARIANTS.md`](docs/INVARIANTS.md) §9.x P19 + `CLAUDE.md`「构建与发布来源（P19）」。**未验**：Windows 原生构建、HTTP/SSE 传输的 MCP。
+
 ## [0.1.11] - 2026-08-04
 
 详见 [`docs/releases/v0.1.11.md`](docs/releases/v0.1.11.md)。

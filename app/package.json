@@ -1,6 +1,6 @@
 {
   "name": "chahua-app",
-  "version": "0.1.12-dev",
+  "version": "0.1.12",
   "private": true,
   "description": "茶话室 桌面壳（P3.1：Electron + chahua-server sidecar）",
   "main": "main/index.js",
@@ -9,10 +9,11 @@
     "start": "electron .",
     "build:python": "node scripts/build-python-bundle.js",
     "build:python:force": "FORCE=1 node scripts/build-python-bundle.js",
-    "build:mac": "npm run build:python && electron-builder --mac",
-    "build:mac:arm64": "npm run build:python && electron-builder --mac --arm64",
-    "build:mac:x64": "npm run build:python && electron-builder --mac --x64",
-    "build:win": "npm run build:python && electron-builder --win",
+    "check:bundle": "node scripts/check-bundle-provenance.js",
+    "build:mac": "npm run build:python && npm run check:bundle && electron-builder --mac",
+    "build:mac:arm64": "npm run build:python && npm run check:bundle && electron-builder --mac --arm64",
+    "build:mac:x64": "npm run build:python && npm run check:bundle && electron-builder --mac --x64",
+    "build:win": "npm run build:python && npm run check:bundle && electron-builder --win",
     "build:dir": "npm run build:python && electron-builder --dir",
     "smoke:flint": "electron scripts/flint-smoke/main.js"
   },

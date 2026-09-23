@@ -250,6 +250,15 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 见 `app/CLAUDE.md`（动 `app/` 下文件时自动加载）——两节：「聊天界面渲染（P10）」（mermaid / 图片预览 / 数学·化学 / 代码高亮）与「flint 数据图表渲染（P10.2）」（```flint 块 → ECharts SVG，含按气泡宽重编译与实例生命周期两条茶话室独有机制）。
 
+### 构建与发布来源（P19）
+
+承重契约见 `docs/INVARIANTS.md §9.x P19` + `docs/P19-Agentao-0.5.3-升级计划.md`，改不变量两处同步。
+
+- **安装包的 python 依赖只有一个真理源 `uv.lock`**（`uv export --locked` + `pip --require-hashes`，chahua 走 wheel `--no-deps`）。**禁止让 pip 第二次自由解析**——P19 前 dev venv 与 dmg 必然偏斜，发出去的包从未被测试覆盖。
+- **正式构建不读同级 `../agentao`**；联调须显式 `CHAHUA_AGENTAO_SOURCE=` opt-in，进指纹 + manifest 记 commit/dirty。
+- **缓存判据是构建指纹不是"文件存在"**（锁文件 / chahua 构建输入 / python 版本 / OS·架构 / 脚本自身 / agentao 来源）；**`bundle-manifest.json` 只在 `pip check` + 版本断言 + sidecar 启动全过后才写**，半截产物永不命中缓存。删旧 bundle 前先 `uv lock --check`。
+- **出包必过 `npm run check:bundle`**：`agentaoSource=="lock"` ∧ agentao 版本 == 锁定版 ∧ bundle 内 chahua 版本与 `app/package.json` 同版（`-dev` ↔ `.dev0` 归一化，只去一半后缀也拦）。挂 `build:mac{,:arm64,:x64}` / `build:win`；**`build:dir` 不挡**。
+
 ### 只读长期记忆（GuanLan MCP，P17）
 
 承重契约见 `docs/P17-只读长期记忆-GuanLan-MCP.md`，改不变量两处同步。
