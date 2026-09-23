@@ -220,3 +220,15 @@
 - **bg run 不污染前台取证：`speak(record_debug=False)`**。wrapper 期间 `self._recorder` 替成 `NOOP_RECORDER`。
 - **bg run inbound `agent_run_start` 四道校验**：① `target` 在场；② `task_id` 若给须命中；③ `guest_busy(target)==False`；④ `len(agent_runs) < MAX_AGENT_RUNS_PER_ROOM(=4)`。校验完成 + 两 dict 写入必须先于 `create_task`。
 - **4 个 AGENT_RUN_* 事件不 bump `schema_version`**。`background_runs` 字段加在 `emit_room_info`，前端 `bg_run_bar.applyAll` 整批权威覆盖；`barEl.hidden`（**不是 `style.display`**）切显隐。
+
+### 9.x P19 依赖升级与 bundle 构建来源
+
+> 设计与执行记录见 `docs/P19-Agentao-0.5.3-升级计划.md`。本节是 P19 引入的**构建来源**承重契约 —— 它不改运行期行为，但决定"用户装到的东西是不是被测过的东西"，故与运行期不变量同级对待。
+
+- **安装包的 python 依赖只有一个真理源：`uv.lock`**。`build-python-bundle.js` 走 `uv export --locked` + `pip install --require-hashes -r`；chahua 自身 `uv build --wheel` 后 `--no-deps` 装。**禁止让 pip 第二次自由解析依赖** —— P19 之前 bundle 是 `pip install ../agentao` + `pip install <chahua 源码>`，dev venv 与 dmg 必然偏斜（v0.1.11 实测：dmg 内 `0.4.20.dev0` / `uv.lock` 与全部测试 `0.4.18`，**发出去的包从未被任何测试覆盖过**）。
+- **正式构建不读同级 `../agentao`**。本地联调须显式 `CHAHUA_AGENTAO_SOURCE=<path>` opt-in，manifest 记 `{path, commit, dirty}`；该变量进构建指纹，故不带它的正式构建必然重建，不会误用联调产物。
+- **缓存判据是构建指纹，不是"可执行文件存在"**。指纹覆盖 `uv.lock` / chahua 构建输入（`chahua/` + `pyproject.toml` + `README.md` + `LICENSE`）/ python 请求版本 / OS·架构 / 构建脚本本身 / agentao 来源。旧判据（`finalPyExe` 存在即 return）要求每版手动 `FORCE=1`，漏一次就把上一版的 python 打进 dmg。**dirty 的联调源码内容不可指纹化 → 每次必重建**。
+- **`bundle-manifest.json` 只在全部检查通过后写**。写之前必须过：`pip check` 无冲突 → bundle 内 `agentao` 版本 == `uv.lock` 锁定版 → `python -m chahua.server --help` exit 0。**半截失败的产物没有 manifest，下次必重建**，永远命不中缓存。
+- **删旧 bundle 之前先验锁**。`uv lock --check` + 读锁定版本排在 `rmrf(BUNDLE_ROOT)` 之前 —— 否则 lock 与 `pyproject.toml` 不一致时，旧 bundle 已被删而新的装不出来，`build:mac` 连回退都没有。
+- **出包前过 `check:bundle` 门，三条机械校验**：① `agentaoSource == "lock"`（联调产物不得发布）；② manifest `agentaoVersion` == `uv.lock` 锁定版；③ manifest `chahuaVersion` 与 `app/package.json` 同版（`0.1.12-dev` ↔ `0.1.12.dev0` 按 `{core, dev}` 归一化比，**只去一半后缀也要拦**）。挂在 `build:mac` / `build:mac:arm64` / `build:mac:x64` / `build:win` 四个发布脚本上；**`build:dir` 不挡**（本地联调要能一路走到可运行的 .app）。
+- **`mcp_thread.py` 的存在理由在 0.5.x 已部分消失，但 shim 暂留**。agentao 0.5.x 上游 `McpClientManager` 自带 loop 线程、`McpClient` 自管 owner task，故 chahua 的 owner task 套着上游的 —— 接口面兼容，风险在行为，由 `tests/test_mcp_thread.py` 的真 `McpClient` + 本地 stdio server 用例钉住（连接调用 / 关停无残留线程无 cancel-scope 错 / 连接失败路径）。退役见 P19 §5。
