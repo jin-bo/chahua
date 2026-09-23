@@ -710,6 +710,7 @@ chahua/
 | **P16 发言权重与手动模式**（✓ 完工，详见 [docs/P16-发言权重与手动模式.md](P16-发言权重与手动模式.md)） | 两个调度旋钮，机制 + UI 一起发布：房间级 `schedule_mode`（`scoring` / `manual`）与茶客级 `talkativeness`。**只换 auto-pick 第 3 档** —— `@mention` / `@broadcast` 在所有档下字面不变（前两档确定性路由 score=1.0，不打分、不吃 talkativeness），`manual` 档第 3 档恒返 `[]` + 零打分 LLM 调用；与 handoff / MTS 正交（它们走 drain loop 不经 auto-pick）。`talkativeness` 仅偏置 `scoring` 档：`effective = clamp(base × talk, 0, 1)`，**绝不**进打分 prompt。两旋钮走 `swap_room_config` 轻热替、不 cancel in-flight。 | `manual` 房只在 `@` / handoff / MTS 下发言；`talkativeness=0.0` 是合法哑茶客（禁 `or 1.0`）、范围 `[0,4]` 且拒 NaN/inf；实时 `data.scores` 只发 effective |
 | **P17 只读长期记忆（GuanLan MCP）**（✓ 完工，详见 [docs/P17-只读长期记忆-GuanLan-MCP.md](P17-只读长期记忆-GuanLan-MCP.md)；P-mem.3 / P-mem.4 暂缓） | 茶客可把 [GuanLan](https://github.com/jin-bo/agentao) wiki 当**只读**长期记忆经 MCP 召回 —— 第三层记忆，正交于会话窗口与茶客私有 `.agentao/memory.db`。主线 **agent-pull**：茶客自调工具，走 persona sidecar `mcp.json` 的裸 `url`（Streamable HTTP，需 agentao ≥ 0.4.14）+ trust 门，**几乎零 chahua 代码改动**。**纯只读消费**：写入策展全在 chahua 之外由人工 `guanlan ingest` 完成。召回成本靠既有不变量天然有界（只在胜出茶客 `speak()` 发生，打分从不调工具）；召回内容按不可信数据处理。 | 真 `guanlan mcp --transport http` 往返；`mcp_thread` owner-task 同 task 进出 exit stack（否则 anyio 跨 task 抛 cancel-scope 错）；示例茶客孙博士不打包 / 不 seed |
 | **P18 消息回溯与历史搜索导出**（部分完工：M1 搜索 + 回溯已落地，M2 全局/正则搜索仍为设计，详见 [docs/P18-消息回溯与历史搜索导出.md](P18-消息回溯与历史搜索导出.md)） | 两个诉求成本天差地别，故按此分半：**搜索是「读」，顺 append-only 模型走，便宜**（`search_room` → `SEARCH_RESULTS`，`re.escape`+`IGNORECASE` 原文子串、不碰任何状态、不挡 inflight）；**回溯是「回滚」，逆着走，贵** —— 贵不在文件格式，在「N 个茶客各持一份烘死的私有记忆」这个群聊根因，故本期只做**撤回未回复的末条用户消息**：server 权威、免 `message_id`、三段硬校验（房间 idle 用 `busy_alive()`、末条是 user、其后无茶客回复）。`Room.truncate_last()` 是 transcript 唯一全量重写入口（tmp+rename，先写盘后弹内存）；只截主体，cursor 与各茶客 `agent.messages` 一律不动。 | 搜索命中可跳转高亮；撤回后旁路收尾同 tick 原子（先 `cancel_pending_summarize()` 再截摘要 / 任务摘要 / debug turn）；有茶客回复后不可撤 |
+| **P19 Agentao 0.5.3 升级 + 安装包构建来源可信**（✓ 完工，详见 [docs/P19-Agentao-0.5.3-升级计划.md](P19-Agentao-0.5.3-升级计划.md)） | 无用户可见新功能的**地基版**：生产代码零功能改动，不动运行期行为 / wire / `schema_version` / 数据格式。① 安装包依赖只认 `uv.lock`（`uv export --locked` + `pip --require-hashes`，chahua 走 wheel `--no-deps`），正式构建不再读同级 `../agentao` —— 此前 dev venv 与 dmg 必然偏斜，**历次安装包里的 agentao 从未被任何一条测试覆盖**；② 构建指纹取代「文件存在即跳过」，`FORCE=1` 不再每版必须；③ 出包门 `check:bundle` 三条机械校验；④ 补真 `Agentao` / 真 `McpClient` 契约测试，堵上「替身不跟着上游演进」的洞。 | 0.4.27 弃用诊断无命中；0.5.3 全量 1582 绿；真实 LLM（含工具轮）+ 桌面壳 + 117 MB 真实旧数据副本跑通无迁移需求；Windows 原生构建与 HTTP/SSE MCP 未验 |
 | **ACP 异构茶客 + 主持人 agent**（占位） | 抽 `TeaGuest` 接口、新增 `AcpBackend`（`chahua/transport_acp.py`）、`config.py` 识别 `transport = "acp"`、UI 加"协议接入"图标 + 退化能力 tooltip；可选「主持人」agent 替代意愿打分。 | 接入第一个非 agentao 的 ACP 茶客 |
 
 ## 7. 待定 / 后续
@@ -722,6 +723,10 @@ chahua/
 - 敏感工具的二次确认 UI（`ChahuaTransport.confirm_tool` 转前端）。
 
 ## 8. 修订记录
+
+- **2026-09-22（§6 分阶段表补 P19）** —— 上次回填停在 P18 行（2026-08-04）。P19 是表里第一个
+  **不含运行期功能**的阶段（依赖升级 + 安装包构建来源），仍入表：它改变的是「用户装到的东西是不是
+  被测过的东西」，与运行期阶段同级；承重契约落 `docs/INVARIANTS.md §9.x P19`。
 
 - **2026-08-04（§6 分阶段表回填 P10.1 / P10.2 / P15–P18）** —— 上次回填停在 P14 行（2026-06-03），
   其后落地的六个阶段一直没进表：P10.1 数学·化学·代码高亮 / P10.2 flint 数据图表渲染（两者同属
