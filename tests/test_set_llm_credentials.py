@@ -451,3 +451,70 @@ async def test_env_rollback_when_replace_session_raises(task_inbound_srv, monkey
     assert "DEEPSEEK_MODEL" not in os.environ
     assert "DEEPSEEK_API_KEY" not in os.environ
     assert os.environ.get("LLM_PROVIDER") == before_provider
+
+
+# ── P21：api_format / prompt_cache 可选字段 ──────────────────────────────────
+
+
+async def test_p21_optional_fields_written_and_in_snapshot(task_inbound_srv, monkeypatch):
+    """给了 api_format / prompt_cache → 写 <PREFIX>_API_FORMAT / _PROMPT_CACHE，room_info 带上。"""
+    session, srv = task_inbound_srv
+    events: list = []
+    await _send(
+        srv, events.append,
+        provider="deepseek", model="deepseek-chat", api_key="sk-x",
+        api_format="Anthropic-Messages", prompt_cache="anthropic",
+    )
+    assert not _errors(events)
+    assert os.environ["DEEPSEEK_API_FORMAT"] == "anthropic-messages"
+    assert os.environ["DEEPSEEK_PROMPT_CACHE"] == "anthropic"
+    rdl = _room_infos(events)[-1].data["room_default_llm"]
+    assert rdl["api_format"] == "anthropic-messages"
+    assert rdl["prompt_cache"] == "anthropic"
+
+
+async def test_p21_absent_fields_pop_stale_env(task_inbound_srv, monkeypatch):
+    """缺 → 删同前缀残留（注入的凭证自洽，不继承 .env 里的协议 / 缓存开关）。"""
+    session, srv = task_inbound_srv
+    monkeypatch.setenv("DEEPSEEK_API_FORMAT", "openai-responses")
+    monkeypatch.setenv("DEEPSEEK_PROMPT_CACHE", "anthropic")
+    events: list = []
+    await _send(srv, events.append, provider="deepseek", model="deepseek-chat", api_key="sk-x")
+    assert not _errors(events)
+    assert "DEEPSEEK_API_FORMAT" not in os.environ
+    assert "DEEPSEEK_PROMPT_CACHE" not in os.environ
+
+
+@pytest.mark.parametrize("extra", [
+    {"api_format": "responses"},
+    {"prompt_cache": "yes"},
+    {"api_format": 3},
+])
+async def test_p21_invalid_optional_field_rejected(task_inbound_srv, monkeypatch, extra):
+    session, srv = task_inbound_srv
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    events: list = []
+    await _send(srv, events.append, provider="deepseek", model="deepseek-chat", api_key="sk-x", **extra)
+    assert _errors(events)
+    assert "DEEPSEEK_MODEL" not in os.environ, "非法帧整帧丢弃，env 不动"
+
+
+async def test_p21_rollback_restores_format_keys(task_inbound_srv, monkeypatch):
+    import chahua.server as server_mod
+
+    session, srv = task_inbound_srv
+    monkeypatch.setenv("DEEPSEEK_API_FORMAT", "openai-responses")
+    monkeypatch.delenv("DEEPSEEK_PROMPT_CACHE", raising=False)
+
+    def _boom(*a, **k):
+        raise SystemExit("缺 key")
+
+    monkeypatch.setattr(server_mod, "build_room_session", _boom)
+    events: list = []
+    await _send(
+        srv, events.append, provider="deepseek", model="deepseek-chat", api_key="sk-x",
+        api_format="anthropic-messages", prompt_cache="anthropic",
+    )
+    assert _errors(events)
+    assert os.environ["DEEPSEEK_API_FORMAT"] == "openai-responses"
+    assert "DEEPSEEK_PROMPT_CACHE" not in os.environ

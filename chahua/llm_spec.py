@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from agentao.llm import LLMClient
 
@@ -94,7 +94,50 @@ def canonical_provider(name: str) -> str:
 # toml 表层 LLM 字段的写出 / 解析顺序（model 在前 + 可选三项在后，与设计 §3 示例对齐
 # 让用户读 toml 时形态稳定）。公开（无下划线）—— admin 端 emit / 校验都从这里取，
 # 避免与 _TOML_LLM_KEYS 漂移。
-LLM_TOML_FIELDS: tuple[str, ...] = ("model", "base_url", "api_key_env", "temperature")
+LLM_TOML_FIELDS: tuple[str, ...] = (
+    "model", "base_url", "api_key_env", "temperature",
+    # P21：端点属性，按 section 生效，不回退 env / 不跨 section 继承（docs/P21 §3）。
+    "api_format", "prompt_cache",
+)
+
+# P21：agentao ``LLMClient(api_format=, prompt_cache=)`` 的合法取值。chahua 自持一份（agentao
+# 的常量在私有模块里），``tests/test_p21_api_format_prompt_cache.py`` 断言两边一致 ——
+# 升级 agentao 增删取值时先红。``prompt_cache`` 的关闭值统一归一成 ``None``。
+API_FORMATS: tuple[str, ...] = ("openai-completions", "anthropic-messages", "openai-responses")
+PROMPT_CACHE_FORMATS: tuple[str, ...] = ("anthropic",)
+_PROMPT_CACHE_OFF: frozenset[str] = frozenset({"", "off", "none", "false"})
+
+
+def normalize_api_format(raw: Any) -> Optional[str]:
+    """``api_format`` 归一：``None`` / 空白 → ``None``（agentao 默认 Chat Completions）；
+    大小写 / 首尾空白归一；非法 → :class:`ValueError`（调用方包成各自的错误类型）。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"api_format 必须是字符串，得到 {type(raw).__name__}")
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value not in API_FORMATS:
+        raise ValueError(f"api_format={raw!r} 不合法；允许：{', '.join(API_FORMATS)}")
+    return value
+
+
+def normalize_prompt_cache(raw: Any) -> Optional[str]:
+    """``prompt_cache`` 归一：``None`` / 空白 / ``off`` / ``none`` / ``false`` → ``None``；
+    其余必须 ∈ :data:`PROMPT_CACHE_FORMATS`，否则 :class:`ValueError`。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"prompt_cache 必须是字符串，得到 {type(raw).__name__}")
+    value = raw.strip().lower()
+    if value in _PROMPT_CACHE_OFF:
+        return None
+    if value not in PROMPT_CACHE_FORMATS:
+        raise ValueError(
+            f"prompt_cache={raw!r} 不合法；允许：{', '.join(PROMPT_CACHE_FORMATS)} 或 off"
+        )
+    return value
 
 # 非字符串字段集 —— admin 端 _render_room_toml 走 scalar literal（数值不引号）。
 # 当前只有 temperature 是数值；新增数值字段时这里加，emit 路径自然分流。
@@ -136,6 +179,8 @@ class LLMSpec:
     - ``base_url``：``None`` 表示"按 provider 默认"（由 :func:`build_client` 解析）。
     - ``api_key_env``：``None`` 表示"按 ``<PROVIDER>_API_KEY`` 约定"。
     - ``temperature``：``None`` 表示"按 ``LLM_TEMPERATURE`` 环境变量或 ``_DEFAULT_TEMPERATURE``"。
+    - ``api_format`` / ``prompt_cache``（P21）：``None`` 表示 agentao 默认（Chat Completions /
+      不打缓存断点）。端点属性 —— **不**像 temperature 那样在 build 时回退 env。
 
     `None` 与"显式同名默认值"故意区分 —— 让 ``room_info`` envelope / UI 表单一眼能
     判断"这位茶客是不是用了非默认配置"。
@@ -146,6 +191,8 @@ class LLMSpec:
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
     temperature: Optional[float] = None
+    api_format: Optional[str] = None
+    prompt_cache: Optional[str] = None
 
     @property
     def model_id(self) -> str:
@@ -188,12 +235,26 @@ class LLMSpec:
 
         base_url = (os.environ.get(f"{prefix}_BASE_URL") or "").strip() or None
 
+        # P21：按 <PREFIX> 读端点属性。故意不认 agentao CLI 的全局 ``LLM_PROMPT_CACHE`` ——
+        # 桌面注入切 provider 后全局开关会残留到新端点（缓存标记在 Chat Completions 上也发，
+        # 不认它的网关会 400）。非法值与 ``LLM_TEMPERATURE`` 同口径早炸。
+        try:
+            api_format = normalize_api_format(os.environ.get(f"{prefix}_API_FORMAT"))
+        except ValueError as exc:
+            raise SystemExit(f"{prefix}_API_FORMAT：{exc}") from exc
+        try:
+            prompt_cache = normalize_prompt_cache(os.environ.get(f"{prefix}_PROMPT_CACHE"))
+        except ValueError as exc:
+            raise SystemExit(f"{prefix}_PROMPT_CACHE：{exc}") from exc
+
         return cls(
             provider=provider,
             model=model,
             base_url=base_url,
             api_key_env=None,
             temperature=_resolve_temperature_from_env(),
+            api_format=api_format,
+            prompt_cache=prompt_cache,
         )
 
     @classmethod
@@ -249,12 +310,16 @@ class LLMSpec:
         base_url_raw = data.get("base_url")
         api_key_env_raw = data.get("api_key_env")
         temperature_raw = data.get("temperature")
+        api_format_raw = data.get("api_format")
+        prompt_cache_raw = data.get("prompt_cache")
 
         if not model_raw and (
             base_url_raw or api_key_env_raw or temperature_raw is not None
+            or api_format_raw is not None or prompt_cache_raw is not None
         ):
             raise ValueError(
-                f"{label}: base_url / api_key_env / temperature 不能单独出现，需同写 model"
+                f"{label}: base_url / api_key_env / temperature 不能单独出现"
+                f"（api_format / prompt_cache 同），需同写 model"
             )
         if not model_raw:
             return None
@@ -307,12 +372,20 @@ class LLMSpec:
                 f"{type(temperature_raw).__name__}"
             )
 
+        try:
+            api_format = normalize_api_format(api_format_raw)
+            prompt_cache = normalize_prompt_cache(prompt_cache_raw)
+        except ValueError as exc:
+            raise ValueError(f"{label}: {exc}") from exc
+
         return cls(
             provider=provider,
             model=bare_model,
             base_url=base_url,
             api_key_env=api_key_env,
             temperature=temperature,
+            api_format=api_format,
+            prompt_cache=prompt_cache,
         )
 
 
@@ -357,4 +430,7 @@ def build_client(spec: LLMSpec) -> LLMClient:
         base_url=base_url,
         model=spec.model,
         temperature=temperature,
+        # P21：端点属性原样透传；None = agentao 默认（Chat Completions / 不打缓存断点）。
+        api_format=spec.api_format,
+        prompt_cache=spec.prompt_cache,
     )

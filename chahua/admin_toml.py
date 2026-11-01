@@ -46,6 +46,8 @@ class GuestSnapshot(TypedDict, total=False):
     base_url: str
     api_key_env: str
     temperature: float
+    api_format: str    # P21：端点协议；缺 = agentao 默认
+    prompt_cache: str  # P21：提示缓存断点格式；缺 = 关
     # `[[guest.extra_mcp_servers]]` 数组表 —— snapshot 内部按 list[dict]（与 toml 形态
     # 一致），每项含 name / command 必给，args / env 可选。空 list / 缺键 = 不写 toml。
     extra_mcp_servers: list[dict[str, Any]]
@@ -137,6 +139,11 @@ def _llm_spec_to_dict(spec: LLMSpec) -> dict[str, Any]:
         out["api_key_env"] = spec.api_key_env
     if spec.temperature is not None:
         out["temperature"] = spec.temperature
+    # P21：None = 默认，不写盘（与 base_url 同口径）。
+    if spec.api_format:
+        out["api_format"] = spec.api_format
+    if spec.prompt_cache:
+        out["prompt_cache"] = spec.prompt_cache
     return out
 
 

@@ -34,6 +34,15 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
         self.server.requests.append(body)  # type: ignore[attr-defined]
         # P20：脚本化的可重试错误（429 + Retry-After），弹完再正常回复；
         # ``fail_forever`` 让每次都 429（退避期间取消用）。
+        # P21：恒 400（不可重试）—— agentao 把它变成 ``[LLM API error: …]`` 回合文本。
+        if self.server.bad_request:  # type: ignore[attr-defined]
+            raw = json.dumps({"error": {"message": "bad tools", "type": "invalid_request_error"}}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         fail = self.server.fail_script  # type: ignore[attr-defined]
         if fail or self.server.fail_forever is not None:  # type: ignore[attr-defined]
             retry_after = fail.pop(0) if fail else self.server.fail_forever  # type: ignore[attr-defined]
@@ -94,6 +103,7 @@ def fake_openai(monkeypatch):
     server.tool_script = []  # type: ignore[attr-defined]
     server.fail_script = []  # type: ignore[attr-defined]  # 每项 = Retry-After 秒数
     server.fail_forever = None  # type: ignore[attr-defined]  # 非 None = 恒 429 的 Retry-After
+    server.bad_request = False  # type: ignore[attr-defined]  # P21：True = 恒 400
     server.usage = None  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -325,5 +335,26 @@ async def test_real_agentao_live_status_retry_then_idle(env_paths, fake_openai):
         end_idx = types.index(ChahuaEventType.MESSAGE_END)
         assert all(envelopes.index(e) < end_idx for e in statuses)
         assert all(e.message_id == msg.message_id for e in statuses)
+    finally:
+        session.close()
+
+
+async def test_real_agentao_llm_error_is_failure_not_message(env_paths, fake_openai):
+    """P21 真栈：上游恒 400 → agentao 返回 ``[LLM API error: …]`` 文本（status 仍 ok），
+    chahua 据 ``agent.last_turn.incomplete_reason == "llm_error"`` 改走 error message_end，
+    不进 transcript。"""
+    fake_openai.bad_request = True
+    session = _build(env_paths)
+    envelopes = []
+    try:
+        guest = session.orchestrator.get_guest("宝总")
+        before = session.room.latest_seq
+        msg = await guest.speak("ctx", turn_id="turn_p21", sink=envelopes.append)
+        assert msg is None
+        assert session.room.latest_seq == before
+        end = _message_end(envelopes)
+        assert end.status == "error"
+        assert end.data["error"].startswith("[LLM API error:")
+        assert guest.agent.last_turn.incomplete_reason == "llm_error"
     finally:
         session.close()

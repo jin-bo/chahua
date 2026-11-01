@@ -82,6 +82,16 @@
   background: #fff;
 }
 .modal-field input[type="text"]:focus { outline: none; border-color: #888; }
+/* P21 LLM 协议下拉：与文本框同外观。 */
+.modal-field select {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #d0c8b4;
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+.modal-field select:focus { outline: none; border-color: #888; }
 
 /* 编辑 USER.md 用 —— 等宽字体（用户在写半结构化 markdown） + 较大默认高度。 */
 .modal-textarea {

@@ -1,12 +1,17 @@
 "use strict";
 
-// LLM section 表单工具 —— 模型 / base_url / api_key_env / temperature 四件套
+// LLM section 表单工具 —— 模型 / base_url / api_key_env / temperature 四件套 + P21 的
+// 协议（api_format 下拉）/ 提示缓存（prompt_cache 勾选）
 // + "继承默认 vs 自定义" radio + 提交时 diff。guest_settings.js（茶客 LLM）与
 // room_settings.js（[scoring] / [summary]）共用同一形态。
 //
 // 约定的 DOM id：``${idPrefix}-mode`` (radio name) / ``${idPrefix}-fields`` (custom 字段
 // 块容器) / ``${idPrefix}-model`` / ``${idPrefix}-base-url`` / ``${idPrefix}-api-key-env``
-// / ``${idPrefix}-temperature`` / ``${idPrefix}-default-label`` / ``${idPrefix}-key-status``。
+// / ``${idPrefix}-temperature`` / ``${idPrefix}-api-format`` / ``${idPrefix}-prompt-cache``
+// / ``${idPrefix}-default-label`` / ``${idPrefix}-key-status``。
+//
+// P21 承重：新字段必须 fill / read / changed 三处同步 —— 漏 read 会让一次无关保存把 toml
+// 里的 api_format / prompt_cache 静默抹掉；漏 changed 会把「只改了协议」判成未改。
 // 两个 modal 的 HTML 都按这个 prefix 写就能复用。
 
 // 与 chahua.llm_spec._TEMPERATURE_MIN/MAX 同口径 —— 客户端拦掉越界提前给用户红字提示，
@@ -57,6 +62,11 @@ export function createLlmSection({ idPrefix, customSourceTag, label }) {
         tempInput.value =
           isCustom && spec?.temperature != null ? String(spec.temperature) : "";
       }
+      // P21：null = 默认（下拉选空项 / 不勾）。
+      const fmtSel = $(`${idPrefix}-api-format`);
+      if (fmtSel) fmtSel.value = isCustom ? (spec?.api_format || "") : "";
+      const cacheBox = $(`${idPrefix}-prompt-cache`);
+      if (cacheBox) cacheBox.checked = isCustom && spec?.prompt_cache === "anthropic";
       refresh();
       const ready = !!spec?.api_key_ready;
       $(`${idPrefix}-key-status`).textContent =
@@ -87,6 +97,10 @@ export function createLlmSection({ idPrefix, customSourceTag, label }) {
           spec.temperature = temperature;
         }
       }
+      const fmtSel = $(`${idPrefix}-api-format`);
+      if (fmtSel && fmtSel.value) spec.api_format = fmtSel.value;
+      const cacheBox = $(`${idPrefix}-prompt-cache`);
+      if (cacheBox && cacheBox.checked) spec.prompt_cache = "anthropic";
       return { spec };
     },
     // "default" 永远 ≠ "custom"，即便 model 字面相同 —— 用户显式 pin 住不随房间默认漂移。
@@ -98,6 +112,8 @@ export function createLlmSection({ idPrefix, customSourceTag, label }) {
             ...(oldSpec.base_url ? { base_url: oldSpec.base_url } : {}),
             ...(oldSpec.api_key_env ? { api_key_env: oldSpec.api_key_env } : {}),
             ...(oldSpec.temperature != null ? { temperature: oldSpec.temperature } : {}),
+            ...(oldSpec.api_format ? { api_format: oldSpec.api_format } : {}),
+            ...(oldSpec.prompt_cache ? { prompt_cache: oldSpec.prompt_cache } : {}),
           }
         : null;
       return JSON.stringify(newSpec) !== JSON.stringify(old);

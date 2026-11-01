@@ -19,6 +19,8 @@ from .llm_spec import (
     LLMSpec,
     build_client,
     canonical_provider,
+    normalize_api_format,
+    normalize_prompt_cache,
     provider_env_prefix,
 )
 
@@ -32,7 +34,10 @@ INBOUND_UPDATE_USER_AVATAR = "update_user_avatar"
 # 禁 log raw payload，详见 docs/P15。
 INBOUND_SET_LLM_CREDENTIALS = "set_llm_credentials"
 
-_SET_LLM_CREDENTIALS_KEYS = frozenset({"provider", "model", "base_url", "api_key"})
+# P21：``api_format`` / ``prompt_cache`` 可选，语义同 ``base_url``（给则写 <PREFIX>_*，缺则 pop）。
+_SET_LLM_CREDENTIALS_KEYS = frozenset(
+    {"provider", "model", "base_url", "api_key", "api_format", "prompt_cache"}
+)
 
 # os.environ 快照 sentinel：区分「key 原本未设」与「key 旧值为空串」，回滚时前者 del、
 # 后者写回空串。
@@ -223,6 +228,13 @@ class SettingsHandlers:
             _reject(f"{where}: base_url 必须是字符串或缺省")
             return
         base_url = (base_url_raw or "").strip()
+        # P21：端点属性可选；非法值整帧拒（env 一字不动）。归一后 None = 缺 → pop 残留。
+        try:
+            api_format = normalize_api_format(data.get("api_format"))
+            prompt_cache = normalize_prompt_cache(data.get("prompt_cache"))
+        except ValueError as e:
+            _reject(f"{where}: {e}")
+            return
 
         # provider 归一（google→gemini）后推 env 前缀，写 LLM_PROVIDER 让 try_from_env
         # 据它推回同一前缀 —— 漏写 LLM_PROVIDER 会前缀错配。provider token 必须干净：
@@ -249,6 +261,8 @@ class SettingsHandlers:
             f"{prefix}_MODEL",
             f"{prefix}_BASE_URL",
             f"{prefix}_API_KEY",
+            f"{prefix}_API_FORMAT",
+            f"{prefix}_PROMPT_CACHE",
         )
         snapshot = _snapshot_env(env_keys)
 
@@ -263,6 +277,15 @@ class SettingsHandlers:
                 else:
                     # 空 / 缺 → 删残留，让 build_client 走 _DEFAULT_BASE_URLS。
                     os.environ.pop(f"{prefix}_BASE_URL", None)
+                # P21：注入的凭证自洽 —— 缺即删同前缀残留（如 ~/.env 的旧协议 / 缓存开关）。
+                for key, value in (
+                    (f"{prefix}_API_FORMAT", api_format),
+                    (f"{prefix}_PROMPT_CACHE", prompt_cache),
+                ):
+                    if value:
+                        os.environ[key] = value
+                    else:
+                        os.environ.pop(key, None)
             except ValueError as e:
                 # env 名 / 值含非法字符 → os.environ 赋值抛 ValueError：provider 含 `=`
                 # 拼出非法 env 名 `FOO=BAR_MODEL`；model / api_key / base_url 含 NUL →
@@ -277,8 +300,9 @@ class SettingsHandlers:
             # （可能藏 userinfo / ?token=... 凭证）。
             _log.info(
                 "set_llm_credentials: provider=%s model=%s base_url=%s "
-                "api_key=<redacted>",
+                "api_format=%s prompt_cache=%s api_key=<redacted>",
                 provider_canon, model, _redact_base_url(base_url),
+                api_format, prompt_cache,
             )
 
             if shadowed:

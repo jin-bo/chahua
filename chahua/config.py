@@ -100,17 +100,16 @@ _ALLOWED_ROOM_KEYS: frozenset[str] = (
     frozenset({"name", "topic", "rules", "user_md", "llm", "schedule_mode"})
     | frozenset(ORCH_FIELD_BOUNDS)
 )
-# [[guest]] 段允许的键。LLM 四件套（model/base_url/api_key_env/temperature）的具体校验
+# [[guest]] 段允许的键。LLM 字段（单点 LLM_TOML_FIELDS，P21 起含 api_format / prompt_cache）的具体校验
 # 在 LLMSpec.from_toml；这里只是顶层白名单。``talkativeness``（P16）是 per-guest 乘性
 # 发言偏置，范围校验走 :data:`TALKATIVENESS_MIN` / :data:`TALKATIVENESS_MAX`。
 _ALLOWED_GUEST_KEYS: frozenset[str] = frozenset(
     {
         "name", "persona", "permission", "isolation", "summary",
         "talkativeness",
-        "model", "base_url", "api_key_env", "temperature",
         "extra_mcp_servers",
     }
-)
+) | frozenset(LLM_TOML_FIELDS)
 # 已移除的字段 —— 不会有未来 phase 接 `provider`（设计 §2.1：用 model = "<provider>/<model>"
 # 合并写法）。出现 → 给定向 hint。
 _REMOVED_GUEST_KEYS: frozenset[str] = frozenset({"provider"})
