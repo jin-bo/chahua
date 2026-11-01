@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Agentao 0.5.3 → 0.5.18**（2026-10-31）：仍在 `<0.6` 区间，`pyproject.toml` 下限抬到 `>=0.5.18`（= 实测版本），`uv.lock` 同步。chahua 侧零代码改动——上游区间内的破坏性变更（0.5.13 `create_agent_tools`/`AgentToolWrapper` 六回调移除、0.5.4 `MAX_TOTAL_RETRY_SECONDS` 移除、0.5.12 `add_event_observer` 弃用、0.5.14 项目级 `.agentao/sandbox.json` 被忽略）chahua 均未使用。**验收**：全量 1582 绿（`-W error::DeprecationWarning:agentao` 无命中）；sidecar 冒烟启动 + stdin EOF 优雅关停正常。**未验**：真实 LLM 往返、Electron 桌面壳、`build:python` + `check:bundle` 出包（发版时按 P19 流程跑）。
+
 ## [0.1.12] - 2026-09-22
 
 详见 [`docs/releases/v0.1.12.md`](docs/releases/v0.1.12.md)。

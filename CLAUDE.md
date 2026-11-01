@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.5.3,<0.6）
+uv sync                                       # Python 依赖（按 pyproject.toml 拉 agentao≥0.5.18,<0.6）
 uv run chahua                                 # CLI（默认入 rooms/p1-test）
 uv run chahua --room rooms/p3-黄河路
 uv run chahua-server --host 127.0.0.1 --port 7860 --room rooms/p3-黄河路  # 独跑 sidecar
