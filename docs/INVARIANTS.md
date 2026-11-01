@@ -255,3 +255,14 @@
 - **状态机在 transport，与 P20 记录共用同一批事件、各自兜异常**：`LLM_RETRY` → `retrying`（白名单清洗，与调用记录同一套 `_RETRY_FIELDS`）、`COMPACTION_STARTED` → `compacting`；`LLM_CALL_COMPLETED` / `COMPACTION_SETTLED` 只在当前确有对应状态时补 `idle`（无重试的调用、不发 STARTED 的轻量压缩零额外帧）。只在 `bind()` 内发，进 `bind()` 清状态。
 - **前端气泡收尾无条件清提示，不依赖 `idle` 必达**（取消 / 出错 / 断线都可能没有 idle）；有文本 delta 到达即清 `retrying`（idle 要等整段流完才到）。提示节点 `.live-hint` 与终态 `.status-tail` 分开。
 - **后台不发**：不进后台房白名单，bg run `BatchMessageSink` 显式 drop。切回房间时 `inflight_snapshot().live_status` 由 `_emit_inflight_message` 在 start + delta 之后补一帧。
+
+
+### 9.x P21 LLM 协议格式与提示缓存
+
+> 设计见 `docs/P21-LLM 协议格式与提示缓存.md`。不 bump `schema_version`。
+
+- **`api_format` / `prompt_cache` 是端点属性：按 section 生效，toml 段缺即默认，不回退 env、不跨 section 继承**。与 `temperature`（toml 缺则读 `LLM_TEMPERATURE`）有意不同：agentao 在 Chat Completions 上也会发 `cache_control`，不认它的网关会 400，开关漂到别的端点就是错配。env 只对 env 推断的房间默认生效，且按 `<PREFIX>_API_FORMAT` / `<PREFIX>_PROMPT_CACHE` 分——**不读 agentao CLI 的全局 `LLM_PROMPT_CACHE`**（桌面注入切 provider 后会残留）。
+- **取值白名单 chahua 自持、契约用例对齐 agentao 私有常量**（`API_FORMATS` / `PROMPT_CACHE_FORMATS`）；toml 非法 → `RoomConfigError`，env 非法 → `SystemExit`；`prompt_cache` 的 `off` / `none` / `false` / 空归一成 `None`。
+- **LLM 字段集单点 `LLM_TOML_FIELDS`**：`[[guest]]` 顶层白名单由它派生；新增字段必须走完「解析 → 写回（`_llm_spec_to_dict`）→ `room_info`（`_llm_summary`）→ 表单 `fill` / `read` / `changed`」闭环——漏 `read` 会让一次无关保存静默抹掉 toml 里的字段，漏 `changed` 会把「只改了它」判成未改。
+- **`set_llm_credentials` 的两字段语义同 `base_url`**：给则写 `<PREFIX>_*`、缺则 pop 同前缀残留（注入的凭证自洽）；非法值整帧拒；env 快照 / 回滚覆盖两键。
+- **上游调用失败不是发言**：agentao 对 provider 失败不抛异常，返回 `[LLM API error: …]` 作本轮文本（`status` 仍 ok）；`TeaGuest.speak` 读 `agent.last_turn.incomplete_reason == "llm_error"` 改走 error `message_end`、不进 transcript。读不到 `last_turn` 退回旧行为；其它 `incomplete_reason` 本期不动。

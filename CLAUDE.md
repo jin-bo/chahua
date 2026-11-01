@@ -48,7 +48,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 
 - `session.py` — 房间装配。CLI 与 server 共用 `build_room_session()`。
 - `config.py` — `room.toml` 解析，白名单严格（未知字段 `RoomConfigError`）。
-- `llm_spec.py` — `LLMSpec` 三入口（`from_env` / `try_from_env` / `from_toml`）+ `build_client()`。toml 强制 `model="<provider>/<model>"`，env 允许裸 model。各 section 走自己 spec，缺即 fallback 回房间默认。
+- `llm_spec.py` — `LLMSpec` 三入口（`from_env` / `try_from_env` / `from_toml`）+ `build_client()`。toml 强制 `model="<provider>/<model>"`，env 允许裸 model。各 section 走自己 spec，缺即 fallback 回房间默认。P21 起带端点属性 `api_format` / `prompt_cache`（透传 agentao `LLMClient`）。
 - `guest.py` — `TeaGuest`（包 `agentao.Agentao`）。`speak()` 外层 try/except/finally 保 `message_start`/`message_end` 成对，envelope 与 transcript 共享 message_id。P13 视觉：`speak(images_rel=())` → `resolve_images` → `arun(images=...)`，懒读现传。
 - `image_input.py` — P13 视觉 helper（server inbound 与 guest 共用）。`_normalize_share_image_rel`（纯校验）+ `resolve_images`（IO：normalize → symlink 围栏 → 读 bytes → base64+MIME）。限额 `from agentao.media_limits`。
 - `orchestrator.py` + `_orchestrator_{chain,handoff_drain,handoff_queue,managed_session,scoring,consts}.py` — 意愿打分主循环：并发打分 → 取 ≥ `want_threshold` 前 1~2 名发言 → 无人过阈值等用户；`@<名字>` 确定性路由不打分。5 个 slot 经 `_install_orchestrator_slots(orch)` 单点装配，公开 import 路径不动；主类保留 `_run_ai_chain` / `_intercept_task_proposal` 同名 method（供 monkeypatch / hook 取 bound method）。
@@ -82,7 +82,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 ### WebSocket 线协议
 
 - **下行**：每帧一条 JSON = `ChahuaEnvelope.to_dict()`。
-- **上行**：每帧一条 JSON，`type` 全集见 `server.py` 顶层 `_INBOUND_ROUTES`。未知 `type` WARN 后忽略；非 JSON / 二进制帧 → `close(UNSUPPORTED_DATA)`。`set_llm_credentials` 严格白名单 `{provider, model, base_url?, api_key}`，未知键 NOTICE error 丢帧（敏感帧不静默吞）。
+- **上行**：每帧一条 JSON，`type` 全集见 `server.py` 顶层 `_INBOUND_ROUTES`。未知 `type` WARN 后忽略；非 JSON / 二进制帧 → `close(UNSUPPORTED_DATA)`。`set_llm_credentials` 严格白名单 `{provider, model, base_url?, api_key, api_format?, prompt_cache?}`，未知键 NOTICE error 丢帧（敏感帧不静默吞）。
 
 ## 关键不变量
 
@@ -93,10 +93,12 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **`room.toml` 未知字段必报错**。typo 别静默吞。
 - **`[room].name` 跨房唯一**。envelope `room_id` 用 `room.name`，P9 前端据它分流前台/后台；同名让后台 envelope 污染前台。`create_room` / `update_room_toml` 拒重名。
 - **toml `model` 形如 `<provider>/<model>`**。首个 `/` 拆 provider，无 `/` → 错。CLI / dotenv 例外允许裸 model。
+- **P21 `api_format` / `prompt_cache` 是端点属性：按 section 生效，toml 段缺即默认，不回退 env、不跨 section 继承**；env 只认 `<PREFIX>_API_FORMAT` / `<PREFIX>_PROMPT_CACHE`（不读全局 `LLM_PROMPT_CACHE`）。LLM 字段集单点 `LLM_TOML_FIELDS`，新字段须走完「解析 → 写回 → room_info → 表单 fill/read/changed」闭环。`set_llm_credentials` 两字段同 `base_url` 语义（缺则 pop）。
+- **上游调用失败不是发言**：`agent.last_turn.incomplete_reason == "llm_error"` → error `message_end`、不进 transcript（agentao 不抛异常、把 `[LLM API error: …]` 当文本返回）。详见 `docs/P21-LLM 协议格式与提示缓存.md`。
 - **LLM section 整段写或整段不写**。`[room.llm]` / `[scoring]` / `[summary]` / `[[guest]]` all-or-nothing；fallback 走 section 级（缺整段回上一档），不做字段级 overlay。
 - **房间默认 LLM 两层 fallback**：`[room.llm]` → `LLMSpec.try_from_env()`，都缺 → 错。toml 显式配置时 env 完全忽略。
 - **API key 永不进 toml / envelope**。toml 最多写 `api_key_env`；envelope 只下发 `api_key_env` 名 + `api_key_ready` bool。
-- **P15 desktop 登录态注入 LLM 凭证：纯 env、绝不写 toml、绝不进日志**。`set_llm_credentials`（前台房专用，严格白名单 `{provider, model, base_url?, api_key}`）只改 `os.environ` → cancel 全前台 → `_replace_session` 热重建；改 env 前快照旧值，失败 / 异常逐个回滚 + 保留旧 session。粒度只动「房间默认」，显式 LLM section 钉住。raw key 只活在进程 environ（`api_key` 校验 `redact=True`；`base_url` 日志剥到 `scheme://host`）。启动期凭证是硬依赖：host 必须 spawn 前注入全套 LLM env。详见 `docs/P15-桌面登录态自动注入 LLM 配置.md` + `docs/INVARIANTS.md §P15`。
+- **P15 desktop 登录态注入 LLM 凭证：纯 env、绝不写 toml、绝不进日志**。`set_llm_credentials`（前台房专用，严格白名单 `{provider, model, base_url?, api_key, api_format?, prompt_cache?}`）只改 `os.environ` → cancel 全前台 → `_replace_session` 热重建；改 env 前快照旧值，失败 / 异常逐个回滚 + 保留旧 session。粒度只动「房间默认」，显式 LLM section 钉住。raw key 只活在进程 environ（`api_key` 校验 `redact=True`；`base_url` 日志剥到 `scheme://host`）。启动期凭证是硬依赖：host 必须 spawn 前注入全套 LLM env。详见 `docs/P15-桌面登录态自动注入 LLM 配置.md` + `docs/INVARIANTS.md §P15`。
 - **`[[guest.extra_mcp_servers]]` 自动信任，persona sidecar `mcp.json` 走 trust 门**。前者用户手写=意图；后者可能 GitHub 导入任意可执行须 UI 勾选。同名房间级覆盖 persona。
 - **isolation 切换不自动迁移记忆**。`isolation` 决定茶客 cwd；切换后旧路径 `.agentao/memory.db` / `sessions/` 原样保留。
 

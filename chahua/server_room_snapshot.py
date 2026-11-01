@@ -84,6 +84,9 @@ def _llm_summary(*, spec, source: LlmSource) -> dict:
         "api_key_env": api_key_env,
         "api_key_ready": api_key_ready,
         "temperature": spec.temperature,
+        # P21：端点属性原值；None = agentao 默认（Chat Completions / 不打缓存断点）。
+        "api_format": spec.api_format,
+        "prompt_cache": spec.prompt_cache,
         "source": source,
     }
 

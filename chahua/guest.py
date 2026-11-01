@@ -160,6 +160,19 @@ def _merged_mcp_configs(
     return merged
 
 
+def _is_llm_error_turn(agent: Any) -> bool:
+    """P21：agentao 最近一回合是否以上游调用失败收场（``incomplete_reason == "llm_error"``）。
+
+    读不到 / 形态不对一律 ``False`` —— 退回旧行为（当正常回复），判据缺失不该把真回答
+    判成失败。其它 incomplete_reason（no_output / max_iterations / …）不在本期范围。
+    """
+    try:
+        outcome = getattr(agent, "last_turn", None)
+        return getattr(outcome, "incomplete_reason", None) == "llm_error"
+    except Exception:
+        return False
+
+
 class TeaGuest:
     """一个茶客。持 :class:`Room` 引用 —— 写入 transcript / 合成 message_end 都从这里。"""
 
@@ -406,6 +419,14 @@ class TeaGuest:
                     _log.exception("%s.speak() failed", self.name)
                     # status 保持 STATUS_ERROR
                     self._emit_failure(STATUS_ERROR, str(e))
+                    return None
+
+                # P21：上游调用失败时 agentao 不抛异常，而是把 ``[LLM API error: …]`` 通知
+                # 当本轮文本返回（status 仍 ok）；``last_turn.incomplete_reason`` 才是判据。
+                # 这不是发言 —— 走 error message_end、不进 transcript（docs/P21 §4）。
+                if _is_llm_error_turn(self.agent):
+                    _log.warning("%s.speak(): upstream LLM call failed: %s", self.name, text)
+                    self._emit_failure(STATUS_ERROR, text)
                     return None
 
                 msg = self.room.append(
