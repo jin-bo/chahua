@@ -238,3 +238,22 @@ def test_emit_inflight_message_start_only_when_partial_empty():
     assert [e.type for e in captured] == [ChahuaEventType.MESSAGE_START]
     # task_id 为 None → message_start.data 不塞 task_id 键。
     assert captured[0].data == {}
+
+
+def test_emit_inflight_message_replays_live_status():
+    """P20.1：切回时茶客正在退避 / 压缩 → start + delta 之后补一帧 guest_status。"""
+    captured = []
+    status = {"state": "retrying", "retry": 2, "max_retries": 4}
+    snap = {
+        "turn_id": "turn_x", "message_id": "msg_x", "guest_name": "宝总",
+        "task_id": "task_x", "partial_text": "你好", "live_status": status,
+    }
+    _emit_inflight_message(_srv_with_inflight(snap), captured.append)
+    assert [e.type for e in captured] == [
+        ChahuaEventType.MESSAGE_START,
+        ChahuaEventType.MESSAGE_DELTA,
+        ChahuaEventType.GUEST_STATUS,
+    ]
+    last = captured[-1]
+    assert last.message_id == "msg_x" and last.turn_id == "turn_x"
+    assert last.data == {**status, "task_id": "task_x"}

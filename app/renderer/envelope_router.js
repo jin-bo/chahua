@@ -10,6 +10,7 @@
 //   message_*     → 流式气泡 起 / 增量 / 封口
 //   turn_end      → 清打分 + 收「停止」按钮
 //   task_* / handoff_* / managed_session_* → 各 feature 模块
+//   guest_status  → 进行中气泡的临时提示（P20.1）
 //   guest_thinking / tool_*  → 静默
 //
 // foregroundRoomId（当前前台房 envelope room_id）全封进模块：P9 后台房间里程碑据它
@@ -73,6 +74,7 @@ export function createEnvelopeRouter({
   proposalCard,
   startStreamingMessage,
   appendDelta,
+  applyLiveStatus,
   endStreamingMessage,
   appendBubble,
   // 「气泡后挂图片 / 下载链」live 路径：task_artifact_added 收到 originated_message_id
@@ -145,6 +147,10 @@ export function createEnvelopeRouter({
         return;
       case EventType.MESSAGE_END:
         endStreamingMessage(env);
+        return;
+      case EventType.GUEST_STATUS:
+        // P20.1：纯 UI hint，挂到进行中气泡；不进调试抽屉（P20 已有事后记录）。
+        applyLiveStatus(env);
         return;
       case EventType.TURN_END: {
         applyScores([]);

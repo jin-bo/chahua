@@ -20,6 +20,8 @@ export const EventType = Object.freeze({
   MESSAGE_END: "message_end",
   TURN_END: "turn_end",
   GUEST_THINKING: "guest_thinking",
+  // P20.1：茶客进行中的瞬态状态（retrying / compacting / idle），只挂进行中气泡。
+  GUEST_STATUS: "guest_status",
   TOOL_START: "tool_start",
   TOOL_COMPLETE: "tool_complete",
   NOTICE: "notice",

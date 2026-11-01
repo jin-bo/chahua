@@ -306,3 +306,24 @@ async def test_real_agentao_cancel_during_backoff_records_once(env_paths, fake_o
         assert _p20_disk_message(tmp_path)["llm_calls"] == calls
     finally:
         session.close()
+
+
+async def test_real_agentao_live_status_retry_then_idle(env_paths, fake_openai):
+    """P20.1 真栈：一次 429 → guest_status retrying，随后 idle，且都先于 message_end。"""
+    fake_openai.fail_script.append(0)
+    session = _build(env_paths)
+    envelopes = []
+    try:
+        guest = session.orchestrator.get_guest("宝总")
+        msg = await guest.speak("ctx", turn_id="turn_p201", sink=envelopes.append)
+        assert msg is not None
+        types = [e.type for e in envelopes]
+        statuses = [e for e in envelopes if e.type == ChahuaEventType.GUEST_STATUS]
+        assert [e.data["state"] for e in statuses] == ["retrying", "idle"], statuses
+        assert statuses[0].data["retry"] == 1
+        assert isinstance(statuses[0].data.get("reason"), str)
+        end_idx = types.index(ChahuaEventType.MESSAGE_END)
+        assert all(envelopes.index(e) < end_idx for e in statuses)
+        assert all(e.message_id == msg.message_id for e in statuses)
+    finally:
+        session.close()

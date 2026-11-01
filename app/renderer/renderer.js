@@ -10,6 +10,7 @@
 //   message_delta → 增量 append chunk 到 textEl
 //   message_end   → 按 status 封口（ok 收尾 / cancelled / error）
 //   turn_end      → 清 sidebar 上的打分
+//   guest_status  → 进行中气泡的临时提示（P20.1：正在重连… / 正在整理上下文…）
 //   guest_thinking / tool_*  → 静默
 //
 // 用户消息（renderer 自己 echo 的那条）不走 envelope path —— 直接 appendBubble。
@@ -295,6 +296,7 @@ const {
   appendBubble,
   startStreamingMessage,
   appendDelta,
+  applyLiveStatus,
   endStreamingMessage,
   clearInFlight,
   closeInFlightOnDisconnect,
@@ -782,6 +784,7 @@ const envelopeRouter = createEnvelopeRouter({
   proposalCard,
   startStreamingMessage,
   appendDelta,
+  applyLiveStatus,
   endStreamingMessage,
   appendBubble,
   attachArtifactByMessageId,
