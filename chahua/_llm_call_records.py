@@ -97,6 +97,16 @@ def _extract(data: dict, fields: tuple[tuple[str, str], ...]) -> dict[str, Any]:
     return {key: _clean(data[key], kind) for key, kind in fields if key in data}
 
 
+def clean_retry_fields(data: Any) -> dict[str, Any]:
+    """P20.1：``LLM_RETRY`` 载荷 → ``guest_status`` 的 retry 字段（与调用记录同一白名单 + 清洗）。
+
+    清洗后为 ``None`` 的键直接省略 —— 前端缺键即不显示，不必再判 null。
+    """
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in _extract(data, _RETRY_FIELDS).items() if v is not None}
+
+
 class LlmCallRecords:
     """一条消息的调用记录缓冲。
 

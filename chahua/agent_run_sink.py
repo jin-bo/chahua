@@ -49,6 +49,8 @@ _DROP: frozenset[ChahuaEventType] = frozenset({
     ChahuaEventType.MESSAGE_START,
     ChahuaEventType.MESSAGE_DELTA,
     ChahuaEventType.GUEST_THINKING,
+    # P20.1 实时状态提示：后台 run 不渲流式气泡，提示无处可挂。
+    ChahuaEventType.GUEST_STATUS,
     ChahuaEventType.TOOL_START,
     ChahuaEventType.TOOL_COMPLETE,
     ChahuaEventType.TURN_START,

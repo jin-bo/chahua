@@ -6,6 +6,7 @@
 ## [Unreleased]
 
 ### Added
+- **P20.1 茶客实时状态提示**（2026-10-31，详见 [`docs/P20.1-茶客实时状态提示.md`](docs/P20.1-茶客实时状态提示.md)）：茶客回复中遇到上游限流 / 5xx 退避重试时，进行中的气泡显示「正在重连…（第 n/m 次）」（悬停看原因），做上下文压缩时显示「正在整理上下文…」，状态结束即消失——此前这两种情况只有一个不动的光标，看着像卡死。新增 hint 型 envelope `guest_status`（`retrying` / `compacting` / `idle`），由 transport 从 agentao 的 `LLM_RETRY` / `COMPACTION_STARTED` 转译、对应结束事件补 `idle`；不落盘、不进调试记录，后台房与后台 run 不发，切回房间时随进行中消息补发；前端气泡收尾无条件清提示。不 bump `schema_version`，CLI 不显示。**验收**：全量测试绿（含真 agentao + 假 SSE 端点的 429 → retrying → idle 契约用例）；桌面壳接本地假端点实测提示出现、文本流出即消失、零控制台错误。**未验**：真实上游的压缩提示（只有单测与上游事件契约覆盖）。
 - **P20 茶客调用消耗取证**（2026-10-31，详见 [`docs/P20-茶客调用消耗取证.md`](docs/P20-茶客调用消耗取证.md)）：调试抽屉每条茶客消息下新增「模型调用（N）」——逐次显示用时、首字延迟、输入（其中缓存读）、输出（其中推理）、结束原因、重试与上下文压缩；turn 头部加「本轮茶客调用」合计。数据来自 agentao 0.5.18 的 `LLM_CALL_COMPLETED` / `LLM_RETRY` / `COMPACTION_SETTLED`，由 transport 缓冲、幂等 finalize 成快照，`message_end.data` 与 `debug/turns.jsonl` 同一份。**计量单位是一次主循环模型调用（含内部重试），不是 HTTP 请求**；只统计茶客 transport（打分 / 摘要 / 压缩摘要 / 后台 run 不计）；缓存 / 推理按「其中」显示不重复相加；未知、截断、旧记录混合都显式提示，不换算费用。不 bump `schema_version`，旧记录静默跳过。测试 1582 → 1607。
 
 ### Changed

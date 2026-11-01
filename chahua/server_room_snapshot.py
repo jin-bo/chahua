@@ -408,3 +408,11 @@ def _emit_inflight_message(server: "ChahuaServer", sink: EnvelopeSink) -> None:
             type=ChahuaEventType.MESSAGE_DELTA,
             data={"chunk": partial},
         ))
+    # P20.1：切回时茶客正在退避重试 / 整理上下文 → 补一帧 guest_status，气泡立刻有提示。
+    live = inflight.get("live_status")
+    if live:
+        sink(ChahuaEnvelope(
+            **common,
+            type=ChahuaEventType.GUEST_STATUS,
+            data={**live, "task_id": task_id} if task_id else dict(live),
+        ))

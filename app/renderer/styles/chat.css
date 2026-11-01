@@ -562,6 +562,24 @@
 }
 #messages li.error .bubble .status-tail { color: #c66; }
 
+/* P20.1 实时状态提示（正在重连… / 正在整理上下文…）—— 进行中气泡里光标之前的一行，
+   与 status-tail 同为 markdown 之外的元信息；呼吸式淡入淡出表示「还在进行」。 */
+.bubble .live-hint {
+  display: inline-block;
+  margin: 4px 0 0 6px;
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+  animation: chahua-live-hint-pulse 1.6s ease-in-out infinite;
+}
+.bubble .live-hint[data-state="retrying"] { color: #b8860b; }
+@keyframes chahua-live-hint-pulse {
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble .live-hint { animation: none; }
+}
+
 /* 空房间主视觉（hero）。#messages 无消息（:empty）时，用 `:has()` 把 #messages 收起、
    让 hero 接管同一聊天栏（splitter 之间）居中显示 —— 纯 CSS，零 JS。Electron 25 =
    Chrome 114 原生支持 `:has()`。logo 走同源 assets/，CSP img-src 'self' 放行。 */

@@ -38,7 +38,7 @@ from ._transport_artifact_attribution import (  # noqa: F401
     _MCP_TOOL_PREFIX,
 )
 from ._llm_call_records import HANDLED_EVENT_TYPES as _LLM_RECORD_EVENTS
-from ._llm_call_records import LlmCallRecords
+from ._llm_call_records import LlmCallRecords, clean_retry_fields
 from .debug_recorder import NOOP_RECORDER, TurnRecorder, classify_tool_source
 from .events import (
     NOOP_SINK,
@@ -58,6 +58,12 @@ _log = logging.getLogger(__name__)
 # + 当前 bind 的 sink，返回 ``True`` 表示「已处理，别再下发前端」（拦截）、``False``
 # 表示「照常 emit」。Orchestrator 注入 :meth:`Orchestrator._intercept_task_proposal`。
 TaskProposalHook = Callable[["ChahuaEnvelope", EnvelopeSink], bool]
+
+
+# P20.1 ``guest_status`` 的 state 取值（docs/P20.1-茶客实时状态提示.md §3）。
+LIVE_STATE_RETRYING = "retrying"
+LIVE_STATE_COMPACTING = "compacting"
+LIVE_STATE_IDLE = "idle"
 
 
 class ChahuaTransport(SdkTransport):
@@ -103,6 +109,8 @@ class ChahuaTransport(SdkTransport):
         # P20：本条消息的模型调用 / 重试 / 压缩记录缓冲。进 bind() 清零、出 bind() 不清
         # （speak 外层 finally 还要读），经幂等 :meth:`finalize_llm_records` 冻结成快照。
         self._llm_records = LlmCallRecords()
+        # P20.1：最近一次发出的非 idle ``guest_status``（不含 task_id）；bind 进入时清。
+        self._live_status: Optional[dict] = None
 
     def set_task_proposal_hook(self, hook: Optional[TaskProposalHook]) -> None:
         """注入 / 清除 ``TASK_PROPOSAL`` 拦截 hook（P8.3，docs §5.1）。
@@ -144,6 +152,7 @@ class ChahuaTransport(SdkTransport):
         self._recorder = recorder
         self._partial.clear()
         self._llm_records.reset()
+        self._live_status = None
         try:
             yield self
         finally:
@@ -206,6 +215,8 @@ class ChahuaTransport(SdkTransport):
             "guest_name": self._guest_name,
             "task_id": self._task_id,
             "partial_text": self.partial_text,
+            # P20.1：切回时补发 guest_status 用；None = 无进行中提示。
+            "live_status": self._live_status,
         }
 
     # ── 给上层 emit 用（message_start / message_end 走这里） ───────────────
@@ -290,6 +301,34 @@ class ChahuaTransport(SdkTransport):
     def _diff_baseline(self, value) -> None:
         self._attribution._diff_baseline = value
 
+    # ── P20.1 实时状态提示 ─────────────────────────────────────────────────
+
+    def _update_live_status(self, et: EventType, data: Any) -> None:
+        """retry / compaction 事件 → ``guest_status`` hint（docs/P20.1 §4 状态机）。
+
+        ``idle`` 只在当前确有对应状态时才发：无重试的 ``LLM_CALL_COMPLETED`` 与
+        不发 STARTED 的轻量压缩（只有 SETTLED）都零额外帧。message_end 时不补 idle ——
+        前端气泡收尾无条件清提示。
+        """
+        if et is EventType.LLM_RETRY:
+            self._set_live_status({"state": LIVE_STATE_RETRYING, **clean_retry_fields(data)})
+        elif et is EventType.COMPACTION_STARTED:
+            self._set_live_status({"state": LIVE_STATE_COMPACTING})
+        elif et is EventType.LLM_CALL_COMPLETED:
+            self._clear_live_status_if(LIVE_STATE_RETRYING)
+        elif et is EventType.COMPACTION_SETTLED:
+            self._clear_live_status_if(LIVE_STATE_COMPACTING)
+
+    def _set_live_status(self, status: dict) -> None:
+        self._live_status = status
+        self.emit_chahua(ChahuaEventType.GUEST_STATUS, status)
+
+    def _clear_live_status_if(self, state: str) -> None:
+        if self._live_status is None or self._live_status.get("state") != state:
+            return
+        self._live_status = None
+        self.emit_chahua(ChahuaEventType.GUEST_STATUS, {"state": LIVE_STATE_IDLE})
+
     # ── agentao 事件回调 ───────────────────────────────────────────────────
 
     def _handle(self, event: AgentEvent) -> None:
@@ -297,13 +336,19 @@ class ChahuaTransport(SdkTransport):
         et = event.type
         data = event.data
 
-        if et in _LLM_RECORD_EVENTS:
+        if et in _LLM_RECORD_EVENTS or et is EventType.COMPACTION_STARTED:
             # P20：只在 bind 内（有 message_id）记；记录失败永不影响消息流。
+            # P20.1：同一批事件再驱动实时状态提示；两者各自兜异常、互不影响。
             if self._message_id is not None:
+                if et in _LLM_RECORD_EVENTS:
+                    try:
+                        self._llm_records.on_event(et, data)
+                    except Exception:
+                        _log.warning("P20 llm record %s failed", et, exc_info=True)
                 try:
-                    self._llm_records.on_event(et, data)
+                    self._update_live_status(et, data)
                 except Exception:
-                    _log.warning("P20 llm record %s failed", et, exc_info=True)
+                    _log.warning("P20.1 live status %s failed", et, exc_info=True)
             return
 
         if et is EventType.LLM_TEXT:
@@ -405,8 +450,9 @@ class ChahuaTransport(SdkTransport):
             return
 
         # 其余事件（TURN_BEGIN/END、AGENT_START/END、MEMORY_*、SKILL_*、PERMISSION_*、
-        # LLM_CALL_STARTED/DELTA/IO、COMPACTION_STARTED、TOOL_OUTPUT/RESULT、ASK_USER_*、
+        # LLM_CALL_STARTED/DELTA/IO、TOOL_OUTPUT/RESULT、ASK_USER_*、
         # BACKGROUND_*、PLUGIN_HOOK_FIRED、MODEL_CHANGED、CONTEXT_COMPRESSED、
         # SESSION_SUMMARY_WRITTEN、TURN_START、TOOL_CONFIRMATION、READONLY_MODE_CHANGED 等）
         # —— 茶话室前端不关心，丢弃。（P20 起 LLM_CALL_COMPLETED / LLM_RETRY /
-        # COMPACTION_SETTLED 在函数开头进调用记录缓冲。）
+        # COMPACTION_SETTLED 在函数开头进调用记录缓冲；P20.1 起它们与 COMPACTION_STARTED
+        # 同时驱动 guest_status 实时提示。）

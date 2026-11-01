@@ -809,6 +809,26 @@ export function setStatusTail(bubble, text) {
   tail.textContent = text;
 }
 
+// P20.1 实时状态提示（「正在重连…」「正在整理上下文…」）：气泡内独立的 ``.live-hint``
+// 节点，与终态 ``.status-tail`` 分开 —— 实时提示随时会被清，不能误删终态尾巴。
+// 接在流式光标之后、同一行（inline-block）。``hint`` 为 null → 移除节点。
+export function setLiveHint(bubble, hint) {
+  let el = bubble.querySelector(":scope > .live-hint");
+  if (!hint) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("span");
+    el.className = "live-hint";
+    el.setAttribute("role", "status");
+    bubble.appendChild(el);
+  }
+  el.dataset.state = hint.state;
+  el.textContent = hint.text;
+  el.title = hint.title || "";
+}
+
 export function removeStreamingCursor(bubble) {
   bubble.querySelector(":scope > .streaming-cursor")?.remove();
 }

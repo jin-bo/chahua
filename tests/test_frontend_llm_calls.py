@@ -1,7 +1,7 @@
-"""P20：把 ``app/renderer/llm_calls_core.test.mjs`` 接进 ``uv run pytest``。
+"""P20 / P20.1：把 ``llm_calls_core.test.mjs`` / ``live_status_core.test.mjs`` 接进 ``uv run pytest``。
 
 沿 ``tests/test_frontend_flint.py`` 先例（本仓无 CI，``uv run pytest`` 是唯一常跑的门）。
-``llm_calls_core.mjs`` 零 npm 依赖，所以只在没装 node 时 skip，不查 ``app/node_modules``。
+两个 ``.mjs`` 都零 npm 依赖，所以只在没装 node 时 skip，不查 ``app/node_modules``。
 """
 
 from __future__ import annotations
@@ -13,15 +13,16 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEST_FILE = REPO_ROOT / "app" / "renderer" / "llm_calls_core.test.mjs"
+RENDERER = REPO_ROOT / "app" / "renderer"
 
 
-def test_llm_calls_core_node_suite() -> None:
+@pytest.mark.parametrize("name", ["llm_calls_core.test.mjs", "live_status_core.test.mjs"])
+def test_renderer_core_node_suite(name: str) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("未安装 node —— 前端用例只在有 node 的环境跑（打包与开发环境必有）")
     proc = subprocess.run(
-        [node, "--test", str(TEST_FILE)],
+        [node, "--test", str(RENDERER / name)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

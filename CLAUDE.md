@@ -266,6 +266,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **计量单位 = 一次主循环模型调用（agentao 一次 `chat_stream`，重试在其内部），不是 HTTP 请求**；`duration_ms` 含重试与退避，usage 只来自最终响应。范围只含茶客 transport：打分 / 摘要 / 上游压缩摘要 / 后台 run 不计，UI 只叫「茶客调用」。
 - **缓存 / 推理是输入 / 输出的「其中」，合计绝不再加**；`null` 与缺键都算未知，上游 `0` 不当确认零展示；输入、输出各自判完整性，截断与旧记录混合必须显式提示。口径单点 `app/renderer/llm_calls_core.mjs::summarizeLlmCalls`。不换算费用。
 - **transport 单一缓冲 + 幂等 `finalize_llm_records()` 冻结快照**：发 `message_end` 前 finalize，speak 外层 finally 再取同一份给 recorder；冻结后事件丢弃；取消占位只在首次 finalize 生成；缓冲加锁（`on_event` 在 agentao 工作线程）。`message_end` 只在 `recorder.enabled` 时带记录（bg run / debug 关闭的房间不带，保 envelope == 磁盘）。白名单抽取 + 单消息上限（64/8/8）→ `llm_records_truncated`。记录失败永不影响发言。不 bump `schema_version`。
+- **P20.1 `guest_status` 实时提示是纯 UI hint**（`docs/P20.1-茶客实时状态提示.md`）：transport 把 `LLM_RETRY` / `COMPACTION_STARTED` 转成 `retrying` / `compacting`，对应结束事件仅在确有该状态时补 `idle`；不落盘、不进 debug、后台房与 bg run 不发。**前端气泡收尾无条件清提示，不依赖 idle 必达**。
 
 ### 只读长期记忆（GuanLan MCP，P17）
 

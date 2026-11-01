@@ -246,3 +246,12 @@
 - **白名单抽取 + 类型清洗 + 单消息上限**（64 调用 / 每调用 8 重试 / 8 压缩，任一超限置 `llm_records_truncated`）。上游新增键不自动透传；bool 不当 int；非有限数（NaN / inf）落 `None`（否则写出非法 JSON 整帧丢失）；字符串一律截 `MAX_STR_LEN=300`。合计里的缓存 / 推理只随父项（输入 / 输出已知的调用）一起计。
 - **已知缺口：取消后晚到的事件可能混进下一条消息**。agentao `arun` 被取消时最多等工作线程清理 `_ARUN_CANCEL_CLEANUP_TIMEOUT_S=5s`，超时则旧回合在后台续跑；其晚到的 `LLM_*` 事件会落进同茶客下一次 `bind()` 的缓冲。影响面窄（旧回合未完时同 agent 的新回合会被拒 `TurnInProgressError`），与 P10 工具归属的同类竞态一并接受；根治需上游事件携带回合标识。
 - **`llm_calls` 只由 transport 快照写入，缺键 = 无记录**。`record_message_start` 不初始化；正常发言的快照必带 `llm_calls`（可为 `[]` = 确认 0 次），快照失败（speak 退化成 `{}`）或调用方没传快照则缺键，与实时 `message_end` 同记「无记录」，绝不冒充「0 次调用」；前端实时 `undefined`=进行中静默、`null`=无记录。**记录失败永不影响发言**（transport `_handle` 与 `TeaGuest._llm_records_snapshot` 都 try/except 到底，后者退化成 `{}`）。
+
+### 9.x P20.1 茶客实时状态提示
+
+> 设计见 `docs/P20.1-茶客实时状态提示.md`。新增 hint 型 envelope `guest_status`，不 bump `schema_version`。
+
+- **`guest_status` 是纯 UI hint**：不落盘、不进 transcript / debug（P20 已有事后记录）、不影响消息状态，`message_end.status` 仍是边界 truth。CLI 不显示。
+- **状态机在 transport，与 P20 记录共用同一批事件、各自兜异常**：`LLM_RETRY` → `retrying`（白名单清洗，与调用记录同一套 `_RETRY_FIELDS`）、`COMPACTION_STARTED` → `compacting`；`LLM_CALL_COMPLETED` / `COMPACTION_SETTLED` 只在当前确有对应状态时补 `idle`（无重试的调用、不发 STARTED 的轻量压缩零额外帧）。只在 `bind()` 内发，进 `bind()` 清状态。
+- **前端气泡收尾无条件清提示，不依赖 `idle` 必达**（取消 / 出错 / 断线都可能没有 idle）；有文本 delta 到达即清 `retrying`（idle 要等整段流完才到）。提示节点 `.live-hint` 与终态 `.status-tail` 分开。
+- **后台不发**：不进后台房白名单，bg run `BatchMessageSink` 显式 drop。切回房间时 `inflight_snapshot().live_status` 由 `_emit_inflight_message` 在 start + delta 之后补一帧。

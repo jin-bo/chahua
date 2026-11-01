@@ -40,6 +40,7 @@ def test_inflight_snapshot_while_bound() -> None:
         "guest_name": "宝总",
         "task_id": "task_a",
         "partial_text": "",
+        "live_status": None,
     }
 
 

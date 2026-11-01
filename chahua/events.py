@@ -20,7 +20,7 @@ agentao 的原生 :class:`agentao.transport.AgentEvent` **不带** 这些字段�
 - ``turn_start`` / ``turn_end``：orchestrator 合成；turn 对应一次 pick（top-1~2 抢话）。
 - ``message_start`` / ``message_end``：``TeaGuest.speak()`` 的 ``try / except / finally``
   外层合成 —— 保证 start 必有 end（status 三选一）。
-- ``message_delta`` / ``guest_thinking`` / ``tool_start`` / ``tool_complete``：
+- ``message_delta`` / ``guest_thinking`` / ``guest_status`` / ``tool_start`` / ``tool_complete``：
   ``ChahuaTransport`` 从对应 agentao 事件转译。
 
 **turn_id 可空**：从 P3.2.2 起，连接级事件（``room_info`` 等）``turn_id=None``；
@@ -63,6 +63,12 @@ class ChahuaEventType(str, Enum):
     MESSAGE_END = "message_end"
     TURN_END = "turn_end"
     GUEST_THINKING = "guest_thinking"
+    # P20.1：茶客进行中的瞬态状态 hint —— data ``{state: "retrying"|"compacting"|"idle", ...}``
+    # （retrying 附 retry / max_retries / delay_s / reason，白名单清洗）。``ChahuaTransport``
+    # 从 ``LLM_RETRY`` / ``COMPACTION_STARTED`` 转译、对应结束事件补 ``idle``。纯 UI hint：
+    # 不落盘、不进 transcript / debug；后台房白名单与 bg run sink 都丢弃。
+    # 前端在气泡收尾时无条件清提示，不依赖 ``idle`` 必达。docs/P20.1-茶客实时状态提示.md。
+    GUEST_STATUS = "guest_status"
     TOOL_START = "tool_start"
     TOOL_COMPLETE = "tool_complete"
     # 服务端 → 前端的一次性短消息（含 level=info/error 与 text）。给 persona 导入这类

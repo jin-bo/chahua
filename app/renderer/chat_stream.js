@@ -21,8 +21,10 @@ import {
   removeStreamingCursor,
   renderGuestText,
   renderMarkdown,
+  setLiveHint,
   setStatusTail,
 } from "./chat_view.js";
+import { describeLiveStatus, LIVE_STATE_RETRYING } from "./live_status_core.mjs";
 
 export function createChatStream({
   messagesEl,
@@ -173,7 +175,8 @@ export function createChatStream({
     afterAppendMessage(li);
     // accumulated 累积完整 markdown 源 —— 每个 delta 整段重渲 innerHTML，
     // 因为 markdown 局部 patch（增量解析 + DOM diff）实现成本远大于聊天量级的全渲耗时。
-    const entry = { textEl, li, bubble, accumulated: "" };
+    // liveState：当前实时提示的 state（P20.1）；null = 无提示。
+    const entry = { textEl, li, bubble, accumulated: "", liveState: null };
     inFlight.set(messageId, entry);
     // 闭包持 entry 引用，click 时读最新 accumulated（流式过程中也能复制到当前为止的全部）。
     attachCopyButton(bubble, () => entry.accumulated);
@@ -201,6 +204,12 @@ export function createChatStream({
       });
     }
     if (!chunk) return;
+    // P20.1：重试成功后文本已开始流 → 立即清「正在重连…」，不等 LLM_CALL_COMPLETED 那帧 idle
+    // （它在整段流完才到）。压缩期间不会有 delta，compacting 提示不受影响。
+    if (m.liveState === LIVE_STATE_RETRYING) {
+      m.liveState = null;
+      setLiveHint(m.bubble, null);
+    }
     m.accumulated += chunk;
     // 选区在 textEl 内 → 跳渲，让用户的拖选 / Cmd+C 不被擦；下一个 chunk 来时如果选区
     // 已解除，会一次性追上累积差额（accumulated 全量重渲）。
@@ -208,6 +217,16 @@ export function createChatStream({
     stickToBottom(() => {
       m.textEl.innerHTML = renderMarkdown(m.accumulated);
     });
+  }
+
+  // P20.1：guest_status hint → 进行中气泡的临时提示。找不到 in-flight 气泡（未建流式
+  // 气泡 / 已收尾）就忽略 —— 提示只对进行中的消息有意义。
+  function applyLiveStatus(env) {
+    const m = inFlight.get(env.message_id);
+    if (!m) return;
+    const hint = describeLiveStatus(env.data);
+    m.liveState = hint ? hint.state : null;
+    stickToBottom(() => setLiveHint(m.bubble, hint));
   }
 
   function statusTail(env) {
@@ -253,6 +272,8 @@ export function createChatStream({
     const finalText = typeof serverText === "string" ? serverText : m.accumulated;
     stickToBottom(() => {
       removeStreamingCursor(m.bubble);
+      // P20.1：气泡收尾无条件清实时提示 —— 取消 / 出错时后端不会补 idle。
+      setLiveHint(m.bubble, null);
       // 仅 OK 时消息已落 transcript，请审按钮此刻才有合法锚点（见 makeGuestRow）；
       // cancelled/error 的 message_id 不进 transcript，挂了点击必被 server 拒。
       if (env.status === Status.OK) {
@@ -303,6 +324,7 @@ export function createChatStream({
     if (inFlight.size === 0) return;
     for (const m of inFlight.values()) {
       removeStreamingCursor(m.bubble);
+      setLiveHint(m.bubble, null);
       m.li.classList.add("error");
       setStatusTail(m.bubble, "[连接断开]");
     }
@@ -424,6 +446,7 @@ export function createChatStream({
     appendBubble,
     startStreamingMessage,
     appendDelta,
+    applyLiveStatus,
     endStreamingMessage,
     clearInFlight,
     closeInFlightOnDisconnect,
