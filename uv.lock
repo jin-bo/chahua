@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentao"
-version = "0.5.3"
+version = "0.5.18"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -23,9 +23,9 @@ dependencies = [
     { name = "tree-sitter", marker = "sys_platform == 'win32'" },
     { name = "tree-sitter-powershell", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/69/80c97d2081fd036bae91646c1a30b8b05e5deeca0a074dc16ac9d37de52d/agentao-0.5.3.tar.gz", hash = "sha256:c24b540be9b58d88ac8f22eaf661b177251cd1495d0ddfc03f249e17ad1392bd", size = 1287464, upload-time = "2026-09-19T16:16:12.918Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/9c/6f02172b58a839e133a23efc79838a0835d00403cb388b573544620c7961/agentao-0.5.18.tar.gz", hash = "sha256:41415603d9e85096dd4feecfedad127c3b07767811c0e9a89cae4f1d03952eb2", size = 1628155, upload-time = "2026-10-29T16:13:14.828Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/98/8c028c25fb4a5e398e56328761049dab0becd1883c0acd19820c2248f4e7/agentao-0.5.3-py3-none-any.whl", hash = "sha256:257eb1bc22a2f91ebcaa64e8a0af97ebc08a901f9ac97a1219dc530556f14bb8", size = 1166464, upload-time = "2026-09-19T16:16:11.18Z" },
+    { url = "https://files.pythonhosted.org/packages/36/6d/fb7682c89c80102902eed478ee815e6310742f5aac32fdaccce916a43ff0/agentao-0.5.18-py3-none-any.whl", hash = "sha256:104db8e9ab5d5dacc0fc96dca069708f9b29314b8a2df1e66d37bc54050cd921", size = 1470471, upload-time = "2026-10-29T16:13:12.578Z" },
 ]
 
 [[package]]
@@ -174,7 +174,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentao", specifier = ">=0.5.3,<0.6" },
+    { name = "agentao", specifier = ">=0.5.18,<0.6" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "websockets", specifier = ">=13" },
 ]
