@@ -428,3 +428,45 @@
   color: #999;
   font-variant-numeric: tabular-nums;
 }
+
+/* P20 茶客调用消耗取证：turn 合计条 + 每条消息的模型调用列表。 */
+.debug-turn-llm {
+  margin-bottom: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #4a4a4a;
+  background: #f1ede0;
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.debug-llm-label {
+  font-size: 10px;
+  color: #999;
+  margin: 6px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+.debug-llm-note {
+  font-size: 11px;
+  color: #8a6a20;
+}
+.debug-llm-calls {
+  list-style: none;
+  margin: 4px 0 6px;
+  padding: 0;
+}
+.debug-llm-call {
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #fbf8ee;
+  border: 1px solid #ece4cf;
+  margin-bottom: 3px;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+.debug-llm-call[data-status="error"]     { background: #f6e9e9; border-color: #e6d4d4; color: #8a4040; }
+.debug-llm-call[data-status="cancelled"] { background: #ececec; border-color: #dcdcdc; color: #6a6a6a; }
+.debug-llm-retries {
+  margin-top: 2px;
+  color: #8a6a20;
+}

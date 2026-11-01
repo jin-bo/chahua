@@ -37,6 +37,8 @@ from ._transport_artifact_attribution import (  # noqa: F401
     _SHELL_TOOL_NAME,
     _MCP_TOOL_PREFIX,
 )
+from ._llm_call_records import HANDLED_EVENT_TYPES as _LLM_RECORD_EVENTS
+from ._llm_call_records import LlmCallRecords
 from .debug_recorder import NOOP_RECORDER, TurnRecorder, classify_tool_source
 from .events import (
     NOOP_SINK,
@@ -98,6 +100,9 @@ class ChahuaTransport(SdkTransport):
             share_dir=share_dir,
             tasks_store=tasks_store,
         )
+        # P20：本条消息的模型调用 / 重试 / 压缩记录缓冲。进 bind() 清零、出 bind() 不清
+        # （speak 外层 finally 还要读），经幂等 :meth:`finalize_llm_records` 冻结成快照。
+        self._llm_records = LlmCallRecords()
 
     def set_task_proposal_hook(self, hook: Optional[TaskProposalHook]) -> None:
         """注入 / 清除 ``TASK_PROPOSAL`` 拦截 hook（P8.3，docs §5.1）。
@@ -138,6 +143,7 @@ class ChahuaTransport(SdkTransport):
         self._task_id = task_id
         self._recorder = recorder
         self._partial.clear()
+        self._llm_records.reset()
         try:
             yield self
         finally:
@@ -159,6 +165,15 @@ class ChahuaTransport(SdkTransport):
     def partial_text(self) -> str:
         """已收到的 chunk 拼接结果。speak() 在 error/cancel 路径上用。"""
         return "".join(self._partial)
+
+    def finalize_llm_records(self) -> dict:
+        """P20：冻结并返回本条消息的调用记录快照（幂等，返回深拷贝）。
+
+        形如 ``{"llm_calls": [...], "compactions"?: [...], "llm_records_truncated"?: True}``。
+        成功路径 / ``_emit_failure`` 在发 ``message_end`` **之前**调，speak 外层 finally
+        再调一次拿同一份给 recorder —— 两端口径一致（docs/P20 §5）。
+        """
+        return self._llm_records.finalize()
 
     @property
     def guest_name(self) -> str:
@@ -282,6 +297,15 @@ class ChahuaTransport(SdkTransport):
         et = event.type
         data = event.data
 
+        if et in _LLM_RECORD_EVENTS:
+            # P20：只在 bind 内（有 message_id）记；记录失败永不影响消息流。
+            if self._message_id is not None:
+                try:
+                    self._llm_records.on_event(et, data)
+                except Exception:
+                    _log.warning("P20 llm record %s failed", et, exc_info=True)
+            return
+
         if et is EventType.LLM_TEXT:
             chunk = data.get("chunk", "")
             if not chunk:
@@ -381,6 +405,8 @@ class ChahuaTransport(SdkTransport):
             return
 
         # 其余事件（TURN_BEGIN/END、AGENT_START/END、MEMORY_*、SKILL_*、PERMISSION_*、
-        # LLM_CALL_*、TOOL_OUTPUT/RESULT、ASK_USER_*、BACKGROUND_*、PLUGIN_HOOK_FIRED、
-        # MODEL_CHANGED、CONTEXT_COMPRESSED、SESSION_SUMMARY_WRITTEN、TURN_START、
-        # TOOL_CONFIRMATION、READONLY_MODE_CHANGED 等）—— 茶话室前端不关心，丢弃。
+        # LLM_CALL_STARTED/DELTA/IO、COMPACTION_STARTED、TOOL_OUTPUT/RESULT、ASK_USER_*、
+        # BACKGROUND_*、PLUGIN_HOOK_FIRED、MODEL_CHANGED、CONTEXT_COMPRESSED、
+        # SESSION_SUMMARY_WRITTEN、TURN_START、TOOL_CONFIRMATION、READONLY_MODE_CHANGED 等）
+        # —— 茶话室前端不关心，丢弃。（P20 起 LLM_CALL_COMPLETED / LLM_RETRY /
+        # COMPACTION_SETTLED 在函数开头进调用记录缓冲。）

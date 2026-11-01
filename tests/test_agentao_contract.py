@@ -32,6 +32,19 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(body)  # type: ignore[attr-defined]
+        # P20：脚本化的可重试错误（429 + Retry-After），弹完再正常回复；
+        # ``fail_forever`` 让每次都 429（退避期间取消用）。
+        fail = self.server.fail_script  # type: ignore[attr-defined]
+        if fail or self.server.fail_forever is not None:  # type: ignore[attr-defined]
+            retry_after = fail.pop(0) if fail else self.server.fail_forever  # type: ignore[attr-defined]
+            raw = json.dumps({"error": {"message": "slow down", "type": "rate_limit"}}).encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(retry_after))
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         base = {"id": "chatcmpl-p19", "object": "chat.completion.chunk",
                 "created": 0, "model": body.get("model", "m")}
         if not body.get("stream"):
@@ -68,6 +81,10 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
             for chunk in _REPLY_CHUNKS:
                 _delta({"content": chunk})
             _delta({}, "stop")
+        usage = self.server.usage  # type: ignore[attr-defined]
+        if usage is not None:
+            # stream_options.include_usage 的末尾纯 usage 帧（choices 为空）
+            self.wfile.write(_sse({**base, "choices": [], "usage": usage}))
         self.wfile.write(b"data: [DONE]\n\n")
 
 @pytest.fixture
@@ -75,6 +92,9 @@ def fake_openai(monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenAIHandler)
     server.requests = []  # type: ignore[attr-defined]
     server.tool_script = []  # type: ignore[attr-defined]
+    server.fail_script = []  # type: ignore[attr-defined]  # 每项 = Retry-After 秒数
+    server.fail_forever = None  # type: ignore[attr-defined]  # 非 None = 恒 429 的 Retry-After
+    server.usage = None  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     # 本机若配了 HTTP(S)_PROXY，httpx 会把 127.0.0.1 也送去代理 → 假端点收不到请求
@@ -185,5 +205,104 @@ async def test_real_agentao_readonly_guest_blocks_write(env_paths, fake_openai, 
         assert len(tool_msgs) == 1
         denial = tool_msgs[0]["content"].lower()
         assert "read-only" in denial or "denied" in denial, denial
+    finally:
+        session.close()
+
+
+# ── P20：调用记录真依赖契约（docs/P20 §8 第 11–12 条） ─────────────────────────
+
+_USAGE = {
+    "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290,
+    "prompt_tokens_details": {"cached_tokens": 1024},
+}
+
+
+def _p20_recorder(guest, tmp_path):
+    from chahua.debug_recorder import TurnRecorder
+
+    rec = TurnRecorder(tmp_path / "p20", enabled=True, capture_prompts=False)
+    rec.start_turn(turn_id="turn_p20", task_id=None,
+                   trigger={"kind": "user_msg", "ref_seq": 0})
+    guest._recorder = rec
+    return rec
+
+
+def _p20_disk_message(tmp_path):
+    from chahua._persist import read_jsonl_skip_bad
+
+    rows = list(read_jsonl_skip_bad(tmp_path / "p20" / "debug" / "turns.jsonl"))
+    assert len(rows) == 1
+    return rows[0]["messages"][0]
+
+
+def _message_end(envelopes):
+    ends = [e for e in envelopes if e.type == ChahuaEventType.MESSAGE_END]
+    assert len(ends) == 1
+    return ends[0]
+
+
+async def test_real_agentao_llm_call_usage_and_retry(env_paths, fake_openai, tmp_path):
+    """真栈：一次 429 重试后成功 + 工具轮 → 两次主循环调用；usage 字段名与上游一致。"""
+    fake_openai.usage = _USAGE
+    fake_openai.fail_script.append(0)
+    fake_openai.tool_script.append(("task_list_artifacts", {}))
+    session = _build(env_paths)
+    envelopes = []
+    try:
+        guest = session.orchestrator.get_guest("宝总")
+        rec = _p20_recorder(guest, tmp_path)
+        msg = await guest.speak("ctx", turn_id="turn_p20", sink=envelopes.append)
+        assert msg is not None
+        rec.flush_turn()
+
+        calls = _message_end(envelopes).data["llm_calls"]
+        # 3 次 HTTP（429 + 工具轮 + 收尾）= 2 次主循环调用：重试在 chat_stream 内部
+        assert len(fake_openai.requests) == 3
+        assert len(calls) == 2, calls
+        first, second = calls
+        assert first["status"] == "ok" and first["finish_reason"] == "tool_calls"
+        assert len(first["retries"]) == 1
+        assert first["retries"][0]["retry"] == 1
+        assert "retries" not in second
+        for call in calls:
+            assert call["prompt_tokens"] == 1234
+            assert call["completion_tokens"] == 56
+            assert call["cache_read_tokens"] == 1024  # prompt_tokens 的组成部分
+        assert _p20_disk_message(tmp_path)["llm_calls"] == calls
+    finally:
+        session.close()
+
+
+async def test_real_agentao_cancel_during_backoff_records_once(env_paths, fake_openai, tmp_path):
+    """退避期间取消：该调用只记一次（上游 error COMPLETED 吸收重试，或占位，二者不并存）。"""
+    import asyncio
+
+    fake_openai.fail_forever = 30  # Retry-After 30s：取消必然落在退避等待里
+    session = _build(env_paths)
+    envelopes = []
+    try:
+        guest = session.orchestrator.get_guest("宝总")
+        rec = _p20_recorder(guest, tmp_path)
+        task = asyncio.create_task(
+            guest.speak("ctx", turn_id="turn_p20", sink=envelopes.append)
+        )
+        for _ in range(200):
+            if fake_openai.requests:
+                break
+            await asyncio.sleep(0.02)
+        assert fake_openai.requests, "LLM 端点没收到请求"
+        await asyncio.sleep(0.3)  # 让 429 回到客户端、进入退避
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=15)
+        rec.flush_turn()
+
+        end = _message_end(envelopes)
+        assert end.status == "cancelled"
+        calls = end.data["llm_calls"]
+        assert len(calls) == 1, calls
+        assert calls[0]["status"] in ("error", "cancelled")
+        assert len(calls[0]["retries"]) >= 1
+        assert _p20_disk_message(tmp_path)["llm_calls"] == calls
     finally:
         session.close()

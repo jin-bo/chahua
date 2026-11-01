@@ -66,7 +66,7 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - `context_renderer.py` + `artifact_detector.py` — 前者输出 6+1 块 XML（`<room>` / `<user_persona>` / `<room_summary>` / `<current_task>` / `<order_hint>` / `<recent_messages>` / `<speak_instruction>`），`quoteattr` 防注入。后者每 pick 周期扫 active artifacts diff `_seen_artifacts`，emit `task_artifact_added` + 重发 `task_info`。
 - `user_md.py` — USER.md（用户角色卡）解析，三级回退：`[room].user_md` 显式路径 → `rooms/<id>/USER.md` → 仓库顶层；`<user_persona>` 块取数来源。
 - `persona_summary.py` — persona 能力摘要 LLM 生成 + 内容寻址缓存（`<hash>.json`）。三级解析（手写 `summary` → 缓存 → None）；失败 WARN 不阻断。
-- `debug_recorder.py` — P6 取证落盘。`TurnRecorder` 由 orchestrator / guest / transport_bridge 三处喂。`max_turns=500` rotation 按 turn_id 整组删，`_turn_count` 内存维护永不重测盘。rotation 失败永不阻断房间。
+- `debug_recorder.py` — P6 取证落盘（P20 起 message 条目带 `llm_calls`，由 `_llm_call_records.py` 经 transport 缓冲供数）。`TurnRecorder` 由 orchestrator / guest / transport_bridge 三处喂。`max_turns=500` rotation 按 turn_id 整组删，`_turn_count` 内存维护永不重测盘。rotation 失败永不阻断房间。
 - `server_room_snapshot.py` — `emit_room_snapshot` 单点装配：`emit_room_info` / `emit_room_history` / `_emit_task_info` / 末尾补 MTS 快照。`turns_index` 严格 `enabled=True` 才挂；`rooms_available` 每房带 `busy=busy_alive()`；P11 加 `background_runs`。
 - `persona_import.py` — 本地 / GitHub 导入 persona 包 + P12.6 provenance 生命周期。provenance 落 `.chahua-source.json`；`update_persona(force=)` 走 `_replace_dir_atomic` 原子 swap。`_GitHubError` 子类 `PersonaImportError` 带 `.code` 分流 404/403。
 - `persona_assets.py` + `trust.py` — persona sibling `mcp.json` + `skills/` 装载；MCP 走信任门（`persona-trust.json` + UI popover）。skills 软链 + copytree 兜底。
@@ -258,6 +258,14 @@ Electron main (Node)  ─ spawn ─→  chahua-server (Python sidecar)
 - **正式构建不读同级 `../agentao`**；联调须显式 `CHAHUA_AGENTAO_SOURCE=` opt-in，进指纹 + manifest 记 commit/dirty。
 - **缓存判据是构建指纹不是"文件存在"**（锁文件 / chahua 构建输入 / python 版本 / OS·架构 / 脚本自身 / agentao 来源）；**`bundle-manifest.json` 只在 `pip check` + 版本断言 + sidecar 启动全过后才写**，半截产物永不命中缓存。删旧 bundle 前先 `uv lock --check`。
 - **出包必过 `npm run check:bundle`**：`agentaoSource=="lock"` ∧ agentao 版本 == 锁定版 ∧ bundle 内 chahua 版本与 `app/package.json` 同版（`-dev` ↔ `.dev0` 归一化，只去一半后缀也拦）。挂 `build:mac{,:arm64,:x64}` / `build:win`；**`build:dir` 不挡**。
+
+### 茶客调用消耗取证（P20）
+
+承重契约见 `docs/P20-茶客调用消耗取证.md` + `docs/INVARIANTS.md §9.x P20`，改不变量两处同步。
+
+- **计量单位 = 一次主循环模型调用（agentao 一次 `chat_stream`，重试在其内部），不是 HTTP 请求**；`duration_ms` 含重试与退避，usage 只来自最终响应。范围只含茶客 transport：打分 / 摘要 / 上游压缩摘要 / 后台 run 不计，UI 只叫「茶客调用」。
+- **缓存 / 推理是输入 / 输出的「其中」，合计绝不再加**；`null` 与缺键都算未知，上游 `0` 不当确认零展示；输入、输出各自判完整性，截断与旧记录混合必须显式提示。口径单点 `app/renderer/llm_calls_core.mjs::summarizeLlmCalls`。不换算费用。
+- **transport 单一缓冲 + 幂等 `finalize_llm_records()` 冻结快照**：发 `message_end` 前 finalize，speak 外层 finally 再取同一份给 recorder；冻结后事件丢弃；取消占位只在首次 finalize 生成；缓冲加锁（`on_event` 在 agentao 工作线程）。`message_end` 只在 `recorder.enabled` 时带记录（bg run / debug 关闭的房间不带，保 envelope == 磁盘）。白名单抽取 + 单消息上限（64/8/8）→ `llm_records_truncated`。记录失败永不影响发言。不 bump `schema_version`。
 
 ### 只读长期记忆（GuanLan MCP，P17）
 

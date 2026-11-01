@@ -94,6 +94,9 @@ _INDEX_PROJECTION_FIELDS: tuple[str, ...] = (
     "n_messages",
 )
 
+# P20：message 条目上由 transport 调用记录快照填的键（docs/P20 §4.1）。
+_LLM_RECORD_KEYS: tuple[str, ...] = ("llm_calls", "compactions", "llm_records_truncated")
+
 # room_history 下发的 turns_index 硬上限（docs/P6.3 §5.2）。超出仅下最新 N 条，
 # 让单帧 ws ~300KB（1000 × 300B）。更老的从盘上 grep，不开"翻页"协议。
 TURNS_INDEX_HARD_CAP = 1000
@@ -376,6 +379,8 @@ class TurnRecorder:
                 "seq": None,
                 "tool_calls": [],
                 "artifact_paths": [],
+                # P20：``llm_calls`` 不在这里初始化——只由 record_message_end 的 transport
+                # 快照写入，缺键 = 无记录（快照失败 / 调用方没传），绝不冒充「0 次调用」。
             }
             if images_rel:
                 entry["images_rel"] = list(images_rel)
@@ -513,10 +518,14 @@ class TurnRecorder:
         message_id: str,
         status: str,
         seq: Optional[int],
+        llm_records: Optional[dict[str, Any]] = None,
     ) -> None:
         """记一位茶客发言结束 —— 覆写 status / seq。
 
         TeaGuest.speak 的 ``finally`` 块单点调用；``status ∈ {ok, cancelled, error}``。
+
+        P20：``llm_records`` 是 ``ChahuaTransport.finalize_llm_records()`` 的快照
+        （与 ``message_end.data`` 同一份）；只取 :data:`_LLM_RECORD_KEYS` 三个键。
         """
         if not self.enabled or self._current is None:
             return
@@ -530,6 +539,10 @@ class TurnRecorder:
                 )
             msg["status"] = status
             msg["seq"] = seq
+            if isinstance(llm_records, dict):
+                for key in _LLM_RECORD_KEYS:
+                    if key in llm_records:
+                        msg[key] = llm_records[key]
         except Exception:
             _log.warning(
                 "TurnRecorder.record_message_end failed", exc_info=True
