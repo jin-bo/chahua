@@ -412,9 +412,10 @@ class TeaGuest:
                     self.name, text, message_id=message_id, task_id=task_id,
                 )
                 # message_end.data.text 是兜底字段（前端可以靠它做一次性渲染，不用拼 chunk）。
+                # P20：调用记录快照在 emit 之前冻结，与 finally 落盘同一份。
                 self._transport.emit_chahua(
                     ChahuaEventType.MESSAGE_END,
-                    {"text": text},
+                    {"text": text, **self._envelope_llm_records()},
                     status=STATUS_OK,
                     seq=msg.seq,
                 )
@@ -427,16 +428,44 @@ class TeaGuest:
             self._recorder.record_message_end(
                 message_id=message_id, status=status,
                 seq=msg.seq if msg is not None else None,
+                # P20：幂等 finalize —— message_end 已冻结则拿同一份；room.append 抛异常
+                # （没发 message_end）时这里是首次 finalize，只落盘。
+                llm_records=self._llm_records_snapshot(),
             )
             # P11 C4：无条件复原原 recorder —— 即便上面 record_message_end 走 NOOP 路径
             # 也保证 self._recorder 不会被永久落成 NOOP（下次 speak 起来走前台路径正常）。
             self._recorder = original_recorder
 
+    def _llm_records_snapshot(self) -> dict:
+        """P20：transport 调用记录快照；任何失败都退化成 ``{}``，永不影响发言。"""
+        try:
+            snap = self._transport.finalize_llm_records()
+        except Exception:
+            _log.warning("%s: finalize_llm_records failed", self.name, exc_info=True)
+            return {}
+        return snap if isinstance(snap, dict) else {}
+
+    def _envelope_llm_records(self) -> dict:
+        """P20：``message_end.data`` 附带的调用记录——**仅当本次发言真在落盘时**。
+
+        判据是 ``self._recorder.enabled``：bg run（``record_debug=False`` → NOOP_RECORDER）
+        与 ``[debug] enabled=false`` 的房间都不落盘，实时也不带，保「envelope == 磁盘」；
+        否则调试抽屉为 bg run 兜底建桩时会把后台 run 计进「本轮茶客调用」（P20「后台 run 不计」）。
+        成功 / 取消 / 失败三条路径共用这一个判据。
+        """
+        if not getattr(self._recorder, "enabled", False):
+            return {}
+        return self._llm_records_snapshot()
+
     def _emit_failure(self, status: str, error: str) -> None:
         """两条失败分支（cancelled / error）共用的 message_end emit。"""
         self._transport.emit_chahua(
             ChahuaEventType.MESSAGE_END,
-            {"partial_text": self._transport.partial_text, "error": error},
+            {
+                "partial_text": self._transport.partial_text,
+                "error": error,
+                **self._envelope_llm_records(),
+            },
             status=status,
         )
 

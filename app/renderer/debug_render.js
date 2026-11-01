@@ -22,6 +22,14 @@ import {
   appendLabeledPre,
   appendLabeledDisabled,
 } from "./debug_helpers.js";
+import {
+  summarizeLlmCalls,
+  describeSummary,
+  describeCall,
+  describeRetries,
+  describeCompaction,
+  CALL_UNIT_HINT,
+} from "./llm_calls_core.mjs";
 
 export function renderTurn(turnId, turn) {
   const section = document.createElement("section");
@@ -107,6 +115,10 @@ export function renderTurn(turnId, turn) {
       + "完整取证见 debug/turns.jsonl（本轮结束后下次切房即补全）";
     section.appendChild(note);
   }
+
+  // P20：本轮茶客调用合计（至少一条消息有记录才出现；完整性提示叠加）。
+  const llmTotals = renderTurnLlmTotals(turn);
+  if (llmTotals) section.appendChild(llmTotals);
 
   section.appendChild(renderCandidates(turn));
 
@@ -208,13 +220,17 @@ function renderMessage(messageId, msg) {
 
   const det = document.createElement("details");
   const sum = document.createElement("summary");
-  sum.textContent = "prompt / 工具 / 产物";
+  sum.textContent = msg.llm ? "prompt / 模型调用 / 工具 / 产物" : "prompt / 工具 / 产物";
   det.appendChild(sum);
 
   if (msg.speak_prompt === null) {
     appendLabeledDisabled(det, "Speak prompt");
   } else {
     appendLabeledPre(det, "Speak prompt", msg.speak_prompt);
+  }
+
+  if (msg.llm) {
+    det.appendChild(renderLlmCalls(msg.llm));
   }
 
   if (msg.tool_calls.size > 0) {
@@ -300,6 +316,88 @@ function renderTool(t) {
     li.appendChild(err);
   }
   return li;
+}
+
+// ── P20 茶客调用消耗 ────────────────────────────────────────────────
+// 口径全在 llm_calls_core.mjs（汇总 / 完整性 / 0 与未知），这里只拼 DOM。
+
+function appendNotes(parent, notes) {
+  for (const n of notes) {
+    const el = document.createElement("div");
+    el.className = "debug-llm-note";
+    el.textContent = n;
+    parent.appendChild(el);
+  }
+}
+
+function renderTurnLlmTotals(turn) {
+  const s = summarizeLlmCalls(turn.messages.values());
+  if (s.recordedMessages === 0) return null;
+  const { text, notes } = describeSummary(s);
+  const box = document.createElement("div");
+  box.className = "debug-turn-llm";
+  box.title = CALL_UNIT_HINT;
+  const line = document.createElement("div");
+  line.textContent = `本轮茶客调用：${text}`;
+  box.appendChild(line);
+  appendNotes(box, notes);
+  return box;
+}
+
+function renderLlmCalls(llm) {
+  const wrap = document.createElement("div");
+  wrap.className = "debug-llm";
+
+  const lab = document.createElement("div");
+  // 不用 .debug-pre-label：它 text-transform:uppercase，会把「5.35s」渲成「5.35S」。
+  lab.className = "debug-llm-label";
+  lab.title = CALL_UNIT_HINT;
+  const { text, notes } = describeSummary(summarizeLlmCalls([{ llm }]));
+  lab.textContent = `模型调用：${text}`;
+  wrap.appendChild(lab);
+  appendNotes(wrap, notes);
+
+  if (llm.calls.length > 0) {
+    const ul = document.createElement("ul");
+    ul.className = "debug-llm-calls";
+    llm.calls.forEach((c, i) => {
+      const li = document.createElement("li");
+      li.className = "debug-llm-call";
+      li.dataset.status = String(c.status || "");
+      const line = document.createElement("div");
+      line.textContent = describeCall(c, i + 1);
+      if (c.error_message) line.title = String(c.error_message);
+      li.appendChild(line);
+      const retries = describeRetries(c.retries);
+      if (retries) {
+        const r = document.createElement("div");
+        r.className = "debug-llm-retries";
+        r.textContent = retries;
+        li.appendChild(r);
+      }
+      ul.appendChild(li);
+    });
+    wrap.appendChild(ul);
+  }
+
+  if (llm.compactions.length > 0) {
+    const clab = document.createElement("div");
+    clab.className = "debug-llm-label";
+    clab.textContent = `上下文压缩（${llm.compactions.length}）`;
+    wrap.appendChild(clab);
+    const ul = document.createElement("ul");
+    ul.className = "debug-llm-calls";
+    for (const c of llm.compactions) {
+      const li = document.createElement("li");
+      li.className = "debug-llm-call";
+      li.dataset.status = String(c.status || "");
+      li.textContent = describeCompaction(c);
+      if (c.detail) li.title = String(c.detail);
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+  }
+  return wrap;
 }
 
 function safeStringify(v) {

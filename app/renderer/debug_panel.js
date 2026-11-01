@@ -31,6 +31,7 @@
 
 import { EventType, Inbound, ScoreKind, Status } from "./events.js";
 import { renderTurn } from "./debug_render.js";
+import { normalizeLlmRecords } from "./llm_calls_core.mjs";
 import {
   formatTs,
   scoringPathLabel,
@@ -54,6 +55,9 @@ const MAX_TURNS_IN_MEMORY = 50;
 //     artifact_paths: Set<string>,
 //     status: "running" | "ok" | "cancelled" | "error",
 //     seq: number | null,
+//     // P20：模型调用记录。undefined = 进行中（message_end 未到，静默）；
+//     // null = 无记录（旧记录 / 记录失败）；否则为 normalizeLlmRecords() 结果。
+//     llm?: {calls, compactions, truncated} | null,
 //   }>,
 //   task_id: string | null,           // 从 message_start.data.task_id 推断
 // }>
@@ -276,6 +280,8 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
     const { turnId, msg } = found;
     msg.status = env.status || Status.OK;
     msg.seq = typeof env.seq === "number" ? env.seq : null;
+    // P20：message_end.data 与 turns.jsonl 同一份快照（docs/P20 §5）。
+    msg.llm = normalizeLlmRecords(env.data);
     rerenderTurn(turnId);
   }
 
@@ -541,6 +547,8 @@ export function createDebugPanel({ panelEl, bodyEl, clearBtnEl, sendInbound }) {
         ),
         status: m.status || Status.OK,
         seq: typeof m.seq === "number" ? m.seq : null,
+        // P20：P20 之前的旧记录缺 llm_calls 键 → null（无记录）。
+        llm: normalizeLlmRecords(m),
       });
     }
     return record;

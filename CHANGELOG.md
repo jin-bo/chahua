@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### Added
+- **P20 茶客调用消耗取证**（2026-10-31，详见 [`docs/P20-茶客调用消耗取证.md`](docs/P20-茶客调用消耗取证.md)）：调试抽屉每条茶客消息下新增「模型调用（N）」——逐次显示用时、首字延迟、输入（其中缓存读）、输出（其中推理）、结束原因、重试与上下文压缩；turn 头部加「本轮茶客调用」合计。数据来自 agentao 0.5.18 的 `LLM_CALL_COMPLETED` / `LLM_RETRY` / `COMPACTION_SETTLED`，由 transport 缓冲、幂等 finalize 成快照，`message_end.data` 与 `debug/turns.jsonl` 同一份。**计量单位是一次主循环模型调用（含内部重试），不是 HTTP 请求**；只统计茶客 transport（打分 / 摘要 / 压缩摘要 / 后台 run 不计）；缓存 / 推理按「其中」显示不重复相加；未知、截断、旧记录混合都显式提示，不换算费用。不 bump `schema_version`，旧记录静默跳过。测试 1582 → 1607。
+
 ### Changed
 - **Agentao 0.5.3 → 0.5.18**（2026-10-31）：仍在 `<0.6` 区间，`pyproject.toml` 下限抬到 `>=0.5.18`（= 实测版本），`uv.lock` 同步。chahua 侧零代码改动——上游区间内的破坏性变更（0.5.13 `create_agent_tools`/`AgentToolWrapper` 六回调移除、0.5.4 `MAX_TOTAL_RETRY_SECONDS` 移除、0.5.12 `add_event_observer` 弃用、0.5.14 项目级 `.agentao/sandbox.json` 被忽略）chahua 均未使用。**验收**：全量 1582 绿（`-W error::DeprecationWarning:agentao` 无命中）；sidecar 冒烟启动 + stdin EOF 优雅关停正常。**未验**：真实 LLM 往返、Electron 桌面壳、`build:python` + `check:bundle` 出包（发版时按 P19 流程跑）。
 

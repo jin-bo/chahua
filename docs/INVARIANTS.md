@@ -232,3 +232,17 @@
 - **删旧 bundle 之前先验锁**。`uv lock --check` + 读锁定版本排在 `rmrf(BUNDLE_ROOT)` 之前 —— 否则 lock 与 `pyproject.toml` 不一致时，旧 bundle 已被删而新的装不出来，`build:mac` 连回退都没有。
 - **出包前过 `check:bundle` 门，三条机械校验**：① `agentaoSource == "lock"`（联调产物不得发布）；② manifest `agentaoVersion` == `uv.lock` 锁定版；③ manifest `chahuaVersion` 与 `app/package.json` 同版（`0.1.12-dev` ↔ `0.1.12.dev0` 按 `{core, dev}` 归一化比，**只去一半后缀也要拦**）。挂在 `build:mac` / `build:mac:arm64` / `build:mac:x64` / `build:win` 四个发布脚本上；**`build:dir` 不挡**（本地联调要能一路走到可运行的 .app）。
 - **`mcp_thread.py` 的存在理由在 0.5.x 已部分消失，但 shim 暂留**。agentao 0.5.x 上游 `McpClientManager` 自带 loop 线程、`McpClient` 自管 owner task，故 chahua 的 owner task 套着上游的 —— 接口面兼容，风险在行为，由 `tests/test_mcp_thread.py` 的真 `McpClient` + 本地 stdio server 用例钉住（连接调用 / 关停无残留线程无 cancel-scope 错 / 连接失败路径）。退役见 P19 §5。
+
+### 9.x P20 茶客调用消耗取证
+
+> 设计见 `docs/P20-茶客调用消耗取证.md`。纯取证增量：不改调度、不改 transcript、不 bump 任何 `schema_version`。
+
+- **统计范围 = 茶客 transport 上的主循环调用；计量单位是一次 `chat_stream`（含其内部重试），不是 HTTP 请求**。agentao 把重试循环放在 `LLMClient.chat_stream` 内部、`run_llm_call` 用 `LLM_CALL_COMPLETED` 包住整次 `chat_stream`，故 `duration_ms` 含重试与退避、usage 只来自最终响应。打分 / 摘要（直接调 `LLMClient`）、agentao 内部压缩摘要（走 `llm.chat()` 不发事件）、后台 run（`NOOP_RECORDER`）一律不计；UI 文案只用「茶客调用」，绝不叫房间消耗。
+- **缓存 / 推理是「其中」不是加项**。`cache_read/creation_tokens` ⊂ `prompt_tokens`、`reasoning_tokens` ⊂ `completion_tokens`（agentao `llm/_usage.py` 模块注释）；合计只加输入 / 输出两项。
+- **上游 `0` 不当确认零展示；`null` 与缺键都算未知**。上游对「未声明」与「真为 0」都给 `0`，故缓存 / 推理为 0 时不显示括注。合计时输入、输出**各自**判断完整性，全部未知显示「未提供」绝不显示 0；截断（`llm_records_truncated`）与旧记录混合（消息缺 `llm_calls` 键）都要显式提示——**部分数据绝不显示成完整合计**。口径单点在 `app/renderer/llm_calls_core.mjs::summarizeLlmCalls`，DOM 层不另算。不换算费用。
+- **单一缓冲在 transport，经幂等 `finalize_llm_records()` 冻结成快照**。`TeaGuest.speak` 成功路径与 `_emit_failure` 在发 `message_end` **之前** finalize，外层 finally 再调一次拿**同一份**给 `record_message_end`——两端逐字节一致。取消占位（`{"status":"cancelled","retries":[…]}`）只在首次 finalize 生成；冻结后到达的事件丢弃；进 `bind()` 解冻清零、出 `bind()` 不清；`bind()` 外（无 `message_id`）事件丢弃。占位只是兜底：真栈在退避期取消时上游会发 error COMPLETED 吸收挂起重试（`tests/test_agentao_contract.py` 真依赖用例钉住「只记一次」）。
+- **`message_end` 只在本次发言真落盘时才带调用记录**：判据 `TeaGuest._recorder.enabled`，成功 / 取消 / 失败三路共用 `_envelope_llm_records()`。bg run（`NOOP_RECORDER`）与 `[debug] enabled=false` 的房间都不带——否则调试抽屉为 bg run 的 `message_end` 兜底建桩，会把后台 run 计进「本轮茶客调用」，而盘上无记录。
+- **缓冲加锁**：`on_event` 跑在 agentao `arun` 的线程池工作线程，`finalize` / `reset` 跑在事件循环；`LlmCallRecords` 用 `threading.Lock` 包住三者，防「检查冻结 → 追加」与「消费挂起重试 → 冻结」交错导致重复或漏记。
+- **白名单抽取 + 类型清洗 + 单消息上限**（64 调用 / 每调用 8 重试 / 8 压缩，任一超限置 `llm_records_truncated`）。上游新增键不自动透传；bool 不当 int；非有限数（NaN / inf）落 `None`（否则写出非法 JSON 整帧丢失）；字符串一律截 `MAX_STR_LEN=300`。合计里的缓存 / 推理只随父项（输入 / 输出已知的调用）一起计。
+- **已知缺口：取消后晚到的事件可能混进下一条消息**。agentao `arun` 被取消时最多等工作线程清理 `_ARUN_CANCEL_CLEANUP_TIMEOUT_S=5s`，超时则旧回合在后台续跑；其晚到的 `LLM_*` 事件会落进同茶客下一次 `bind()` 的缓冲。影响面窄（旧回合未完时同 agent 的新回合会被拒 `TurnInProgressError`），与 P10 工具归属的同类竞态一并接受；根治需上游事件携带回合标识。
+- **`llm_calls` 只由 transport 快照写入，缺键 = 无记录**。`record_message_start` 不初始化；正常发言的快照必带 `llm_calls`（可为 `[]` = 确认 0 次），快照失败（speak 退化成 `{}`）或调用方没传快照则缺键，与实时 `message_end` 同记「无记录」，绝不冒充「0 次调用」；前端实时 `undefined`=进行中静默、`null`=无记录。**记录失败永不影响发言**（transport `_handle` 与 `TeaGuest._llm_records_snapshot` 都 try/except 到底，后者退化成 `{}`）。
